@@ -1,5 +1,6 @@
 <script>
   import { colors, skillTypeColor, skillTypeLabel } from "./colors.js";
+  import { detectCurrency, setPreferredCurrency } from "./currency.js";
   import {
     listSkills,
     getSkillManifest,
@@ -23,11 +24,26 @@
     // { key: "type4", label: "Type 4" },
   ];
 
+  // Currencies whose minor units are not 2. Mirrors the gateway's fx module;
+  // display_price is already quantized server-side — this only affects how
+  // many digits we *show*.
+  const MINOR_DIGITS = {
+    // zero-decimal
+    BIF: 0, CLP: 0, DJF: 0, GNF: 0, IDR: 0, ISK: 0, JPY: 0, KMF: 0, KRW: 0,
+    LAK: 0, MGA: 0, PYG: 0, RWF: 0, UGX: 0, UYI: 0, VND: 0, VUV: 0, XAF: 0,
+    XOF: 0, XPF: 0,
+    // three-decimal
+    BHD: 3, IQD: 3, JOD: 3, KWD: 3, LYD: 3, OMR: 3, TND: 3,
+  };
+
+  const DISPLAY_CURRENCIES = ["USD", "HKD", "CNY", "EUR", "GBP", "JPY", "SGD"];
+
   // ── State ────────────────────────────────────────────────────
   let marketplaceSkills = $state([]);
   let robotSkills = $state([]);
   let loading = $state(true);
   let error = $state("");
+  let displayCurrency = $state(detectCurrency());
 
   // Search & filter
   let searchQuery = $state("");
@@ -86,6 +102,12 @@
 
   async function refreshAll() {
     await Promise.all([fetchMarketplace(), fetchRobotSkills()]);
+  }
+
+  async function onCurrencyChange(code) {
+    setPreferredCurrency(code);
+    displayCurrency = code;
+    await fetchMarketplace();
   }
 
   $effect(() => { refreshAll(); });
@@ -201,26 +223,46 @@
    */
 
   /**
-   * Placeholder: format a price for display.
-   * @param {{ amount: number, currency: string }} price
-   * @returns {string} e.g. "$4.99"
+   * Format a price for display, e.g. "$4.99", "HK$39.13", "¥500".
+   * Uses the browser's Intl number formatting (correct symbol + grouping +
+   * decimal places for the currency); falls back to a code prefix if the
+   * currency code is unknown to the runtime.
    */
   function formatPrice(price) {
     if (!price) return null;
-    const symbol = price.currency === "USD" ? "$" : price.currency;
-    return `${symbol}${price.amount.toFixed(2)}`;
+    let amount = price.amount;
+    if (typeof price.amount === "string") amount = parseFloat(price.amount);
+    if (Number.isNaN(amount)) return price.currency || null;
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: "currency",
+        currency: price.currency,
+        minimumFractionDigits: MINOR_DIGITS[price.currency] ?? 2,
+        maximumFractionDigits: MINOR_DIGITS[price.currency] ?? 2,
+      }).format(amount);
+    } catch {
+      // Unknown currency code — never let formatting break the store.
+      const prefix = price.currency === "USD" ? "$" : `${price.currency} `;
+      return `${prefix}${amount.toFixed(2)}`;
+    }
   }
 
   // ── Pricing from the gateway ──────────────────────────────────
-  // Each skill now carries price: { amount: 4.99, currency: "USD" }.
-  // amount <= 0 means free.
+  // Canonical:  price: { amount, currency }   (what is charged)
+  // Display:    display_price: { amount, currency }  (quote, optional)
+  // display_price wins; when absent (old gateway, unknown currency, free
+  // skill) we fall back to the canonical price — today's behaviour.
   function skillPrice(skill) {
-    return skill?.price ?? null;
+    return skill?.display_price ?? skill?.price ?? null;
   }
   function priceLabel(skill) {
     const p = skillPrice(skill);
     if (!p || p.amount <= 0) return "Free";
     return formatPrice(p);
+  }
+
+  function canonicalCurrency(skill) {
+    return skill?.price?.currency ?? "USD";
   }
 
   // ── Checkout state (link-out flow — card entry happens on HTTPS) ─
@@ -345,7 +387,19 @@
         </svg>
       </button>
     {:else}
-      <div style="width:28px"></div>
+      <div class="mp-header-spacer"></div>
+    {/if}
+    {#if !detailSkill}
+      <select
+        class="mp-currency-select"
+        value={displayCurrency}
+        onchange={(event) => onCurrencyChange(event.currentTarget.value)}
+        aria-label="Display currency"
+      >
+        {#each DISPLAY_CURRENCIES as currency}
+          <option value={currency}>{currency}</option>
+        {/each}
+      </select>
     {/if}
   </header>
 
@@ -640,6 +694,10 @@
           </div>
           <span class="pay-order-amt">{priceLabel(checkoutSkill)}</span>
         </div>
+        <p class="mp-pay-note">
+          ≈ {priceLabel(checkoutSkill)} — charged in {canonicalCurrency(checkoutSkill)}.
+          Final amount shown by your bank may differ slightly.
+        </p>
 
         {#if checkoutStage === "creating"}
           <div class="pay-await">
@@ -717,6 +775,21 @@
     border-radius: 8px;
   }
   .refresh-btn:active { background: rgba(0,0,0,0.08); }
+
+  .mp-header-spacer { width: 28px; }
+
+  .mp-currency-select {
+    min-width: 62px;
+    padding: 5px 4px;
+    border: 1px solid rgba(0, 0, 0, 0.3);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.65);
+    color: #000;
+    font-size: 0.72rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .mp-currency-select:focus { outline: 2px solid rgba(0, 0, 0, 0.45); }
 
   /* ── Search ────────────────────────────── */
   .mp-search-wrap {
@@ -1229,6 +1302,7 @@
   .pay-order-name { font-size: 0.9rem; font-weight: 700; color: #000; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pay-order-type { font-size: 0.72rem; color: #969494; }
   .pay-order-amt { font-size: 1.05rem; font-weight: 800; color: #000; }
+  .mp-pay-note { font-size: 0.72rem; color: #969494; margin: -8px 0 12px; line-height: 1.4; }
 
   .pay-methods { display: flex; gap: 8px; margin-bottom: 14px; }
   .pay-method {

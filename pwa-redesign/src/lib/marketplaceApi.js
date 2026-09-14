@@ -6,6 +6,8 @@
  * APP_CHAT_SERVER_IP:APP_CHAT_SERVER_PORT on its STA interface.
  */
 
+import { detectCurrency } from "./currency.js";
+
 let config = null;
 let configPromise = null;
 
@@ -37,20 +39,23 @@ async function getConfig() {
 
 /**
  * List all skills available in the marketplace.
- * GET /v1/marketplace/skills  →  GET /v1/skills
+ * GET /v1/marketplace/skills?currency=…  →  GET /v1/skills?currency=…
  */
 export async function listSkills() {
-  const res = await fetch("/v1/marketplace/skills");
+  const qs = `?currency=${encodeURIComponent(detectCurrency())}`;
+  const res = await fetch(`/v1/marketplace/skills${qs}`);
   if (!res.ok) throw new Error(`Failed to list skills: ${res.status}`);
   return res.json();
 }
 
 /**
  * Get details on a single skill.
- * GET /v1/marketplace/skills/{skillId}  →  GET /v1/skills/{skillId}
+ * GET /v1/marketplace/skills/{skillId}?currency=…
+ *   → GET /v1/skills/{skillId}?currency=…
  */
 export async function getSkill(skillId) {
-  const res = await fetch(`/v1/marketplace/skills/${encodeURIComponent(skillId)}`);
+  const qs = `?currency=${encodeURIComponent(detectCurrency())}`;
+  const res = await fetch(`/v1/marketplace/skills/${encodeURIComponent(skillId)}${qs}`);
   if (!res.ok) throw new Error(`Failed to get skill: ${res.status}`);
   return res.json();
 }
