@@ -15,20 +15,30 @@
     { id: 'rr', label: 'RR' },
   ];
 
-  // Servo index base for each leg: FL=1, FR=4, RL=7, RR=10
-  const legServoBase = { fl: 0, fr: 3, rl: 6, rr: 9 };
+  // Servo index base (0-based into offsets[0..11]) for each leg.
+  //
+  // THESE MUST MATCH THE FIRMWARE. robot.h / stanford_kinematics.h lay the
+  // twelve servos out as FR=1-3, FL=4-6, RR=7-9, RL=10-12, so offsets[0..2]
+  // are the FRONT RIGHT leg. This map used to read {fl:0, fr:3, rl:6, rr:9},
+  // which labelled each leg's sliders with the neighbouring leg's name -
+  // nudging "FL" moved the front right leg. On a symmetric stance that is
+  // nearly invisible, and it has already been misread once as evidence that
+  // the servo loom was mirrored left/right. Fix the label here, not the loom.
+  const legServoBase = { fr: 0, fl: 3, rr: 6, rl: 9 };
 
   let calValues = $state({
-    fl: { shoulder: 0, hip: 0, knee: 0 },
-    fr: { shoulder: 0, hip: 0, knee: 0 },
-    rl: { shoulder: 0, hip: 0, knee: 0 },
-    rr: { shoulder: 0, hip: 0, knee: 0 },
+    fl: { abd: 0, hip: 0, knee: 0 },
+    fr: { abd: 0, hip: 0, knee: 0 },
+    rl: { abd: 0, hip: 0, knee: 0 },
+    rr: { abd: 0, hip: 0, knee: 0 },
   });
 
+  // Joint order within a leg, matching the firmware: base+1 = abduction
+  // (hip yaw), base+2 = hip, base+3 = knee.
   const calProps = [
-    { id: 'shoulder', label: 'Shoulder', min: -50, max: 50, step: 1 },
-    { id: 'hip', label: 'Hip', min: -50, max: 50, step: 1 },
-    { id: 'knee', label: 'Knee', min: -50, max: 50, step: 1 },
+    { id: 'abd',  label: 'Abduction', min: -50, max: 50, step: 1 },
+    { id: 'hip',  label: 'Hip',       min: -50, max: 50, step: 1 },
+    { id: 'knee', label: 'Knee',      min: -50, max: 50, step: 1 },
   ];
 
   let currentLegValues = $derived(selectedLeg ? calValues[selectedLeg] : null);
@@ -42,10 +52,10 @@
         const data = await res.json();
         if (data.offsets && data.offsets.length === 12) {
           calValues = {
-            fl: { shoulder: data.offsets[0] || 0, hip: data.offsets[1] || 0, knee: data.offsets[2] || 0 },
-            fr: { shoulder: data.offsets[3] || 0, hip: data.offsets[4] || 0, knee: data.offsets[5] || 0 },
-            rl: { shoulder: data.offsets[6] || 0, hip: data.offsets[7] || 0, knee: data.offsets[8] || 0 },
-            rr: { shoulder: data.offsets[9] || 0, hip: data.offsets[10] || 0, knee: data.offsets[11] || 0 },
+            fr: { abd: data.offsets[0] || 0, hip: data.offsets[1] || 0, knee: data.offsets[2] || 0 },
+            fl: { abd: data.offsets[3] || 0, hip: data.offsets[4] || 0, knee: data.offsets[5] || 0 },
+            rr: { abd: data.offsets[6] || 0, hip: data.offsets[7] || 0, knee: data.offsets[8] || 0 },
+            rl: { abd: data.offsets[9] || 0, hip: data.offsets[10] || 0, knee: data.offsets[11] || 0 },
           };
         }
       }
@@ -69,10 +79,10 @@
     try {
       await fetch("/v1/robot/calibrate/reset", { method: "POST" });
       calValues = {
-        fl: { shoulder: 0, hip: 0, knee: 0 },
-        fr: { shoulder: 0, hip: 0, knee: 0 },
-        rl: { shoulder: 0, hip: 0, knee: 0 },
-        rr: { shoulder: 0, hip: 0, knee: 0 },
+        fl: { abd: 0, hip: 0, knee: 0 },
+        fr: { abd: 0, hip: 0, knee: 0 },
+        rl: { abd: 0, hip: 0, knee: 0 },
+        rr: { abd: 0, hip: 0, knee: 0 },
       };
     } catch { /* ignore */ }
   }
@@ -87,7 +97,7 @@
 
   function resetAll() {
     if (!selectedLeg) return;
-    calValues[selectedLeg] = { shoulder: 0, hip: 0, knee: 0 };
+    calValues[selectedLeg] = { abd: 0, hip: 0, knee: 0 };
     // Also send reset to robot for this leg's servos
     const base = legServoBase[selectedLeg];
     for (let i = 0; i < 3; i++) {
