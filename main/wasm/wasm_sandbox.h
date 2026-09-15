@@ -104,6 +104,69 @@ bool was_cancelled();
  */
 bool is_running();
 
+// ═══════════════════════════════════════════════════════════════
+//  ABI v3-v4 support: the per-run clock, skill parameters, and the
+//  tick loop. Everything here is per-run state, cleared at teardown.
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * @brief Milliseconds since this skill run started.
+ *
+ * Per-run, not since boot, so a skill measuring a frame does not have to
+ * subtract a boot time it has no way to observe. The origin is set just
+ * before on_start() is called.
+ */
+std::uint32_t skill_millis();
+
+/**
+ * @brief Supply the parameters for the next skill run.
+ *
+ * Format is a flat, comma- or semicolon-separated list of `name=value` pairs,
+ * e.g. "speed=0.4;repeats=3". Values are parsed as floats; mpx_param_i()
+ * truncates. Deliberately not JSON: this crosses an HTTP handler that already
+ * hand-parses its body, and a parameter list is not worth a parser dependency.
+ *
+ * Cleared automatically at the end of each run, so parameters never leak from
+ * one skill into the next.
+ *
+ * @param kv  The parameter string, or nullptr to clear.
+ */
+void set_params(const char *kv);
+
+/**
+ * @brief Look up one parameter supplied by set_params().
+ * @return true when the name was present; *out is only written then.
+ */
+bool param_get(const char *name, float *out);
+
+/**
+ * @brief Ask for on_tick() to be called at this period in ms.
+ *
+ * Clamped to 10..1000. 0 or negative disables it. Called from inside
+ * on_start(); the loop starts once on_start() returns cleanly, and only if
+ * the module exports on_tick - a missing export is a build mistake, and is
+ * logged as one rather than treated as a runtime error.
+ */
+void tick_every(int period_ms);
+
+/** Stop the tick loop after the current tick returns. */
+void tick_stop();
+
+/** The current tick period in ms, or 0 if the loop is not running. */
+int tick_period();
+
+/**
+ * @brief Cancel the run AND stop the tick loop.
+ *
+ * Distinct from the watchdog's was_cancelled(): this is a deliberate stop
+ * request, and it aborts long host calls so the skill ends promptly rather
+ * than at the end of whatever delay it was in.
+ */
+void request_stop();
+
+/** Has a stop been requested? */
+bool stopping();
+
 /**
  * @brief Destroy the WAMR runtime and free all resources.
  */

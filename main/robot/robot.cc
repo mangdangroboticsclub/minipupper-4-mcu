@@ -6,6 +6,7 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"   /* esp_rom_delay_us - sub-tick wait in flush() */
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,14 +14,45 @@
 #include "nvs.h"
 
 extern "C" {
-#include "SCServo.h"
+#include "robot/driver_board.h"
 }
 
+#include "robot/board_config.h"
 #include "robot/stanford_gait.h"
 #include "robot/stanford_kinematics.h"
 #include "wasm/wasm_sandbox.h"
 
 static const char *TAG = "robot";
+
+// Does a running skill currently own the twelve goal positions? Defined in
+// wasm_host_functions.cc, inside the GLOBAL namespace sdk.
+//
+// Declared out here on purpose: written inside `namespace robot`, this would
+// have declared robot::sdk::control_owner_is_pose() - a different function
+// that nothing defines, and the link fails with a message that points at the
+// call site rather than at the declaration.
+namespace sdk { bool control_owner_is_pose(); }
+
+/* Ticks per degree, from the boards' OWN range - not a constant.
+ *
+ * This file used SERVO_DEG_TO_RAW = 1023/180, compiled in, because the Feetech
+ * SCSCL servos it drove were 0-180 deg over the raw range 0..1023.
+ *
+ * The AT32 driver boards are not. They have a range_position_deg of their own,
+ * defaulting to 310 deg and trimable by the reference firmware's `guard`
+ * command, and they keep it in THEIR flash, where it outlives any amount of
+ * ESP reflashing. So the range is not 180 by decree and it is not 270 either:
+ * it is whatever the boards say, which driver_board_probe_scale() asks at boot.
+ *
+ * 10240/scale_dd rather than 1023/deg: the same formula the reference
+ * firmware uses, so the two agree to the tick and not merely to the nearest
+ * 0.1%. Getting this wrong does not stop the robot walking - it overdrives
+ * every joint by the ratio, which is exactly the kind of fault that reads as
+ * "the new servos are weaker" instead of "the scale is wrong". */
+static inline float servo_ticks_per_deg()
+{
+    return 10240.0f / driver_board_get_scale_dd();
+}
 
 namespace robot {
 namespace {
@@ -41,11 +73,127 @@ float s_offset[13] = {};
 uint16_t s_goal_pos[13]   = {};
 uint16_t s_goal_speed[13] = {};
 
+/* Per-servo current limit in mA, sent in every position frame. Seeded to
+ * SERVO_CURRENT_MAX_MA in init() and persisted to NVS from there on.
+ *
+ * This is the knob that actually does something on this hardware: the driver
+ * boards take a current cap, not a speed. Lowering it is how you bring a new
+ * or freshly-calibrated robot up without a mis-signed joint tearing its leg. */
+uint16_t s_current_ma[13] = {};
+
+/* Additive per-servo trim in DEGREES, applied to the outgoing frame in flush()
+ * and never written back into s_goal_pos - see set_overlay(). */
+float s_overlay[13] = {};
+
+/* The calibration this chassis is built to, in degrees, applied inside the IK.
+ *
+ * Index 1..12 is FR hip/shoulder/knee, FL, RR, RL - the same order as
+ * s_offset[] below and as kFactoryOffset in the reference firmware.
+ *
+ * ALL ZERO, AND THAT MEANS UNCALIBRATED - not "centred". The Mini Pupper 2
+ * numbers that used to live here were measured against a 180 deg servo scale;
+ * the driver boards use their own range, so the same degree value is worth a
+ * different number of counts and the old table would place every joint
+ * somewhere new. There is nothing to carry over, so nothing is carried: put
+ * the measured values here once the robot is on the bench and bump kCalSeed.
+ *
+ * Compiled in rather than left to NVS because every other route to getting
+ * twelve numbers onto the robot has a way to silently not happen: an NVS
+ * namespace that does not match, a web page whose writes never reached a
+ * servo, a script against the wrong address. A table in the firmware is true
+ * the moment it boots. */
+constexpr float kFactoryOffset[13] = {
+    0.0f,                                  /* index 0 unused */
+    0.0f, 0.0f, 0.0f,                      /* FR hip, shoulder, knee */
+    0.0f, 0.0f, 0.0f,                      /* FL */
+    0.0f, 0.0f, 0.0f,                      /* RR */
+    0.0f, 0.0f, 0.0f,                      /* RL */
+};
+constexpr int32_t kCalSeed = 1;
+
+/* ── Servo bus ownership ──────────────────────────────────────
+ * While the bus belongs to anything other than the gait, flush() holds the last
+ * pose instead of writing, so nothing fights over the SPI transactions. Two
+ * owners exist and must not steal from each other: the Servo Studio console
+ * (a human) and a WASM skill doing low-level control. */
+enum : int { BUS_FREE = 0, BUS_STUDIO = 1, BUS_SKILL = 2 };
+volatile int s_bus_owner = BUS_FREE;
+
 // ── Sync‑write ID list for all 12 servos ─────────────────────
-const uint8_t s_sync_ids[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+/* No sync-write id list here any more. The SCSCL build needed the twelve servo
+ * ids to build a SyncWritePos broadcast out of them; the driver boards are
+ * selected by chip select from the board index instead, so there is no id list
+ * to keep in step with the wiring - see driver_board_sync_write(). */
 
 // ── Gait task handle ─────────────────────────────────────────
 TaskHandle_t s_gait_task_handle = nullptr;
+
+/* Wake the gait task immediately instead of letting it sit out its idle delay.
+ * Every path that changes what the gait should be doing should call this; the
+ * cost of forgetting is a few milliseconds of extra latency, not a hang. */
+inline void wake_gait()
+{
+    if (s_gait_task_handle) {
+        xTaskNotifyGive(s_gait_task_handle);
+    }
+}
+
+/* ── The one gait name table ────────────────────────────────────────────
+ *
+ * GaitCmd::BodyAttitude is deliberately absent: it is set through
+ * set_body_attitude(), not by name, and letting a caller send it directly
+ * would put the robot into a pose-hold state that nothing asked for. */
+struct GaitName { const char *name; GaitCmd cmd; };
+
+const GaitName GAIT_NAMES[] = {
+    { "none",         GaitCmd::None },
+    { "init",         GaitCmd::Init },
+    { "step",         GaitCmd::Step },
+    { "roll",         GaitCmd::Roll },
+    { "pitch",        GaitCmd::Pitch },
+    { "stretch",      GaitCmd::Stretch },
+    { "advance",      GaitCmd::Advance },
+    { "back",         GaitCmd::Back },
+    { "left",         GaitCmd::Left },
+    { "right",        GaitCmd::Right },
+    { "turnL",        GaitCmd::TurnL },
+    { "turnR",        GaitCmd::TurnR },
+    { "twerk",        GaitCmd::Twerk },
+    { "jump",         GaitCmd::Jump },
+    { "jumpfwd",      GaitCmd::JumpFwd },
+    { "testspeed",    GaitCmd::TestSpeed },
+    { "lookup",       GaitCmd::LookUp },
+    { "lookdown",     GaitCmd::LookDown },
+    { "lookleft",     GaitCmd::LookLeft },
+    { "lookright",    GaitCmd::LookRight },
+    { "lookul",       GaitCmd::LookUpperLeft },
+    { "lookur",       GaitCmd::LookUpperRight },
+    { "lookll",       GaitCmd::LookLowerLeft },
+    { "looklr",       GaitCmd::LookLowerRight },
+    { "flegL",        GaitCmd::ForelegLiftL },
+    { "flegR",        GaitCmd::ForelegLiftR },
+    { "blegL",        GaitCmd::BacklegLiftL },
+    { "blegR",        GaitCmd::BacklegLiftR },
+    { "heightup",     GaitCmd::HeightUp },
+    { "heightdown",   GaitCmd::HeightDown },
+    { "balance",      GaitCmd::Balance },
+    { "bowback",      GaitCmd::BowBack },
+    { "bodycycle",    GaitCmd::BodyCycle },
+    { "headellipse",  GaitCmd::HeadEllipse },
+    { "moveLF",       GaitCmd::MoveLeftFront },
+    { "moveRF",       GaitCmd::MoveRightFront },
+    { "moveLB",       GaitCmd::MoveLeftBack },
+    { "moveRB",       GaitCmd::MoveRightBack },
+    { "stanford",     GaitCmd::StanfordWalk },
+    { "frontkick",    GaitCmd::FrontKick },
+    { "wiggle",       GaitCmd::Wiggle },
+    { "buttshrug",    GaitCmd::ButtShrug },
+    { "wiggleL",      GaitCmd::WiggleLeft },
+    { "wiggleR",      GaitCmd::WiggleRight },
+    { "buttshrugL",   GaitCmd::ButtShrugLeft },
+    { "buttshrugR",   GaitCmd::ButtShrugRight },
+};
+constexpr int GAIT_NAME_COUNT = sizeof(GAIT_NAMES) / sizeof(GAIT_NAMES[0]);
 
 // ── Web joystick state (written by joy_input, read by gait task) ─
 // Values -1..1 (already clamped).  s_js_active means the Stanford
@@ -312,6 +460,55 @@ static void sg_park(float h)
     s_sg_valid = false;
 }
 
+/* Pull servo offsets out of the reference firmware's NVS namespace, once.
+ *
+ * Same keys, same float-blob format, same NVS partition - but that firmware
+ * opens the namespace "parameter" and this one opens "robot", so a calibration
+ * done there survives a reflash physically and is then invisible. Every offset
+ * reads back as 0.0 and the robot stands visibly crooked, which looks like the
+ * flash erased it. It did not; nobody was looking in the right place.
+ *
+ * Runs only when this namespace has nothing: any non-zero offset here means a
+ * calibration was done on THIS firmware, and overwriting that with an older
+ * robot's numbers would be worse than doing nothing.
+ *
+ * Note the offsets are in degrees and are applied by the IK, so they are
+ * scale-relative by nature - values from a robot on a different servo range
+ * will not reproduce the pose they came from. Treat an import as a starting
+ * point to be re-measured, never as a calibrated stance. */
+static void import_legacy_offsets()
+{
+    bool have_local = false;
+    for (int i = 1; i <= 12 && !have_local; ++i) {
+        if (s_offset[i] != 0.0f) have_local = true;
+    }
+    if (have_local) return;
+
+    nvs_handle_t old = 0;
+    if (nvs_open("parameter", NVS_READONLY, &old) != ESP_OK) return;
+
+    int found = 0;
+    for (int i = 1; i <= 12; ++i) {
+        char key[16];
+        std::snprintf(key, sizeof(key), "offset%d", i);
+        float v = 0.0f;
+        size_t sz = sizeof(v);
+        if (nvs_get_blob(old, key, &v, &sz) == ESP_OK && sz == sizeof(v)) {
+            s_offset[i] = v;
+            nvs_put_float(key, v);   // into THIS namespace, so it sticks
+            ++found;
+        }
+    }
+    nvs_close(old);
+
+    if (found) {
+        ESP_LOGW(TAG, "Imported %d/12 servo offsets from the reference firmware's "
+                      "NVS namespace. They were measured on a different servo "
+                      "range - re-calibrate before running anything energetic.",
+                 found);
+    }
+}
+
 }  // anonymous namespace
 
 // Forward declaration of gait task (defined at end of file)
@@ -333,28 +530,86 @@ bool init()
         s_nvs = 0;
     }
 
-    // ── Enable servo power ──────────────────────────────────────
+    // ── Servo rail ──────────────────────────────────────────────
+    // CN3..CN6 are wired straight to Vbat+, so SERVO_POWER_PIN is GPIO_NUM_NC
+    // and there is nothing to raise. The delay is kept either way: on a cold
+    // boot the AT32 driver boards need a moment on their own rail before they
+    // will answer, whether that rail was just switched on or was live before
+    // the ESP32 was.
+#if SERVO_HAS_POWER_EN
     gpio_set_direction(static_cast<gpio_num_t>(SERVO_POWER_PIN), GPIO_MODE_OUTPUT);
     gpio_set_level(static_cast<gpio_num_t>(SERVO_POWER_PIN), 1);
-    vTaskDelay(pdMS_TO_TICKS(1000));
     ESP_LOGI(TAG, "Servo power enabled (GPIO%d)", SERVO_POWER_PIN);
+#else
+    ESP_LOGI(TAG, "Servo rail is always on (no power-enable GPIO)");
+#endif
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
-    // ── Initialise UART for SCSCL servos ────────────────────────
-    // UART_NUM_1 (UART1), TX=GPIO4, RX=GPIO5, no RTS, 1 Mbaud
-    ESP_LOGI(TAG, "Initialising SCSCL bus on UART1 (TX=%d, RX=%d, %d baud)...",
-             SERVO_TX_PIN, SERVO_RX_PIN, SERVO_BAUD_RATE);
-    ftServo_InitWithType(SERVO_SCSCL, SERVO_TX_PIN, SERVO_RX_PIN, -1, SERVO_BAUD_RATE);
-    ESP_LOGI(TAG, "UART init done");
-
-    // ── Diagnostic: Ping servo ID 1 to verify bus communication ─
-    vTaskDelay(pdMS_TO_TICKS(100));
-    int ping_result = Ping(1);
-    if (ping_result > 0) {
-        ESP_LOGI(TAG, "Servo ping OK — ID=1 responded with model=%d", ping_result);
+    // The UART servo bus this firmware used to bring up (SCSCL on UART1,
+    // TX=IO4 / RX=IO5, 500 kbaud) is gone: on this board both of those pins
+    // are servo chip selects. What follows is the same job done over SPI, and
+    // it is the better version of it - there is no baud rate to get wrong, and
+    // each leg reports its position and current back on the same transaction
+    // that commands it.
+    // 
+    // ── Initialise the SPI servo driver boards ──────────────────
+    // Four AT32F413 boards, three servos each, on SPI2 (MOSI=IO6, MISO=IO17,
+    // CLK=IO16, chip selects from robot/board_config.h). This replaces the
+    // Feetech SCSCL serial bus, which used UART1 on IO4/IO5 - and on this
+    // board both of those pins are servo chip selects.
+    ESP_LOGI(TAG, "Initialising SPI servo driver boards...");
+    if (!driver_board_init()) {
+        ESP_LOGE(TAG, "Driver board init FAILED - no servo control");
     } else {
-        ESP_LOGW(TAG, "Servo ping FAILED — ID=1 did not respond (err=%d)", ping_result);
-        ESP_LOGW(TAG, "Check: power, baud rate (configured %d), wiring (TX→RX cross?)",
-                 SERVO_BAUD_RATE);
+        ESP_LOGI(TAG, "Driver board init done");
+
+        // Adopt the boards' own range_position_deg rather than assuming one.
+        // A robot that was range-trimmed on the reference firmware keeps that
+        // trim in the driver boards' flash, where an ESP reflash cannot reach
+        // it, and assuming the wrong range puts every commanded angle out by
+        // the ratio. Done here, before the gait task exists, because the
+        // config path needs the SPI bus to itself.
+        const float scale_dd = driver_board_probe_scale();
+        if (driver_board_probe_answered()) {
+            ESP_LOGI(TAG, "Driver board range: %.1f deg (%.3f ticks/deg)",
+                     scale_dd / 10.0f, servo_ticks_per_deg());
+        } else {
+            ESP_LOGW(TAG, "No board reported its range - assuming %.1f deg. "
+                          "Every commanded angle is a guess until one answers.",
+                     scale_dd / 10.0f);
+        }
+    }
+
+    // ── Diagnostic: probe all 12 channels ───────────────────────
+    // One parameter read per servo. The old build pinged servo ID 1 alone,
+    // which answers "is anything there"; this answers WHICH channels are
+    // alive, and a whole silent board of three points at that board's chip
+    // select or its power rather than at the servos.
+    vTaskDelay(pdMS_TO_TICKS(100));
+    {
+        int  alive = 0;
+        int  n     = 0;
+        char list[64];
+        list[0] = '\0';
+        for (int i = 1; i <= 12; ++i) {
+            float val;
+            if (driver_board_get_param(i, DB_PARAM_KP_POSITION, &val)) {
+                ++alive;
+                n += std::snprintf(list + n, sizeof(list) - n, "%s%d", n ? "," : "", i);
+            }
+        }
+        if (alive == 12) {
+            ESP_LOGI(TAG, "Servo probe OK - all 12 channels responded");
+        } else if (alive > 0) {
+            ESP_LOGW(TAG, "Servo probe - %d/12 responded: [%s]", alive, list);
+            ESP_LOGW(TAG, "Silent channels: check board power and chip select "
+                          "wiring. SERVO_CS_MAP 1 is FR=CN4/IO7 FL=CN5/IO4 "
+                          "RR=CN3/IO15 RL=CN6/IO5 - see robot/board_config.h");
+        } else {
+            ESP_LOGW(TAG, "Servo probe FAILED - no driver board responded");
+            ESP_LOGW(TAG, "Check: servo rail on CN3..CN6, SPI wiring "
+                          "(MOSI=IO6 MISO=IO17 CLK=IO16), and AT32 board firmware");
+        }
     }
 
     // ── Restore persisted config ────────────────────────────────
@@ -367,24 +622,89 @@ bool init()
         if (nvs_get_i32(s_nvs, "tilt", &v) == ESP_OK)     s_cfg.tilt      = static_cast<int>(v);
         if (nvs_get_i32(s_nvs, "sgspeed", &v) == ESP_OK)  s_cfg.sg_speed  = static_cast<int>(v);
 
-        for (int i = 1; i <= 12; ++i) {
-            char key[16];
-            std::snprintf(key, sizeof(key), "offset%d", i);
-            s_offset[i] = nvs_get_float(key, 0.0f);
+        /* Seed the calibration from kFactoryOffset the first time this firmware
+         * boots, then leave it alone. The marker is what makes it once-only:
+         * without it, re-applying the table every boot would undo any
+         * calibration done on the robot the moment it restarted. Bumping
+         * kCalSeed forces the re-seed after the table is filled in. */
+        int32_t seeded = 0;
+        if (nvs_get_i32(s_nvs, "calseed", &seeded) != ESP_OK) seeded = 0;
+
+        if (seeded != kCalSeed) {
+            for (int i = 1; i <= 12; ++i) {
+                s_offset[i] = kFactoryOffset[i];
+                char key[16];
+                std::snprintf(key, sizeof(key), "offset%d", i);
+                nvs_put_float(key, s_offset[i]);
+            }
+            nvs_put_i32("calseed", kCalSeed);
+            ESP_LOGI(TAG, "Servo calibration seeded from the built-in table (seed %d)",
+                     (int)kCalSeed);
+        } else {
+            for (int i = 1; i <= 12; ++i) {
+                char key[16];
+                std::snprintf(key, sizeof(key), "offset%d", i);
+                s_offset[i] = nvs_get_float(key, kFactoryOffset[i]);
+            }
         }
+
+        // One-time import from the reference firmware's namespace, for a
+        // robot that was calibrated there before this firmware existed.
+        import_legacy_offsets();
     }
 
     ESP_LOGI(TAG, "Config restored: period=%d height=%d upHeight=%d stride=%d tilt=%d sgspeed=%d",
              s_cfg.period, s_cfg.height, s_cfg.up_height, s_cfg.stride, s_cfg.tilt,
              s_cfg.sg_speed);
 
-    // ── Initialise goal buffers to centre ───────────────────────
-    for (int i = 1; i <= 12; ++i) {
-        s_goal_pos[i] = 511;
-        s_goal_speed[i] = 0;
+    /* Print the calibration, every boot, unconditionally.
+     *
+     * "Is this robot calibrated the same as the one the movement was taught
+     * on" is not a question anybody should answer from memory, and it decides
+     * whether a recorded pose lands or lands the robot on its back. The
+     * reference build prints the same twelve numbers with its `offsets`
+     * command, so the two can simply be read side by side.
+     *
+     * All twelve at 0.0 means UNCALIBRATED, not "centred": nothing has been
+     * measured on this robot yet, and every pose is being played against raw
+     * horn centres. */
+    {
+        static const char *kJoint[13] = { "",
+            "FR_hip", "FR_sh", "FR_knee", "FL_hip", "FL_sh", "FL_knee",
+            "RR_hip", "RR_sh", "RR_knee", "RL_hip", "RL_sh", "RL_knee" };
+        int nonzero = 0;
+        for (int i = 1; i <= 12; ++i) if (s_offset[i] != 0.0f) ++nonzero;
+        ESP_LOGI(TAG, "Servo calibration (%d/12 non-zero):", nonzero);
+        for (int i = 1; i <= 12; ++i) {
+            ESP_LOGI(TAG, "   %2d %-8s %+7.2f deg", i, kJoint[i], s_offset[i]);
+        }
+        if (nonzero == 0) {
+            ESP_LOGW(TAG, "   all zero - this robot has NOT been calibrated. "
+                          "Any recorded pose will be played against raw horn "
+                          "centres.");
+        }
     }
 
-    // ── Initialise IMU (QMI8658C on SPI2_HOST) ──────────────────
+    // ── Initialise goal buffers to centre ───────────────────────
+    for (int i = 1; i <= 12; ++i) {
+        s_goal_pos[i]   = 511;
+        s_goal_speed[i] = 0;
+
+        // Current cap: the persisted value if there is one, else the compiled
+        // default. Never 0 - a robot that boots with no torque on its joints
+        // simply collapses, and 0 is also what an unread NVS key returns.
+        char ckey[16];
+        std::snprintf(ckey, sizeof(ckey), "cur%d", i);
+        int32_t cm = 0;
+        if (s_nvs && nvs_get_i32(s_nvs, ckey, &cm) == ESP_OK &&
+            cm > 0 && cm <= static_cast<int32_t>(SERVO_CURRENT_MAX_MA)) {
+            s_current_ma[i] = static_cast<uint16_t>(cm);
+        } else {
+            s_current_ma[i] = SERVO_CURRENT_MAX_MA;
+        }
+    }
+
+    // ── Initialise IMU (BMI270 + BMM150 over I2C) ──────────────────
     if (!imu_init()) {
         ESP_LOGW(TAG, "IMU init failed — continuing without IMU");
     } else {
@@ -415,6 +735,67 @@ void send_gait_cmd(GaitCmd cmd)
 GaitCmd current_gait_cmd()
 {
     return s_gait_cmd;
+}
+
+// ── The gait name table ──────────────────────────────────────
+
+bool gait_from_name(const char *name, GaitCmd &out)
+{
+    if (!name) return false;
+    for (int i = 0; i < GAIT_NAME_COUNT; ++i) {
+        if (std::strcmp(name, GAIT_NAMES[i].name) == 0) {
+            out = GAIT_NAMES[i].cmd;
+            return true;
+        }
+    }
+    return false;
+}
+
+const char *gait_to_name(GaitCmd cmd)
+{
+    for (int i = 0; i < GAIT_NAME_COUNT; ++i) {
+        if (GAIT_NAMES[i].cmd == cmd) return GAIT_NAMES[i].name;
+    }
+    return "none";
+}
+
+int gait_name_count()
+{
+    return GAIT_NAME_COUNT;
+}
+
+const char *gait_name_at(int index)
+{
+    if (index < 0 || index >= GAIT_NAME_COUNT) return nullptr;
+    return GAIT_NAMES[index].name;
+}
+
+// ── Servo overlay ────────────────────────────────────────────
+
+void set_overlay(int servo_id, float deg)
+{
+    if (servo_id < 1 || servo_id > 12) return;
+
+    // Clamp rather than reject. A skill trimming a gait wants a bounded nudge,
+    // and silently ignoring the request is a worse answer than giving it the
+    // most it is allowed to have.
+    if (deg >  SERVO_OVERLAY_MAX_DEG) deg =  SERVO_OVERLAY_MAX_DEG;
+    if (deg < -SERVO_OVERLAY_MAX_DEG) deg = -SERVO_OVERLAY_MAX_DEG;
+
+    s_overlay[servo_id] = deg;
+    wake_gait();
+}
+
+float get_overlay(int servo_id)
+{
+    if (servo_id < 1 || servo_id > 12) return 0.0f;
+    return s_overlay[servo_id];
+}
+
+void clear_overlay()
+{
+    for (int i = 1; i <= 12; ++i) s_overlay[i] = 0.0f;
+    wake_gait();
 }
 
 void set_body_attitude(float roll_deg, float pitch_deg, float yaw_deg)
@@ -532,63 +913,204 @@ void reset_offsets()
 
 // ── Servo feedback ───────────────────────────────────────────
 
+// Every read below is served from the feedback cache the driver boards refresh
+// on each sync_write, so at gait rate they cost no SPI traffic at all. When the
+// gait is parked (Studio mode) that cache goes stale - poll the board first if
+// you need a fresh value there.
+
 int read_position(int servo_id)
 {
+    // AT32 frame, 0..1023 - the same frame Servo Studio reports. NOT the frame
+    // set_servo_angle() accepts; for that, use read_angle_cdeg() below.
     if (servo_id < 1 || servo_id > 12) return -1;
-    return ReadPos(servo_id);
+    return static_cast<int>(driver_board_present_position(servo_id));
+}
+
+int read_angle_cdeg(int servo_id)
+{
+    // The measured angle in the SAME frame set_servo_angle() takes: signed
+    // centidegrees relative to centre, positive in the direction a positive
+    // `deg` command moves the joint.
+    //
+    // Without this a closed loop is impossible to write correctly.
+    // read_position() is in the opposite frame, so the obvious
+    // read -> compare -> correct loop diverges instead of converging,
+    // silently and at speed - and nothing in the SDK says so.
+    if (servo_id < 1 || servo_id > 12) return INT32_MIN;
+
+    const int at32 = static_cast<int>(driver_board_present_position(servo_id));
+    const int gait = at32_raw_to_gait_raw(at32);              // -> gait frame
+    const float deg = (gait - 511) / servo_ticks_per_deg();   // -> deg from centre
+    return static_cast<int>(deg * 100.0f);
 }
 
 int read_speed(int servo_id)
 {
+    // The driver boards do not report speed - position control is current
+    // limited, not velocity commanded. Stays -1 rather than inventing one.
     if (servo_id < 1 || servo_id > 12) return -1;
-    return ReadSpeed(servo_id);
+    return -1;
 }
 
 int read_load(int servo_id)
 {
+    // Closest equivalent the boards report is present motor current.
     if (servo_id < 1 || servo_id > 12) return -1;
-    return ReadLoad(servo_id);
+    return static_cast<int>(driver_board_present_current(servo_id));
 }
 
 int read_voltage(int servo_id)
 {
+    // Not reported by the AT32 boards: the rail is Vbat+ straight through, so
+    // there is no per-servo supply to measure. (Called out as non-functional
+    // on the Mini Pupper 2 hardware too; here it is at least the whole truth.)
     if (servo_id < 1 || servo_id > 12) return -1;
-    return ReadVoltage(servo_id);
+    return -1;
 }
 
 int read_temperature(int servo_id)
 {
-    if (servo_id < 1 || servo_id > 12) return -1;
-    return ReadTemper(servo_id);
+    const float c = read_temperature_c(servo_id);
+    if (std::isnan(c)) return -1;
+    return static_cast<int>(c);
+}
+
+float read_temperature_c(int servo_id)
+{
+    // A real reading on this board, unlike the Mini Pupper 2 build where
+    // ReadTemper() was advertised and returned nothing. Each AT32 board
+    // samples one 10k NTC per servo and ships it in the feedback frame's
+    // reserved field, so this is free: it rides on the sync_write the gait is
+    // already doing. Returns NaN when that servo has never answered.
+    if (servo_id < 1 || servo_id > 12) return NAN;
+    const float c = driver_board_present_temperature(servo_id);
+    return (c > DB_TEMP_INVALID) ? c : NAN;
 }
 
 int read_moving(int servo_id)
 {
+    // Not reported directly. Infer it from the error against the goal: more
+    // than ~2 raw counts off target counts as still moving.
+    //
+    // FRAME MATTERS HERE. Comparing the measured position (AT32 frame) straight
+    // against s_goal_pos[] (gait frame) gives `1024 - 2*goal`, which is within
+    // 2 counts only when the goal is near 511 - so every pose away from centre
+    // reads as "still moving" forever and any skill polling this to sequence
+    // its motions hangs. Convert the goal into the measured frame first; see
+    // the frame note in robot.h.
     if (servo_id < 1 || servo_id > 12) return -1;
-    return ReadMove(servo_id);
+    const int now  = static_cast<int>(driver_board_present_position(servo_id));
+    const int goal = gait_raw_to_at32_raw(static_cast<int>(s_goal_pos[servo_id]));
+    return (std::abs(now - goal) > 2) ? 1 : 0;
 }
 
 int read_current(int servo_id)
 {
     if (servo_id < 1 || servo_id > 12) return -1;
-    return ReadCurrent(servo_id);
+    return static_cast<int>(driver_board_present_current(servo_id));
 }
 
 int ping_servo(int servo_id)
 {
-    return Ping(static_cast<uint8_t>(servo_id));
+    // There is no bus ping to send: a channel "answers" if its board replies to
+    // a parameter read. One read is one request/NOP pair, so this is the same
+    // cost as the SCSCL Ping() it replaces and gives the same yes/no.
+    if (servo_id < 1 || servo_id > 12) return -1;
+    float v;
+    return driver_board_get_param(servo_id, DB_PARAM_KP_POSITION, &v) ? 1 : -1;
+}
+
+// ── Servo bus ownership ──────────────────────────────────────
+//
+// Two owners may take the bus away from the gait: the Servo Studio console (a
+// human at a keyboard) and a WASM skill doing low-level control. While either
+// holds it, flush() holds the last pose instead of writing, so nothing
+// interleaves with a config request/NOP pair.
+
+void set_studio_mode(bool on)
+{
+    if (on) {
+        if (s_bus_owner == BUS_STUDIO) return;
+        // The console outranks a skill: a human at the keyboard takes the bus.
+        if (s_bus_owner == BUS_SKILL) {
+            ESP_LOGW(TAG, "Studio mode taking the bus from a running skill");
+        }
+        s_bus_owner = BUS_STUDIO;
+        // Let the gait task finish the tick it is in before the caller starts
+        // issuing config frames. A tick is ~5 ms; 50 ms is generous.
+        vTaskDelay(pdMS_TO_TICKS(50));
+        ESP_LOGI(TAG, "Studio mode ON - gait parked, servos holding pose");
+    } else {
+        if (s_bus_owner != BUS_STUDIO) return;
+        s_bus_owner = BUS_FREE;
+        ESP_LOGI(TAG, "Studio mode OFF - gait resumed");
+    }
+}
+
+bool studio_mode()
+{
+    return s_bus_owner == BUS_STUDIO;
+}
+
+bool servo_lock()
+{
+    if (s_bus_owner == BUS_SKILL) return true;      // already ours
+    if (s_bus_owner == BUS_STUDIO) {
+        ESP_LOGW(TAG, "servo_lock refused - Servo Studio holds the bus");
+        return false;
+    }
+    s_bus_owner = BUS_SKILL;
+    vTaskDelay(pdMS_TO_TICKS(50));   // let the in-flight gait tick finish
+    ESP_LOGI(TAG, "Servo bus locked by skill - gait parked");
+    return true;
+}
+
+void servo_unlock()
+{
+    if (s_bus_owner != BUS_SKILL) return;
+    s_bus_owner = BUS_FREE;
+    ESP_LOGI(TAG, "Servo bus released by skill - gait resumed");
+}
+
+bool servo_locked()
+{
+    // "Somebody holds the bus" - Studio OR a skill. Do NOT use this to
+    // authorise a skill's servo writes; use servo_owned_by_skill() for that.
+    return s_bus_owner != BUS_FREE;
+}
+
+bool servo_owned_by_skill()
+{
+    // "THIS skill holds the bus", which is the question every low-level servo
+    // host function actually needs to ask.
+    //
+    // Calling servo_locked() instead would also be true while Servo Studio
+    // holds the bus, so a skill that never called servo_lock() could drive all
+    // twelve joints for as long as someone had Studio open in a browser - and
+    // its SPI traffic would interleave with Studio's config request/reply
+    // pairs. The per-frame mutex in driver_board.c keeps individual frames
+    // intact but cannot stop two owners taking turns.
+    return s_bus_owner == BUS_SKILL;
+}
+
+void release_skill_bus_lock()
+{
+    if (s_bus_owner == BUS_SKILL) {
+        ESP_LOGW(TAG, "Skill ended while holding the servo bus - releasing");
+        servo_unlock();
+    }
 }
 
 // ── Low-level servo control ──────────────────────────────────
 
 void set_servo_angle(int servo_id, float deg)
 {
-    // Convert degrees to raw pulse for this 0–180° servo:
-    // 0° → 0, 180° → 1023, centre (90°) → 511.
-    // `deg` is RELATIVE to centre, so 1° = 1023/180 ≈ 5.683 raw steps.
-    // (The reference minipupperesp robot uses 0–270° servos and the
-    //  scale deg/0.263 there; this is the same formula for 180°.)
-    int sig = 511 + static_cast<int>(deg * SERVO_DEG_TO_RAW);
+    // Convert degrees to a raw setpoint in the GAIT frame: 0..1023 across the
+    // boards' full mechanical range, centre -> 511. `deg` is RELATIVE to
+    // centre, and one degree is servo_ticks_per_deg() raw steps - read from
+    // the boards at boot, not assumed (see the note by that function).
+    // driver_board_sync_write() rescales this to the AT32's deci-degrees.
+    int sig = 511 + static_cast<int>(deg * servo_ticks_per_deg());
     if (sig < 0)   sig = 0;
     if (sig > 1023) sig = 1023;
     s_goal_pos[servo_id] = static_cast<uint16_t>(sig);
@@ -605,23 +1127,70 @@ void set_all_servo_speed(uint16_t speed)
     for (int i = 1; i <= 12; ++i) s_goal_speed[i] = speed;
 }
 
+void set_servo_current(int servo_id, uint16_t milliamps)
+{
+    if (servo_id < 1 || servo_id > 12) return;
+
+    // Clamp rather than reject. A skill that asks for 5 A should get the most
+    // the hardware is allowed to give, not silence, and not an error code it
+    // has no way to act on.
+    if (milliamps > SERVO_CURRENT_MAX_MA) milliamps = SERVO_CURRENT_MAX_MA;
+    s_current_ma[servo_id] = milliamps;
+
+    char key[16];
+    std::snprintf(key, sizeof(key), "cur%d", servo_id);
+    nvs_put_i32(key, static_cast<int32_t>(milliamps));
+
+    ESP_LOGI(TAG, "Servo %d current limit = %u mA", servo_id, (unsigned)milliamps);
+}
+
+uint16_t get_servo_current(int servo_id)
+{
+    if (servo_id < 1 || servo_id > 12) return 0;
+    return s_current_ma[servo_id];
+}
+
 void flush()
 {
+    // Studio or a skill owns the bus - hold the last pose rather than fight it.
+    if (s_bus_owner != BUS_FREE) return;
     // Ensure at least 5 ms between bus accesses
     static int64_t last_us = 0;
-    while (esp_timer_get_time() - last_us < 5000) {
+    for (;;) {
+        const int64_t remain_us = 5000 - (esp_timer_get_time() - last_us);
+        if (remain_us <= 0) break;
+        if (remain_us <= 1000) {
+            esp_rom_delay_us(static_cast<uint32_t>(remain_us));
+            break;
+        }
         vTaskDelay(1);
     }
     last_us = esp_timer_get_time();
 
-    uint16_t pos[12], spd[12], tim[12];
+    // The driver boards take a position plus a CURRENT CAP and have no speed
+    // field, so s_goal_speed is deliberately not sent - see set_servo_speed().
+    uint16_t pos[12];
+    uint16_t cur[12];
     for (int i = 0; i < 12; ++i) {
-        pos[i] = s_goal_pos[i + 1];
-        spd[i] = s_goal_speed[i + 1];
-        tim[i] = 0;
+        int raw = static_cast<int>(s_goal_pos[i + 1]);
+
+        // The overlay is added here, to the frame on its way out, so it rides
+        // on top of whatever produced s_goal_pos - the gait generator, the IK
+        // or a skill - without any of them knowing about it. It is never
+        // written back, which is what makes clearing it sufficient to undo it
+        // and stops it accumulating across ticks.
+        const float ov = s_overlay[i + 1];
+        if (ov != 0.0f) {
+            raw += static_cast<int>(ov * servo_ticks_per_deg());
+            if (raw < 0)    raw = 0;
+            if (raw > 1023) raw = 1023;
+        }
+
+        pos[i] = static_cast<uint16_t>(raw);
+        cur[i] = s_current_ma[i + 1];
     }
-    SyncWritePos(const_cast<uint8_t *>(s_sync_ids), 12, pos, tim, spd);
-    ESP_LOGD(TAG, "flush: SyncWritePos sent");
+    driver_board_sync_write(pos, cur);
+    ESP_LOGD(TAG, "flush: sync_write sent to the four driver boards");
 }
 
 // ── Per‑leg IK ───────────────────────────────────────────────
@@ -744,10 +1313,20 @@ void gait_task()
 
         // ── Idle (no command) ────────────────────────────────────
         if (cmd == GaitCmd::None) {
-            front_right_ik(0, 0, static_cast<float>(s_cfg.height));
-            rear_right_ik(0, 0, static_cast<float>(s_cfg.height));
-            front_left_ik(0, 0, static_cast<float>(s_cfg.height));
-            rear_left_ik(0, 0, static_cast<float>(s_cfg.height));
+            // A skill that claimed the feet or the joints owns the goal buffer,
+            // so do not rebuild the neutral stand over the top of it.
+            //
+            // Before this guard existed a control claim was checked ONLY inside
+            // the host functions, so it could refuse the skill's own calls and
+            // nothing else - while the buffer it had just claimed was rewritten
+            // underneath it every tick. Only one skill runs at a time, so the
+            // claim protected the skill from itself and from nobody.
+            if (!::sdk::control_owner_is_pose()) {
+                front_right_ik(0, 0, static_cast<float>(s_cfg.height));
+                rear_right_ik(0, 0, static_cast<float>(s_cfg.height));
+                front_left_ik(0, 0, static_cast<float>(s_cfg.height));
+                rear_left_ik(0, 0, static_cast<float>(s_cfg.height));
+            }
             // When a WASM skill is running, skip the flush so the
             // skill's own servo commands (sent via robot_flush from
             // host functions) are not immediately overwritten with
