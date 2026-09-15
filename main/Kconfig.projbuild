@@ -54,13 +54,25 @@ config APP_AP_MAX_CONN
     help
         Maximum number of simultaneous station connections.
 
+## ── LEGACY: SCSCL serial-bus servos ─────────────────────────────────
+##
+## These three symbols configured the Feetech SCSCL bus on UART1 (TX=4, RX=5,
+## at the baud rate below). That whole transport is gone: the twelve servos are
+## now driven by four AT32F413 boards over SPI, and SPI has no baud rate to set
+## (see main/robot/board_config.h).
+##
+## The symbols are KEPT rather than deleted for one reason: a deleted Kconfig
+## symbol leaves its `CONFIG_...=y` line in an existing sdkconfig with nowhere
+## to go, which is noise on every build for anyone with an old config. Nothing
+## reads them any more, and nothing should. From a fresh sdkconfig this whole
+## block can go.
+
 choice APP_SERVO_MOTOR
-    prompt "Servo motor type"
+    prompt "Servo motor type (LEGACY - unused, the servos are on SPI now)"
     default APP_SERVO_MOTOR_OLD
     help
-        Select the servo motor model used on the robot.
-        This affects the UART baud rate used to communicate
-        with the servos.
+        Was: select the servo motor model, which decided the UART baud rate.
+        No longer connected to anything.
 
 config APP_SERVO_MOTOR_OLD
     bool "Old motor (0.5 Mbaud)"
@@ -78,6 +90,8 @@ config APP_SERVO_BAUD_RATE
     int
     default 500000 if APP_SERVO_MOTOR_OLD
     default 1000000 if APP_SERVO_MOTOR_NEW
+    help
+        Was: the SCSCL bus baud rate. Unused - see the note above.
 
 config APP_STA_AUTO_CONNECT
     bool "Auto-connect to saved STA network on boot"

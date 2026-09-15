@@ -3,6 +3,8 @@
 #include "sdkconfig.h"
 #include <cstdint>
 
+#include "robot/board_config.h"
+
 namespace robot {
 
 // ── Forward declarations ─────────────────────────────────────
@@ -20,11 +22,50 @@ constexpr float L2 = 56.0f;   // Lower leg length (mm)
 constexpr float PI = 3.14159265358979f;
 
 // ── Servo signal range ───────────────────────────────────────
-// The Feetech SCSCL bus servos on this robot sweep 0–180° over the
-// raw range 0..1023 (centre 511 = 90°).  IK angles are commanded
-// RELATIVE to the centre, so the usable command range is ±90°.
-constexpr float SERVO_RANGE_DEG   = 180.0f;
-constexpr float SERVO_DEG_TO_RAW  = 1023.0f / SERVO_RANGE_DEG;   // ≈ 5.683
+//
+// There is no fixed range here any more, and so no SERVO_DEG_TO_RAW.
+//
+// The twelve servos are driven by four AT32F413 boards over SPI (see
+// robot/driver_board.h), and those boards hold their OWN range_position_deg in
+// their flash, where it survives any amount of ESP reflashing. robot.cc asks
+// them what it is at boot (driver_board_probe_scale()) and derives
+// ticks-per-degree from the answer:
+//
+//     ticks_per_deg = 10240 / driver_board_get_scale_dd()
+//
+// The Mini Pupper 2 build this replaced could hardcode 1023/180, because a
+// Feetech SCSCL servo's range is a physical fact of the servo. Here it is a
+// configuration value on another chip, and assuming one overdrives every joint
+// by the ratio - which reads as "the new servos are weaker", not as "the
+// scale is wrong".
+//
+// IK angles are commanded RELATIVE to centre either way, so the usable command
+// range is a little over +/-150 deg at the stock 310 deg, minus whatever a
+// range trim has already removed.
+
+// ── The two raw position frames, and how to move between them ────
+//
+// There are TWO raw position frames and they are mirror images of each other.
+// Mixing them is not a compile error, so name the conversion instead of
+// writing it out:
+//
+//   GAIT frame - what s_goal_pos[] and set_servo_angle() speak.
+//                0..1023, 511 = centre, positive `deg` increases the value.
+//
+//   AT32 frame - what the driver boards, driver_board_present_position() and
+//                Servo Studio speak. 0..1023, 511 = centre.
+//
+// driver_board_sync_write() converts gait -> AT32 with a direction flip
+// (scale_dd - pos * scale_dd / 1024), and the feedback path deliberately does
+// NOT flip on the way back, which is what makes the round trip exact. The net
+// effect is simply that the two frames run in opposite directions:
+//
+//     at32_raw == 1024 - gait_raw
+//
+// Anything comparing a commanded position against a measured one MUST put both
+// in the same frame first.
+constexpr int gait_raw_to_at32_raw(int gait_raw) { return 1024 - gait_raw; }
+constexpr int at32_raw_to_gait_raw(int at32_raw) { return 1024 - at32_raw; }
 
 // ── Neutral stand calibration (like the reference minipupperesp) ─
 // The robot is physically calibrated so ALL SERVOS CENTRED == the
@@ -156,11 +197,60 @@ struct Config {
     int sg_speed = 50;   // Stanford walk / diagonal speed (mm/s, max 200)
 };
 
-// ── Servo pin / UART configuration ───────────────────────────
-constexpr int SERVO_TX_PIN    = 4;
-constexpr int SERVO_RX_PIN    = 5;
-constexpr int SERVO_POWER_PIN = 8;
-constexpr int SERVO_BAUD_RATE = CONFIG_APP_SERVO_BAUD_RATE;
+// ── Servo bus configuration ──────────────────────────────────
+//
+// The bus pins and the four chip selects live in robot/board_config.h; the
+// only pin this layer still owns is the servo power rail, which does not exist
+// on this board (SERVO_POWER_EN_PIN is GPIO_NUM_NC).
+//
+// This replaced the Feetech SCSCL serial bus on UART1 (TX=4, RX=5). Those pins
+// and CONFIG_APP_SERVO_BAUD_RATE are no longer used by anything; the Kconfig
+// symbols are kept only so an out-of-tree file referring to them still builds.
+constexpr int SERVO_POWER_PIN = SERVO_POWER_EN_PIN;
+
+// Current cap sent with every position setpoint, in mA. The driver boards do
+// position control with a current LIMIT rather than a speed, so this is a
+// ceiling and not a forced draw: a lightly loaded leg still only sources what
+// it needs to hold station.
+//
+// 1500 is the reference firmware's gait figure, and it is the right value for
+// a robot that is known to be calibrated and walking. Bring a new chassis up
+// at something like 600 first: at a lower cap a mis-signed or overdriven joint
+// stalls instead of tearing the leg, and the symptom is visible in
+// GET /v1/studio/status as current pinned at the cap.
+constexpr uint16_t SERVO_CURRENT_MAX_MA = 1500;
+
+// ── Servo overlay ────────────────────────────────────────────
+//
+// An additive per-servo trim, in degrees, applied to the outgoing frame in
+// flush() and never written back into the goal buffer.
+//
+// It exists so a skill can add to a frame the gait generator produced instead
+// of having to replace it: a limp that favours one leg, a payload
+// compensation, a slow drift. Because it is applied on the way out and not
+// stored in the goal buffer, clearing it is enough to undo it and it cannot
+// accumulate.
+//
+// Clamped, because the whole point is to ride on top of something else that
+// owns the joints and is not expecting to be overridden.
+constexpr float SERVO_OVERLAY_MAX_DEG = 20.0f;
+
+/**
+ * @brief Add a trim to one servo's outgoing frame. Clamped to
+ *        +/-SERVO_OVERLAY_MAX_DEG, and then to the raw range.
+ */
+void set_overlay(int servo_id, float deg);
+
+/**
+ * @brief Read back one servo's overlay in degrees. 0 for a bad id.
+ */
+float get_overlay(int servo_id);
+
+/**
+ * @brief Clear every overlay. Called at the end of a skill run so a trim
+ *        cannot outlive the skill that set it.
+ */
+void clear_overlay();
 
 // ── Public API ───────────────────────────────────────────────
 
@@ -189,6 +279,34 @@ void send_gait_cmd(GaitCmd cmd);
  * @brief Return the currently active gait command.
  */
 GaitCmd current_gait_cmd();
+
+/* ── The one gait name table ─────────────────────────────────────────────
+ *
+ * This mapping used to exist in three hand-maintained copies - the SDK's host
+ * function, the HTTP handler, and the logging switch in gait_task() - which is
+ * three chances for a name to mean different things depending on who asked.
+ * They had already drifted: the SDK accepted names the HTTP layer rejected.
+ *
+ * They all come here now. If you add a gait, add it here and nowhere else.
+ */
+
+/**
+ * @brief Look a wire name up.
+ * @return false if there is no such gait; `out` is untouched then.
+ */
+bool gait_from_name(const char *name, GaitCmd &out);
+
+/**
+ * @brief The wire name for a gait, or "none" if it has none.
+ */
+const char *gait_to_name(GaitCmd cmd);
+
+/**
+ * @brief How many named gaits there are, and the i-th name.
+ *        For listing them (the PWA's gait picker, mpx-cli's help).
+ */
+int         gait_name_count();
+const char *gait_name_at(int index);
 
 /**
  * @brief Web-joystick input (mini_pupper_web_controller style).
@@ -241,7 +359,16 @@ void set_config(const Config &cfg);
 // ── IMU API ─────────────────────────────────────────────────
 
 /**
- * @brief Initialise the QMI8658C IMU over SPI (SPI2_HOST).
+ * @brief Initialise the BMI270 IMU (with its BMM150 magnetometer) over I2C.
+ *
+ * The BMI270 is on the shared I2C bus at 0x68 (SDA=IO1, SCL=IO2 - see
+ * robot/board_config.h), with the BMM150 hanging off the BMI270's own
+ * auxiliary I2C pins, so the host reaches the magnetometer only through the
+ * BMI270. This replaces the QMI8658C, which was on SPI2 on the Mini Pupper 2
+ * board - a bus this board gives entirely to the servo driver boards.
+ *
+ * If the BMM150 does not answer, accel and gyro still come up and
+ * mag_valid stays false: a dead magnetometer must not cost the robot its gait.
  *
  * Must be called once during boot, after NVS but before the IMU
  * background task is needed.  Spawns a low-priority polling task
@@ -278,14 +405,24 @@ void set_offset(int servo_id, float deg);
 void reset_offsets();
 
 /**
- * @brief Read the current position of a servo (raw 0‑1023).
- *        Returns -1 on failure.
+ * @brief Read the current position of a servo, in the AT32 frame (0..1023).
+ *
+ * This is the frame the driver boards and Servo Studio speak, NOT the frame
+ * set_servo_angle() accepts - the two run in opposite directions. For a closed
+ * loop use read_angle_cdeg() instead.
+ *
+ * @return Position, or -1 on failure.
  */
 int read_position(int servo_id);
 
 /**
  * @brief Read the current speed of a servo (signed).
- *        Returns -1 on failure.
+ *
+ * Always -1 on this board. The driver boards have no speed field: position
+ * control is current limited, not velocity commanded, so there is no reading
+ * to return and inventing one would be worse than saying so.
+ *
+ * @return -1, always.
  */
 int read_speed(int servo_id);
 
@@ -296,20 +433,24 @@ int read_speed(int servo_id);
 int read_load(int servo_id);
 
 /**
- * @brief Read the servo supply voltage (0.1 V increments).
+ * @brief Read the servo supply voltage (0.1 V increments, were it ever reported).
  *        Returns -1 on failure.
  *
- * @note Does NOT work on the current Mini Pupper 2 hardware
- *       (SCSCL servos don't report voltage via this register).
+ * @note Still returns -1 on this board, for a different reason: 
+ *       The servo rail is Vbat+ straight through CN3..CN6, so there is no
+ *       per-servo supply for the AT32 boards to measure.
  */
 int read_voltage(int servo_id);
 
 /**
- * @brief Read the servo internal temperature (°C).
- *        Returns -1 on failure.
+ * @brief Read the servo internal temperature, in whole degrees C.
+ *        Returns -1 on failure; read_temperature_c() gives NaN instead.
  *
- * @note Does NOT work on the current Mini Pupper 2 hardware
- *       (SCSCL servos don't report temperature via this register).
+ * @note Works on this board: each AT32 board samples one 10k NTC per servo
+ *       at ~22 Hz and ships it in the feedback frame's reserved field as a
+ *       signed 0.1 degC value. It rides on the sync_write the gait already
+ *       does, so it costs no extra SPI traffic. When the gait is parked the
+ *       cache goes stale - call driver_board_poll() for a fresh reading.
  */
 int read_temperature(int servo_id);
 
@@ -323,8 +464,8 @@ int read_moving(int servo_id);
  * @brief Read the servo current draw (mA, signed).
  *        Returns -1 on failure.
  *
- * @note Does NOT work on the current Mini Pupper 2 hardware
- *       (SCSCL servos don't report current via this register).
+ * @note Works on this board: present motor current rides back in the feedback
+ *       frame, refreshed on every sync_write the gait already does.
  */
 int read_current(int servo_id);
 
@@ -334,29 +475,115 @@ int read_current(int servo_id);
  */
 int ping_servo(int servo_id);
 
+/**
+ * @brief Read a servo's measured angle in the frame set_servo_angle() takes.
+ *
+ * Signed centidegrees relative to centre, positive in the direction a positive
+ * `deg` command moves the joint - so read -> compare -> correct actually
+ * converges. read_position() is in the opposite frame and cannot be used for
+ * this.
+ *
+ * @return Centidegrees, or INT32_MIN on failure.
+ */
+int read_angle_cdeg(int servo_id);
+
+/**
+ * @brief Read a servo's NTC temperature in degrees C.
+ *
+ * @return Temperature, or NaN if that servo has never answered.
+ */
+float read_temperature_c(int servo_id);
+
+// ── Servo bus ownership ──────────────────────────────────────
+//
+// Two owners may take the bus from the gait: the Servo Studio console (a human
+// at a keyboard, via the HTTP handlers) and a WASM skill doing low-level
+// control. While either holds it, flush() holds the last pose instead of
+// writing, so nothing interleaves with a config request/NOP pair.
+
+/** Park the gait so a human can drive the servos directly. */
+void set_studio_mode(bool on);
+
+/** Is the studio (rather than the gait) driving the servos? */
+bool studio_mode();
+
+/** Take the bus for a skill. False if Studio already holds it. */
+bool servo_lock();
+
+/** Give the bus back after servo_lock(). */
+void servo_unlock();
+
+/** True if ANYBODY holds the bus (Studio or a skill). NOT an authorisation. */
+bool servo_locked();
+
+/** True only if THIS skill holds the bus. This is the one to gate writes on. */
+bool servo_owned_by_skill();
+
+/** Release the bus if a skill still holds it. Call when a skill ends. */
+void release_skill_bus_lock();
+
 // ── Low-level IK (exposed for WASM host functions) ───────────
 
 /**
- * @brief Set one servo angle in degrees RELATIVE to centre (0 = 90°
- *        physical). Clamped to the raw range 0..1023, i.e. ±90° for
- *        this 0–180° servo. (Raw scale was 270°/1023 before; now
- *        180°/1023 to match the physical servo range. Old doc said (‑270, 270).
+ * @brief Set one servo angle in degrees RELATIVE to centre.
+ *
+ * Clamped to the raw range 0..1023, where one degree is
+ * servo_ticks_per_deg() raw steps - derived from the driver boards' OWN
+ * range_position_deg, not from a constant in this file. Centre (0 deg) is 511.
+ *
+ * This only fills a goal buffer; flush() is what puts it on the bus.
+ *         
  */
 void set_servo_angle(int servo_id, float deg);
 
 /**
  * @brief Set movement speed for one servo (0 = max, larger = slower).
+ *
+ * STORED, NEVER SENT. The driver boards have no speed field: in position mode
+ * the command frame's third field is a max CURRENT limit in milliamps, and the
+ * boards run their own position loop underneath it. There is nothing for a
+ * speed value to travel in.
+ *
+ * Kept because the symbol is part of the shipped SDK and removing it would
+ * break every skill that calls it. Use the current cap instead
+ * (SERVO_CURRENT_MAX_MA here, /v1/studio/set for one servo).
  */
 void set_servo_speed(int servo_id, uint16_t speed);
 
 /**
- * @brief Set speed for all 12 servos at once.
+ * @brief Set speed for all 12 servos at once. Stored, not sent - see
+ *        set_servo_speed().
  */
 void set_all_servo_speed(uint16_t speed);
 
 /**
- * @brief Flush all buffered servo commands to the bus
- *        (SyncWritePos on IDs 1‑12).
+ * @brief Set the per-servo current limit, in milliamps.
+ *
+ * THIS is the torque control on this hardware. The driver boards do position
+ * control with a current LIMIT: the value rides in every command frame and
+ * caps what the board's own loop may source. It is a ceiling, not a forced
+ * draw, so a lightly loaded leg still only takes what it needs to hold station.
+ *
+ * Clamped to 0..SERVO_CURRENT_MAX_MA. 0 means "hold with no torque", which
+ * for a loaded joint is indistinguishable from releasing it.
+ *
+ * Persisted, so a value set here survives a reboot.
+ */
+void set_servo_current(int servo_id, uint16_t milliamps);
+
+/**
+ * @brief Read the per-servo current limit in milliamps.
+ *        Returns 0 for an out-of-range id.
+ */
+uint16_t get_servo_current(int servo_id);
+
+/**
+ * @brief Push the twelve buffered setpoints to the driver boards.
+ *
+ * One SPI pass: four 36-byte frames, one per board, each carrying three
+ * servos' position and current cap. Paced to at most one pass per 5 ms.
+ *
+ * Does nothing at all while Servo Studio or a skill holds the bus.
  */
 void flush();
 
