@@ -1,34 +1,49 @@
 <script>
   import { colors } from "./colors.js";
 
-  const YELLOW = colors.mpx.primary;
+  /**
+   * Controller — a single, fluid gamepad that fills whatever box it is given.
+   *
+   * Layout is driven purely by CSS container queries:
+   *   tall / square  →  [ L-bumper   R-bumper ]   wide  →  [ L-bumper  Actions  R-bumper ]
+   *                     [      Actions        ]           [   Move    Actions    Look    ]
+   *                     [   Move   |   Look   ]
+   *
+   * @prop assignments        slot id → gait id (from the action editor)
+   * @prop catalog            [{ id, label, emoji, color }] used to name assigned actions
+   * @prop online             robot reachable (dims the pad when false)
+   * @prop fullscreen         current fullscreen state (for the toggle glyph)
+   * @prop onToggleFullscreen () => void
+   * @prop onEdit             () => void — open the action editor
+   */
+  let {
+    assignments = {},
+    catalog = [],
+    online = true,
+    fullscreen = false,
+    onToggleFullscreen,
+    onEdit,
+  } = $props();
 
-  /** Fraction of joystick radius that is a deadzone (0–1) */
+  /** Fraction of the stick travel that is a deadzone (0–1) */
   const DEADZONE = 0.18;
   const LOOK_DEADZONE = 0.35;
 
-  let { assignments = {} } = $props();
+  // The four assignable slots — ids are shared with ActionAssignment.svelte.
+  const SLOTS = [
+    { id: "action-top",    pos: "top",    fallback: "jump",    color: colors.mpx.action_green,  shape: "triangle" },
+    { id: "action-right",  pos: "right",  fallback: "twerk",   color: colors.mpx.action_red,    shape: "circle" },
+    { id: "action-left",   pos: "left",   fallback: "stretch", color: colors.mpx.action_purple, shape: "square" },
+    { id: "action-bottom", pos: "bottom", fallback: "sit",     color: colors.mpx.action_blue,   shape: "pentagon" },
+  ];
 
-  // ── Joystick state ──────────────────────────────────────────
-  let joystickTopX = $state(0);
-  let joystickTopY = $state(0);
-  let joystickBotX = $state(0);
-  let joystickBotY = $state(0);
-  let joystickTopDx = $state(0);
-  let joystickTopDy = $state(0);
-  let joystickBotDx = $state(0);
-  let joystickBotDy = $state(0);
-  let activeJoystick = $state(null); // 'top' | 'bottom' | null
+  function slotAction(slot) {
+    const id = assignments[slot.id] || slot.fallback;
+    const meta = catalog.find((a) => a.id === id);
+    return { id, label: meta?.label ?? id };
+  }
 
-  // Joystick geometry (set on pointerdown)
-  let jCenterX = $state(0);
-  let jCenterY = $state(0);
-  let jMaxRadius = $state(0);
-
-  // ── Button press state ──────────────────────────────────────
-  let pressedButtons = $state(new Set());
-
-  // ── Robot API: Joystick values & timer ──────────────────────
+  // ── Robot API: joystick stream ───────────────────────────────
   let joyF = 0, joyS = 0, joyT = 0;
   let joyTimer = null;
 
@@ -39,21 +54,19 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ f: joyF, s: joyS, t: joyT }),
       });
-    } catch { /* transient — keep trying while pad is held */ }
+    } catch { /* transient — keep trying while the stick is held */ }
   }
-
   function joyStartTimer() {
     if (!joyTimer) {
       sendJoy();
       joyTimer = setInterval(sendJoy, 100);
     }
   }
-
   function joyStopIfIdle() {
     if (joyF === 0 && joyS === 0 && joyT === 0 && joyTimer) {
       clearInterval(joyTimer);
       joyTimer = null;
-      sendJoy(); // final zeros -> step in place
+      sendJoy(); // final zeros → step in place
     }
   }
 
@@ -67,845 +80,749 @@
     } catch { /* ignore */ }
   }
 
-  // ── Look direction (head pose) mapping ──────────────────────
-  /** Map joystick normalised (-1..1) position to a look gait command */
+  // ── Look direction (head pose) ───────────────────────────────
   function joystickToLookMode(nx, ny) {
-    const dist = Math.sqrt(nx * nx + ny * ny);
-    if (dist < LOOK_DEADZONE) return 'init';
-
-    const angle = Math.atan2(ny, nx) * 180 / Math.PI;
-
-    if (angle > -22.5 && angle <= 22.5) return 'lookright';
-    if (angle > 22.5 && angle <= 67.5) return 'looklr';
-    if (angle > 67.5 && angle <= 112.5) return 'lookdown';
-    if (angle > 112.5 && angle <= 157.5) return 'lookll';
-    if (angle > 157.5 || angle <= -157.5) return 'lookleft';
-    if (angle > -157.5 && angle <= -112.5) return 'lookul';
-    if (angle > -112.5 && angle <= -67.5) return 'lookup';
-    if (angle > -67.5 && angle <= -22.5) return 'lookur';
-
-    return 'init';
+    const dist = Math.hypot(nx, ny);
+    if (dist < LOOK_DEADZONE) return "init";
+    const angle = (Math.atan2(ny, nx) * 180) / Math.PI;
+    if (angle > -22.5 && angle <= 22.5) return "lookright";
+    if (angle > 22.5 && angle <= 67.5) return "looklr";
+    if (angle > 67.5 && angle <= 112.5) return "lookdown";
+    if (angle > 112.5 && angle <= 157.5) return "lookll";
+    if (angle > 157.5 || angle <= -157.5) return "lookleft";
+    if (angle > -157.5 && angle <= -112.5) return "lookul";
+    if (angle > -112.5 && angle <= -67.5) return "lookup";
+    if (angle > -67.5 && angle <= -22.5) return "lookur";
+    return "init";
   }
-
-  let lastLookMode = $state('init');
-
+  let lastLookMode = "init";
   function sendLookMode(mode) {
     if (mode === lastLookMode) return;
     lastLookMode = mode;
     sendGait(mode);
   }
 
-  // ── Keyboard state ──────────────────────────────────────────
-  const keyMap = {
-    'ArrowUp':    'dpad-up',
-    'ArrowDown':  'dpad-down',
-    'ArrowLeft':  'dpad-left',
-    'ArrowRight': 'dpad-right',
-    'w':          'dpad-up',
-    's':          'dpad-down',
-    'a':          'dpad-left',
-    'd':          'dpad-right',
-    'i':          'action-top',
-    'l':          'action-right',
-    'k':          'action-bottom',
-    'j':          'action-left',
-    'q':          'shoulder-l',
-    'e':          'shoulder-r',
-  };
+  // ── Sticks ───────────────────────────────────────────────────
+  // Each stick tracks its own pointer so Move + Look work together on touch.
+  const makeStick = () => ({ nx: 0, ny: 0, dx: 0, dy: 0, active: false, pointerId: null, cx: 0, cy: 0, r: 0 });
+  let move = $state(makeStick());
+  let look = $state(makeStick());
+  const stickOf = (which) => (which === "move" ? move : look);
 
-  // ── Joystick helpers ────────────────────────────────────────
-
-  function getJoystickClientPos(e) {
-    if (e.touches && e.touches.length > 0) {
-      return { x: e.touches[0].clientX, y: e.touches[0].clientY };
-    }
-    return { x: e.clientX, y: e.clientY };
-  }
-
-  function getJoystickRingRect(ringEl) {
-    return ringEl.getBoundingClientRect();
-  }
-
-  function computeJoystickGeometry(ringEl) {
-    const rect = ringEl.getBoundingClientRect();
-    jCenterX = rect.left + rect.width / 2;
-    jCenterY = rect.top + rect.height / 2;
-    // The thumb is ~48% of ring width; so max radius = ring half - thumb half - 2px
-    const thumbWidth = rect.width * 0.48;
-    jMaxRadius = rect.width / 2 - thumbWidth / 2 - 2;
-  }
-
-  function startJoystick(e, which, ringEl) {
+  function stickDown(e, which) {
+    const s = stickOf(which);
+    if (s.active) return;
     e.preventDefault();
-    activeJoystick = which;
-    computeJoystickGeometry(ringEl);
-    updateJoystick(e);
-
-    // Global listeners
-    document.addEventListener('mousemove', onJoystickMove);
-    document.addEventListener('mouseup', endJoystick);
-    document.addEventListener('touchmove', onJoystickMove, { passive: false });
-    document.addEventListener('touchend', endJoystick);
-    document.addEventListener('touchcancel', endJoystick);
+    const ring = e.currentTarget.querySelector(".stick-ring");
+    const rect = ring.getBoundingClientRect();
+    s.cx = rect.left + rect.width / 2;
+    s.cy = rect.top + rect.height / 2;
+    s.r = rect.width * 0.31; // thumb travel radius (thumb is 38% of the ring)
+    s.active = true;
+    s.pointerId = e.pointerId;
+    capture(e.currentTarget, e.pointerId);
+    stickUpdate(e, which);
   }
-
-  function onJoystickMove(e) {
+  function stickMove(e, which) {
+    const s = stickOf(which);
+    if (!s.active || e.pointerId !== s.pointerId) return;
     e.preventDefault();
-    if (!activeJoystick) return;
-    updateJoystick(e);
+    stickUpdate(e, which);
   }
-
-  function endJoystick() {
-    if (!activeJoystick) return;
-    if (activeJoystick === 'top') {
-      joystickTopX = 0;
-      joystickTopY = 0;
-      joystickTopDx = 0;
-      joystickTopDy = 0;
+  function stickUp(e, which) {
+    const s = stickOf(which);
+    if (!s.active || e.pointerId !== s.pointerId) return;
+    s.active = false;
+    s.pointerId = null;
+    s.nx = s.ny = s.dx = s.dy = 0;
+    if (which === "move") {
       joyF = 0; joyS = 0;
-      // Explicitly stop the gait — zero joy values alone don't halt walking
-      sendGait('none');
+      sendGait("none"); // zero joy alone doesn't halt walking
+      joyStopIfIdle();
     } else {
-      joystickBotX = 0;
-      joystickBotY = 0;
-      joystickBotDx = 0;
-      joystickBotDy = 0;
-      // Center the head on release
-      sendLookMode('init');
+      sendLookMode("init");
     }
-    activeJoystick = null;
-    joyStopIfIdle();
-
-    document.removeEventListener('mousemove', onJoystickMove);
-    document.removeEventListener('mouseup', endJoystick);
-    document.removeEventListener('touchmove', onJoystickMove);
-    document.removeEventListener('touchend', endJoystick);
-    document.removeEventListener('touchcancel', endJoystick);
   }
+  function stickUpdate(e, which) {
+    const s = stickOf(which);
+    let dx = e.clientX - s.cx;
+    let dy = e.clientY - s.cy;
+    const dist = Math.hypot(dx, dy);
+    if (dist > s.r) { dx = (dx / dist) * s.r; dy = (dy / dist) * s.r; }
+    let nx = s.r > 0 ? +(dx / s.r).toFixed(4) : 0;
+    let ny = s.r > 0 ? +(dy / s.r).toFixed(4) : 0;
+    const dz = which === "move" ? DEADZONE : LOOK_DEADZONE;
+    const mag = Math.hypot(nx, ny);
+    if (mag < dz) { nx = 0; ny = 0; dx = 0; dy = 0; }
+    s.nx = nx; s.ny = ny; s.dx = dx; s.dy = dy;
 
-  function updateJoystick(e) {
-    const pos = getJoystickClientPos(e);
-    let dx = pos.x - jCenterX;
-    let dy = pos.y - jCenterY;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-
-    if (dist > jMaxRadius) {
-      dx = (dx / dist) * jMaxRadius;
-      dy = (dy / dist) * jMaxRadius;
-    }
-
-    let nx = jMaxRadius > 0 ? +(dx / jMaxRadius).toFixed(4) : 0;
-    let ny = jMaxRadius > 0 ? +(dy / jMaxRadius).toFixed(4) : 0;
-
-    // ── deadzone: snap small deflections to zero ──────────────
-    const dz = activeJoystick === 'top' ? DEADZONE : LOOK_DEADZONE;
-    const mag = Math.sqrt(nx * nx + ny * ny);
-    if (mag < dz) {
-      nx = 0;
-      ny = 0;
-      dx = 0;
-      dy = 0;
-    }
-
-    if (activeJoystick === 'top') {
-      joystickTopX = nx;
-      joystickTopY = ny;
-      joystickTopDx = dx;
-      joystickTopDy = dy;
-      // Left pad: forward/strafe
+    if (which === "move") {
       joyF = -ny;
       joyS = -nx;
-      if (mag < DEADZONE) {
-        joyStopIfIdle();
-      } else {
-        joyStartTimer();
-      }
+      if (mag < dz) joyStopIfIdle(); else joyStartTimer();
     } else {
-      joystickBotX = nx;
-      joystickBotY = ny;
-      joystickBotDx = dx;
-      joystickBotDy = dy;
-      // Right pad: head pose (look direction)
-      const mode = joystickToLookMode(nx, ny);
-      sendLookMode(mode);
+      sendLookMode(joystickToLookMode(nx, ny));
     }
   }
 
-  // ── Button handlers ─────────────────────────────────────────
+  // Visual helpers
+  const mag = (s) => Math.min(1, Math.hypot(s.nx, s.ny));
+  /** CSS angle: 0 = up, clockwise */
+  const cssAngle = (s) => (Math.atan2(s.dx, -s.dy) * 180) / Math.PI;
+  function sector(s) {
+    const a = (Math.atan2(-s.ny, s.nx) * 180) / Math.PI; // 0 = right, 90 = up
+    return Math.round(((a + 360) % 360) / 45) % 8;          // 0 R,1 UR,2 U,3 UL,4 L,5 DL,6 D,7 DR
+  }
+  const MOVE_NAMES = ["Right", "Forward · right", "Forward", "Forward · left", "Left", "Back · left", "Back", "Back · right"];
+  const LOOK_NAMES = ["right", "up · right", "up", "up · left", "left", "down · left", "down", "down · right"];
+  let moveReadout = $derived(mag(move) === 0 ? (move.active ? "Deadzone" : "Drag to walk") : `${MOVE_NAMES[sector(move)]} · ${Math.round(mag(move) * 100)}%`);
+  let lookReadout = $derived(mag(look) === 0 ? (look.active ? "Centred" : "Drag to look around") : `Looking ${LOOK_NAMES[sector(look)]}`);
+  /** dominant cardinal for rim glyph highlight: "n" | "e" | "s" | "w" | null */
+  function cardinal(s) {
+    if (mag(s) === 0) return null;
+    return Math.abs(s.nx) > Math.abs(s.ny) ? (s.nx > 0 ? "e" : "w") : (s.ny > 0 ? "s" : "n");
+  }
 
-  /** Map controller button IDs to robot gait commands */
-  const buttonGaitMap = {
-    'dpad-up':    'advance',
-    'dpad-down':  'back',
-    'dpad-left':  'left',
-    'dpad-right': 'right',
-    'action-top':    'jump',
-    'action-right':  'twerk',
-    'action-bottom': 'sit',
-    'action-left':   'stretch',
-    'shoulder-l': 'turnL',
-    'shoulder-r': 'turnR',
+  // ── Buttons (hold-to-run) ────────────────────────────────────
+  const BUTTON_GAITS = {
+    "turn-l": "turnL",
+    "turn-r": "turnR",
+    "key-up": "advance",
+    "key-down": "back",
+    "key-left": "left",
+    "key-right": "right",
+    "action-top": "jump",
+    "action-right": "twerk",
+    "action-bottom": "sit",
+    "action-left": "stretch",
   };
+  let pressed = $state(new Set());
+  let lastGait = $state(null);
 
-  function handlePress(action) {
-    if (pressedButtons.has(action)) return;
-    pressedButtons.add(action);
-    // Check action assignments first, fall back to hardcoded map
-    const gait = assignments[action] || buttonGaitMap[action];
-    if (gait) sendGait(gait);
+  function gaitFor(id) { return assignments[id] || BUTTON_GAITS[id]; }
+  function press(id) {
+    if (pressed.has(id)) return;
+    pressed = new Set(pressed).add(id);
+    const gait = gaitFor(id);
+    if (gait) { lastGait = gait; sendGait(gait); }
   }
-
-  function handleRelease(action) {
-    if (!pressedButtons.has(action)) return;
-    pressedButtons.delete(action);
-    // stop the gait when the button is released (hold-to-action)
-    const gait = assignments[action] || buttonGaitMap[action];
-    if (gait) sendGait('none');
+  function release(id) {
+    if (!pressed.has(id)) return;
+    const next = new Set(pressed); next.delete(id); pressed = next;
+    if (gaitFor(id)) { lastGait = null; sendGait("none"); }
   }
-
-  function onButtonPointerDown(e, action) {
-    e.preventDefault();
-    handlePress(action);
-    e.currentTarget.setPointerCapture(e.pointerId);
+  function stopAll() {
+    pressed = new Set();
+    lastGait = null;
+    joyF = 0; joyS = 0; joyT = 0;
+    joyStopIfIdle();
+    sendGait("none");
+    if (navigator.vibrate) { try { navigator.vibrate(20); } catch {} }
   }
+  function centreHead() { lastLookMode = null; sendLookMode("init"); }
 
-  function onButtonPointerUp(e, action) {
-    handleRelease(action);
+  function capture(el, pointerId) {
+    try { el.setPointerCapture(pointerId); } catch { /* synthetic / inactive pointer */ }
   }
+  function btnDown(e, id) { e.preventDefault(); capture(e.currentTarget, e.pointerId); press(id); }
+  function btnUp(e, id) { release(id); }
 
-  function onButtonPointerLeave(e, action) {
-    handleRelease(action);
-  }
-
-  // ── Keyboard handlers ───────────────────────────────────────
-
+  // ── Keyboard ─────────────────────────────────────────────────
+  const KEYMAP = {
+    ArrowUp: "key-up", ArrowDown: "key-down", ArrowLeft: "key-left", ArrowRight: "key-right",
+    w: "key-up", s: "key-down", a: "key-left", d: "key-right",
+    q: "turn-l", e: "turn-r",
+    i: "action-top", l: "action-right", k: "action-bottom", j: "action-left",
+  };
   function onKeyDown(e) {
-    const action = keyMap[e.key];
-    if (!action) return;
+    if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+    if (e.key === " " || e.key === "Escape") { e.preventDefault(); stopAll(); return; }
+    const id = KEYMAP[e.key];
+    if (!id) return;
     e.preventDefault();
-    handlePress(action);
+    press(id);
   }
-
   function onKeyUp(e) {
-    const action = keyMap[e.key];
-    if (!action) return;
+    const id = KEYMAP[e.key];
+    if (!id) return;
     e.preventDefault();
-    handleRelease(action);
+    release(id);
   }
 
-
+  $effect(() => () => { if (joyTimer) clearInterval(joyTimer); });
 </script>
 
 <svelte:window onkeydown={onKeyDown} onkeyup={onKeyUp} />
 
-<div class="controller-wrapper">
-  <!-- ═══ Shoulder Buttons ═══ -->
-  <button
-    class="shoulder-btn shoulder-left"
-    class:pressed={pressedButtons.has('shoulder-l')}
-    onpointerdown={(e) => onButtonPointerDown(e, 'shoulder-l')}
-    onpointerup={(e) => onButtonPointerUp(e, 'shoulder-l')}
-    onpointerleave={(e) => onButtonPointerLeave(e, 'shoulder-l')}
-    aria-label="L (shoulder)"
+{#snippet stick(which, s, readout, dz)}
+  <div
+    class="stick"
+    class:look-stick={which === "look"}
+    class:active={s.active}
+    style="--ang: {cssAngle(s)}deg; --mag: {mag(s)}; --dz: {dz}"
+    role="slider"
+    tabindex="0"
+    aria-label="{which === 'move' ? 'Move' : 'Look'} stick"
+    aria-valuemin="0"
+    aria-valuemax="100"
+    aria-valuenow={Math.round(mag(s) * 100)}
+    aria-valuetext={readout}
+    onpointerdown={(e) => stickDown(e, which)}
+    onpointermove={(e) => stickMove(e, which)}
+    onpointerup={(e) => stickUp(e, which)}
+    onpointercancel={(e) => stickUp(e, which)}
   >
-    <svg viewBox="10 5 155 95" class="shoulder-svg" preserveAspectRatio="xMidYMid meet">
-      <path d="M125.5 15C141.017 15 154.442 23.9488 160.901 36.9658C132.707 47.9067 109.171 68.1823 94.0859 94H54.5C32.6848 94 15 76.3152 15 54.5C15 32.6848 32.6848 15 54.5 15H125.5Z" fill="#E2CD18"/>
-      <path d="M50.2541 58.829C50.1225 55.7138 50.6545 52.6062 51.815 49.7121C52.9757 46.8179 54.738 44.2025 56.9858 42.0412C59.2337 39.8801 61.9162 38.2217 64.8537 37.1755C67.7915 36.1294 70.9194 35.7194 74.0276 35.9735C77.1354 36.2276 80.1543 37.1391 82.8829 38.6483C85.6117 40.1576 87.9891 42.2306 89.8562 44.7283C91.7231 47.2259 93.0371 50.0922 93.7123 53.1364C94.3876 56.1809 94.4081 59.3347 93.7721 62.3876L92.9566 66.3032L88.5994 65.3957C90.2791 61.7338 90.7467 57.4888 89.6343 53.2904C87.0884 43.6809 77.2343 37.9548 67.6248 40.5005C67.1385 40.6294 66.6623 40.7783 66.1965 40.9436L66.1953 40.9429C66.1688 40.9524 66.1428 40.9633 66.1164 40.9729C57.4264 44.1025 52.4253 53.4148 54.8349 62.5101C54.8463 62.5529 54.8583 62.5955 54.8699 62.6382L54.4191 62.6566L50.4231 62.8263L50.2541 58.829Z" fill="#FFF8F8"/>
-      <path d="M59.2261 56.8478L52.2236 63.8453L45.4111 58.3804" stroke="white" stroke-width="4" stroke-linecap="round"/>
-    </svg>
-  </button>
-  <button
-    class="shoulder-btn shoulder-right"
-    class:pressed={pressedButtons.has('shoulder-r')}
-    onpointerdown={(e) => onButtonPointerDown(e, 'shoulder-r')}
-    onpointerup={(e) => onButtonPointerUp(e, 'shoulder-r')}
-    onpointerleave={(e) => onButtonPointerLeave(e, 'shoulder-r')}
-    aria-label="R (shoulder)"
-  >
-    <svg viewBox="255 5 155 95" class="shoulder-svg" preserveAspectRatio="xMidYMid meet">
-      <path d="M366.5 15C388.315 15 406 32.6848 406 54.5C406 76.3152 388.315 94 366.5 94H323.914C309.28 68.9542 286.693 49.1237 259.615 37.9717C265.871 24.4115 279.586 15 295.5 15H366.5Z" fill="#E2CD18"/>
-      <path d="M369.686 58.829C369.818 55.7138 369.285 52.6062 368.125 49.7121C366.964 46.8179 365.202 44.2025 362.954 42.0412C360.706 39.8801 358.024 38.2217 355.086 37.1755C352.149 36.1294 349.021 35.7194 345.912 35.9735C342.805 36.2276 339.786 37.1391 337.057 38.6483C334.328 40.1576 331.951 42.2306 330.084 44.7283C328.217 47.2259 326.903 50.0922 326.228 53.1364C325.552 56.1809 325.532 59.3347 326.168 62.3876L326.983 66.3032L331.34 65.3966C329.66 61.7346 329.193 57.4891 330.306 53.2904C332.852 43.6809 342.706 37.9548 352.315 40.5005C352.802 40.6294 353.278 40.7783 353.744 40.9436L353.745 40.9429C353.771 40.9524 353.797 40.9633 353.824 40.9729C362.514 44.1025 367.515 53.4148 365.105 62.5101C365.094 62.5529 365.082 62.5955 365.07 62.6382L365.521 62.6566L369.517 62.8263L369.686 58.829Z" fill="#FFF8F8"/>
-      <path d="M360.714 56.8478L367.716 63.8453L374.529 58.3804" stroke="white" stroke-width="4" stroke-linecap="round"/>
-    </svg>
-  </button>
-
-  <!-- ═══ Controller Body ═══ -->
-  <div class="controller-body">
-    <!-- Decorative cross backgrounds (behind D-Pad and Action buttons) -->
-    <div class="bg-cross dpad-bg-cross">
-      <div class="cross-bar cross-bar-h"></div>
-      <div class="cross-bar cross-bar-v"></div>
-    </div>
-    <div class="bg-cross action-bg-cross">
-      <div class="cross-bar cross-bar-h"></div>
-      <div class="cross-bar cross-bar-v"></div>
-    </div>
-
-    <!-- Left Analog Joystick (Top) -->
-    <!-- svelte-ignore a11y_interactive_supports_focus a11y_role_has_required_aria_props -->
-    <div
-      class="joystick-zone joystick-top"
-      class:active={activeJoystick === 'top'}
-      onpointerdown={(e) => {
-        const ring = e.currentTarget.querySelector('.joystick-ring');
-        startJoystick(e, 'top', ring);
-      }}
-      role="slider"
-      aria-label="Left joystick"
-      aria-valuenow={Math.round((Math.abs(joystickTopX) + Math.abs(joystickTopY)) * 50)}
-      aria-valuetext={`x:${joystickTopX.toFixed(2)} y:${joystickTopY.toFixed(2)}`}
-    >
-      <div class="joystick-inner">
-        <div class="joystick-ring">
-          <div class="deadzone-indicator" style="--dz-pct:{DEADZONE * 100}%"></div>
-          <div
-            class="joystick-thumb"
-            style="transform: translate(calc(-50% + {joystickTopDx}px), calc(-50% + {joystickTopDy}px))"
-          ></div>
-        </div>
+    <div class="stick-ring">
+      <div class="beam"></div>
+      <span class="glyph n" class:on={cardinal(s) === "n"}><svg viewBox="0 0 24 24"><path d="M12 5l6 8H6z"/></svg></span>
+      <span class="glyph e" class:on={cardinal(s) === "e"}><svg viewBox="0 0 24 24"><path d="M19 12l-8 6V6z"/></svg></span>
+      <span class="glyph s" class:on={cardinal(s) === "s"}><svg viewBox="0 0 24 24"><path d="M12 19l-6-8h12z"/></svg></span>
+      <span class="glyph w" class:on={cardinal(s) === "w"}><svg viewBox="0 0 24 24"><path d="M5 12l8-6v12z"/></svg></span>
+      <div class="deadzone"></div>
+      <div class="thumb" style="transform: translate(calc(-50% + {s.dx}px), calc(-50% + {s.dy}px))">
+        {#if which === "look"}
+          <!-- the Look cap is the pupper's face -->
+          <span class="thumb-eyes"><i></i><i></i></span>
+        {:else}
+          <svg class="thumb-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/><path d="M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></svg>
+        {/if}
       </div>
     </div>
-
-    <!-- D-Pad -->
-    <div class="dpad">
-      <button
-        class="dpad-btn"
-        class:pressed={pressedButtons.has('dpad-up')}
-        onpointerdown={(e) => onButtonPointerDown(e, 'dpad-up')}
-        onpointerup={(e) => onButtonPointerUp(e, 'dpad-up')}
-        onpointerleave={(e) => onButtonPointerLeave(e, 'dpad-up')}
-        aria-label="D-Pad Up"
-      >
-        <svg viewBox="0 0 24 24">
-          <polygon points="12,3 21,20 3,20" fill="#222"/>
-        </svg>
-      </button>
-      <button
-        class="dpad-btn"
-        class:pressed={pressedButtons.has('dpad-left')}
-        onpointerdown={(e) => onButtonPointerDown(e, 'dpad-left')}
-        onpointerup={(e) => onButtonPointerUp(e, 'dpad-left')}
-        onpointerleave={(e) => onButtonPointerLeave(e, 'dpad-left')}
-        aria-label="D-Pad Left"
-      >
-        <svg viewBox="0 0 24 24">
-          <polygon points="3,12 20,3 20,21" fill="#222"/>
-        </svg>
-      </button>
-      <button
-        class="dpad-btn"
-        class:pressed={pressedButtons.has('dpad-right')}
-        onpointerdown={(e) => onButtonPointerDown(e, 'dpad-right')}
-        onpointerup={(e) => onButtonPointerUp(e, 'dpad-right')}
-        onpointerleave={(e) => onButtonPointerLeave(e, 'dpad-right')}
-        aria-label="D-Pad Right"
-      >
-        <svg viewBox="0 0 24 24">
-          <polygon points="21,12 4,3 4,21" fill="#222"/>
-        </svg>
-      </button>
-      <button
-        class="dpad-btn"
-        class:pressed={pressedButtons.has('dpad-down')}
-        onpointerdown={(e) => onButtonPointerDown(e, 'dpad-down')}
-        onpointerup={(e) => onButtonPointerUp(e, 'dpad-down')}
-        onpointerleave={(e) => onButtonPointerLeave(e, 'dpad-down')}
-        aria-label="D-Pad Down"
-      >
-        <svg viewBox="0 0 24 24">
-          <polygon points="12,21 3,4 21,4" fill="#222"/>
-        </svg>
-      </button>
-    </div>
-
-    <!-- Action Buttons -->
-    <div class="action-btns">
-      <button
-        class="action-btn"
-        class:pressed={pressedButtons.has('action-top')}
-        onpointerdown={(e) => onButtonPointerDown(e, 'action-top')}
-        onpointerup={(e) => onButtonPointerUp(e, 'action-top')}
-        onpointerleave={(e) => onButtonPointerLeave(e, 'action-top')}
-        aria-label="Action Top (Triangle)"
-      >
-        <svg viewBox="0 0 50 50" class="action-svg">
-          <path d="M25 6 L40 34.5 L10 34.5 Z" fill="none" stroke="#6AAE6C" stroke-width="4" stroke-linejoin="round"/>
-        </svg>
-      </button>
-      <button
-        class="action-btn"
-        class:pressed={pressedButtons.has('action-right')}
-        onpointerdown={(e) => onButtonPointerDown(e, 'action-right')}
-        onpointerup={(e) => onButtonPointerUp(e, 'action-right')}
-        onpointerleave={(e) => onButtonPointerLeave(e, 'action-right')}
-        aria-label="Action Right (Circle)"
-      >
-        <svg viewBox="0 0 50 50" class="action-svg">
-          <circle cx="25" cy="25" r="15" fill="none" stroke="#ED7676" stroke-width="4"/>
-        </svg>
-      </button>
-      <button
-        class="action-btn"
-        class:pressed={pressedButtons.has('action-bottom')}
-        onpointerdown={(e) => onButtonPointerDown(e, 'action-bottom')}
-        onpointerup={(e) => onButtonPointerUp(e, 'action-bottom')}
-        onpointerleave={(e) => onButtonPointerLeave(e, 'action-bottom')}
-        aria-label="Action Bottom (Pentagon)"
-      >
-        <svg viewBox="0 0 50 50" class="action-svg">
-          <polygon points="25,10 39.3,20.4 33.8,37.1 16.2,37.1 10.7,20.4" fill="none" stroke="#89B0DB" stroke-width="4" stroke-linejoin="round"/>
-        </svg>
-      </button>
-      <button
-        class="action-btn"
-        class:pressed={pressedButtons.has('action-left')}
-        onpointerdown={(e) => onButtonPointerDown(e, 'action-left')}
-        onpointerup={(e) => onButtonPointerUp(e, 'action-left')}
-        onpointerleave={(e) => onButtonPointerLeave(e, 'action-left')}
-        aria-label="Action Left (Square)"
-      >
-        <svg viewBox="0 0 50 50" class="action-svg">
-          <rect x="13" y="13" width="24" height="24" rx="3" fill="none" stroke="#A476ED" stroke-width="4"/>
-        </svg>
-      </button>
-    </div>
-
-    <!-- Right Analog Joystick (Bottom) -->
-    <!-- svelte-ignore a11y_interactive_supports_focus a11y_role_has_required_aria_props -->
-    <div
-      class="joystick-zone joystick-bottom"
-      class:active={activeJoystick === 'bottom'}
-      onpointerdown={(e) => {
-        const ring = e.currentTarget.querySelector('.joystick-ring');
-        startJoystick(e, 'bottom', ring);
-      }}
-      role="slider"
-      aria-label="Right joystick"
-      aria-valuenow={Math.round((Math.abs(joystickBotX) + Math.abs(joystickBotY)) * 50)}
-      aria-valuetext={`x:${joystickBotX.toFixed(2)} y:${joystickBotY.toFixed(2)}`}
-    >
-      <div class="joystick-inner">
-        <div class="joystick-ring">
-          <div class="deadzone-indicator" style="--dz-pct:{LOOK_DEADZONE * 100}%"></div>
-          <div
-            class="joystick-thumb"
-            style="transform: translate(calc(-50% + {joystickBotDx}px), calc(-50% + {joystickBotDy}px))"
-          ></div>
-        </div>
-      </div>
-    </div>
-
   </div>
+{/snippet}
+
+<div class="pad-box">
+<div class="pad" class:offline={!online}>
+  <!-- ═══ SHOULDER BUMPERS (turn) ═══ -->
+  <button
+    class="bumper l"
+    class:pressed={pressed.has("turn-l")}
+    onpointerdown={(e) => btnDown(e, "turn-l")}
+    onpointerup={(e) => btnUp(e, "turn-l")}
+    onpointercancel={(e) => btnUp(e, "turn-l")}
+    aria-label="Turn left (hold)"
+    title="Turn left · Q"
+  >
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+    <span>Turn</span>
+  </button>
+  <button
+    class="bumper r"
+    class:pressed={pressed.has("turn-r")}
+    onpointerdown={(e) => btnDown(e, "turn-r")}
+    onpointerup={(e) => btnUp(e, "turn-r")}
+    onpointercancel={(e) => btnUp(e, "turn-r")}
+    aria-label="Turn right (hold)"
+    title="Turn right · E"
+  >
+    <span>Turn</span>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+  </button>
+
+  <!-- ═══ MOVE ═══ -->
+  <section class="cluster move" aria-label="Move">
+    <div class="stick-label">
+      <span class="title">Move</span>
+    </div>
+    {@render stick("move", move, moveReadout, DEADZONE)}
+    <span class="readout" class:live={mag(move) > 0}>{moveReadout}</span>
+  </section>
+
+  <!-- ═══ ACTIONS (ABXY diamond) ═══ -->
+  <section class="actions" aria-label="Actions">
+    <div class="tools">
+      {#if onEdit && !fullscreen}
+        <button class="tool-btn" onclick={onEdit} aria-label="Edit actions" title="Edit actions">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </button>
+      {/if}
+      <button class="stop-btn" onclick={stopAll} aria-label="Stop all movement" title="Stop · Space">
+        <span class="stop-square"></span>
+        <span class="stop-text">Stop</span>
+        {#if lastGait}<span class="stop-status">{lastGait}</span>{/if}
+      </button>
+      {#if onToggleFullscreen}
+        <button class="tool-btn" onclick={onToggleFullscreen} aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen"} title={fullscreen ? "Exit fullscreen" : "Fullscreen"}>
+          {#if fullscreen}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+          {:else}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+          {/if}
+        </button>
+      {/if}
+    </div>
+
+    <div class="diamond">
+      {#each SLOTS as slot (slot.id)}
+        {@const a = slotAction(slot)}
+        <div class="dcell {slot.pos}">
+          <button
+            class="abtn"
+            class:pressed={pressed.has(slot.id)}
+            style="--tone: {slot.color}"
+            onpointerdown={(e) => btnDown(e, slot.id)}
+            onpointerup={(e) => btnUp(e, slot.id)}
+            onpointercancel={(e) => btnUp(e, slot.id)}
+            aria-label="{a.label} (hold)"
+            title={a.label}
+          >
+            <svg class="face-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              {#if slot.shape === "triangle"}
+                <path d="M12 4l9 16H3z"/>
+              {:else if slot.shape === "circle"}
+                <circle cx="12" cy="12" r="8.5"/>
+              {:else if slot.shape === "square"}
+                <rect x="4" y="4" width="16" height="16" rx="2"/>
+              {:else}
+                <path d="M12 3l9 6.5-3.4 10.5H6.4L3 9.5z"/>
+              {/if}
+            </svg>
+          </button>
+          <span class="albl">{a.label}</span>
+        </div>
+      {/each}
+      <span class="dcentre" aria-hidden="true"></span>
+    </div>
+  </section>
+
+  <!-- ═══ LOOK ═══ -->
+  <section class="cluster look" aria-label="Look">
+    <div class="stick-label">
+      <span class="title">Look</span>
+      <button class="tool-btn mini" onclick={centreHead} aria-label="Centre head" title="Centre head">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+      </button>
+    </div>
+    {@render stick("look", look, lookReadout, LOOK_DEADZONE)}
+    <span class="readout" class:live={mag(look) > 0}>{lookReadout}</span>
+  </section>
+</div>
 </div>
 
 <style>
-  .controller-wrapper {
-    position: relative;
-    width: 100%;
-    flex: 1;
-    min-height: 460px;
-    max-width: 400px;
-    align-self: center;
-  }
-
   /* ════════════════════════════════════════
-     SHOULDER BUTTONS
+     LAYOUT — container-query driven
      ════════════════════════════════════════ */
-  .shoulder-btn {
-    position: absolute;
-    border: none;
-    background: none;
-    cursor: pointer;
-    padding: 0;
-    line-height: 0;
-    transition: transform 0.08s ease;
-    z-index: 10;
-  }
-
-  .shoulder-btn .shoulder-svg {
-    display: block;
+  /* The query container. Everything inside (including the .pad grid's own
+     rules and cq* units) resolves against this box, i.e. the pad's own size. */
+  .pad-box {
+    container-type: size;
     width: 100%;
-    height: auto;
-    filter: drop-shadow(0 4px 0 #8f7a00) drop-shadow(0 6px 12px rgba(0, 0, 0, 0.3));
-  }
-
-  .shoulder-left {
-    left: 1.5%;
-    top: 0.5%;
-    width: 34.76%;
-  }
-
-  .shoulder-right {
-    right: 1.5%;
-    top: 0.5%;
-    width: 34.76%;
-  }
-
-  .shoulder-btn.pressed,
-  .shoulder-btn:active {
-    transform: translateY(4px);
-  }
-
-  .shoulder-btn.pressed .shoulder-svg,
-  .shoulder-btn:active .shoulder-svg {
-    filter: drop-shadow(0 1px 0 #8f7a00) drop-shadow(0 4px 8px rgba(0, 0, 0, 0.3));
-  }
-
-  /* ════════════════════════════════════════
-     CONTROLLER BODY
-     ════════════════════════════════════════ */
-  .controller-body {
-    position: absolute;
-    inset: 0;
-    background: #F3DD12;
-    background-image: radial-gradient(
-      circle at 50% 60%,
-      rgba(255, 255, 255, 0.35) 0%,
-      rgba(255, 255, 255, 0) 70%
-    );
-    border-radius: clamp(24px, 5.5vw, 48px);
-    box-shadow:
-      0 8px 0 #b8a000,
-      0 12px 40px rgba(0, 0, 0, 0.5),
-      inset 0 2px 4px rgba(255, 255, 255, 0.4);
-    border: 3px solid #d4c00e;
-  }
-
-  /* ════════════════════════════════════════
-     DECORATIVE CROSS BACKGROUNDS
-     ════════════════════════════════════════ */
-  .bg-cross {
-    position: absolute;
-    pointer-events: none;
-    z-index: 0;
-  }
-
-  .dpad-bg-cross {
-    left: 4.05%;
-    top: 40.29%;
-    width: 38.71%;
-    aspect-ratio: 162.588 / 166.554;
-  }
-
-  .action-bg-cross {
-    right: 7.14%;
-    top: 40.29%;
-    width: 38.57%;
-    aspect-ratio: 1;
-  }
-
-  .cross-bar {
-    position: absolute;
-    border-radius: 16%;
-    background: radial-gradient(circle at 50% 50%, #CDBA01 0%, #B8A701 100%);
-  }
-
-  .cross-bar-h {
-    width: 100%;
-    height: 36%;
-    top: 50%;
-    left: 0;
-    transform: translateY(-50%);
-  }
-
-  .cross-bar-v {
-    width: 36%;
     height: 100%;
-    top: 0;
-    left: 50%;
-    transform: translateX(-50%);
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    align-items: center;
+  }
+
+  .pad {
+    /* shell */
+    --shell: #1c1c1c;
+    --shell-2: #2a2a2a;
+    --shell-3: #363636;
+    --shell-line: rgba(255, 255, 255, 0.07);
+    --ink-on-shell: rgba(255, 255, 255, 0.62);
+    --ink-on-shell-2: rgba(255, 255, 255, 0.4);
+
+    --gap: clamp(8px, 2.2cqmin, 14px);
+    --fs: clamp(0.66rem, 2.6cqmin, 0.8rem);
+    --fs-sm: clamp(0.58rem, 2.2cqmin, 0.7rem);
+    --cluster-gap: clamp(6px, 1.6cqmin, 10px);
+    --label-h: 22px;
+    --readout-h: 16px;
+    /* label + readout + the two gaps that frame the stick */
+    --chrome: calc(var(--label-h) + var(--readout-h) + 2 * var(--cluster-gap));
+    --bumper-h: clamp(30px, 7cqmin, 40px);
+    --tools-h: 34px;
+    --albl: 16px;                                   /* label under an action button */
+    --abtn: clamp(44px, 15cqw, 68px);               /* action button diameter */
+    --actions-h: calc(var(--tools-h) + var(--gap) + 3 * (var(--abtn) + var(--albl)));
+    --pad-p: clamp(10px, 2.6cqmin, 18px);           /* shell padding */
+    --inner-h: calc(100cqh - 2 * var(--pad-p));     /* usable height inside the shell */
+
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    display: grid;
+    gap: var(--gap);
+    padding: var(--pad-p);
+    box-sizing: border-box;
+    border-radius: clamp(24px, 9cqmin, 52px);
+    background:
+      radial-gradient(ellipse 90% 55% at 50% 0%, rgba(255,255,255,0.09), transparent 60%),
+      linear-gradient(180deg, var(--shell-2) 0%, var(--shell) 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.12),
+      inset 0 -3px 0 rgba(0,0,0,0.55),
+      0 14px 30px rgba(0,0,0,0.28);
+    /* tall / square: bumpers on top, then the diamond, sticks side by side */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-areas:
+      "tl      tr"
+      "actions actions"
+      "move    look";
+    /* sticks are width-bound; the height budget is what remains */
+    --stick: clamp(88px, min(calc(42cqw - var(--pad-p)), calc(var(--inner-h) - var(--bumper-h) - var(--actions-h) - 2 * var(--gap) - var(--chrome))), 340px);
+    user-select: none;
+    -webkit-user-select: none;
+    transition: opacity var(--dur-med), filter var(--dur-med);
+  }
+  .pad.offline { opacity: 0.6; filter: saturate(0.5); }
+
+  @container (min-aspect-ratio: 5/4) {
+    .pad {
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
+      grid-template-areas:
+        "tl   actions tr"
+        "move actions look";
+      --abtn: clamp(40px, min(7.5cqw, calc((var(--inner-h) - var(--tools-h) - var(--gap) - 3 * var(--albl)) / 3)), 68px);
+      --stick: clamp(88px, min(30cqw, calc(var(--inner-h) - var(--bumper-h) - var(--gap) - var(--chrome))), 340px);
+      /* keep gamepad proportions on big screens: size the shell to its
+         contents (bumpers + the taller of sticks / diamond) and centre it */
+      height: min(100%, calc(var(--bumper-h) + var(--gap) + max(var(--stick) + var(--chrome), var(--actions-h)) + 2 * var(--pad-p)));
+    }
+    .pad > .cluster { justify-content: center; align-self: stretch; }
+    .pad > .actions { align-self: center; }
+  }
+
+  .bumper.l { grid-area: tl; justify-self: start; }
+  .bumper.r { grid-area: tr; justify-self: end; }
+  .move { grid-area: move; }
+  .look { grid-area: look; }
+  .actions { grid-area: actions; justify-self: center; }
+
+  /* ════════════════════════════════════════
+     SHARED
+     ════════════════════════════════════════ */
+  .title {
+    font-size: var(--fs);
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-on-shell);
+  }
+  .readout {
+    height: var(--readout-h);
+    line-height: var(--readout-h);
+    font-size: var(--fs-sm);
+    font-weight: 700;
+    color: var(--ink-on-shell-2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 100%;
+    transition: color var(--dur-fast);
+  }
+  .readout.live { color: var(--mpx-yellow); }
+
+  .tool-btn {
+    width: var(--tools-h); height: var(--tools-h);
+    flex-shrink: 0;
+    border-radius: 50%;
+    border: none;
+    background: var(--shell-3);
+    color: var(--ink-on-shell);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 2px 0 rgba(0,0,0,0.5);
+    display: grid; place-items: center;
+    cursor: pointer;
+    transition: transform var(--dur-fast), background var(--dur-fast), color var(--dur-fast);
+  }
+  .tool-btn svg { width: 55%; height: 55%; }
+  .tool-btn:hover { color: #fff; }
+  .tool-btn:active { transform: translateY(2px); box-shadow: inset 0 1px 0 rgba(255,255,255,0.1); }
+  .tool-btn.mini { width: var(--label-h); height: var(--label-h); }
+
+  .stick:focus-visible, .bumper:focus-visible, .abtn:focus-visible, .stop-btn:focus-visible, .tool-btn:focus-visible {
+    outline: 3px solid var(--mpx-yellow);
+    outline-offset: 3px;
   }
 
   /* ════════════════════════════════════════
-     ANALOG JOYSTICKS
+     BUMPERS (turn L / R)
      ════════════════════════════════════════ */
-  .joystick-zone {
-    position: absolute;
-    width: 54.52%;
-    aspect-ratio: 1;
-    border-radius: 50%;
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: radial-gradient(circle, rgba(255,252,228,1) 75%, rgba(222,201,0,0.6) 100%);
-    box-shadow: inset 0 0 30px rgba(0, 0, 0, 0.08);
+  .bumper {
+    height: var(--bumper-h);
+    min-width: clamp(76px, 22cqw, 128px);
+    padding: 0 clamp(10px, 3cqmin, 16px);
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    border: none;
+    border-radius: calc(var(--bumper-h) / 2);
+    background: linear-gradient(180deg, #4a4a4a, var(--shell-3));
+    color: var(--ink-on-shell);
+    font-size: var(--fs-sm);
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.14), 0 3px 0 #0d0d0d;
     cursor: pointer;
     touch-action: none;
-    z-index: 5;
+    transition: transform var(--dur-fast), background var(--dur-fast), color var(--dur-fast), box-shadow var(--dur-fast);
+  }
+  .bumper svg { width: calc(var(--bumper-h) * 0.55); height: calc(var(--bumper-h) * 0.55); }
+  .bumper.l { border-top-left-radius: calc(var(--bumper-h) * 0.35); }
+  .bumper.r { border-top-right-radius: calc(var(--bumper-h) * 0.35); }
+  .bumper.pressed, .bumper:active {
+    transform: translateY(3px);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.14), 0 0 0 #0d0d0d;
+    background: var(--mpx-yellow);
+    color: var(--mpx-ink);
   }
 
-  .joystick-top {
-    top: 4%;
-  }
-
-  .joystick-bottom {
-    bottom: 3%;
-  }
-
-  .joystick-inner {
-    width: 84.7%;
-    aspect-ratio: 1;
-    border-radius: 50%;
-    background: #FFE51A;
+  /* ════════════════════════════════════════
+     STICK CLUSTERS
+     ════════════════════════════════════════ */
+  .cluster {
+    min-width: 0; min-height: 0;
+    align-self: end; /* stacked: hug the sticks to the bottom (thumb reach) */
     display: flex;
+    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-    position: relative;
-    pointer-events: none;
+    justify-content: flex-end;
+    gap: var(--cluster-gap);
+  }
+  .stick-label {
+    height: var(--label-h);
+    display: flex; align-items: center; justify-content: center; gap: 8px;
   }
 
-  /* Shadow ellipse offset slightly */
-  .joystick-inner::after {
-    content: '';
-    position: absolute;
-    width: 102%;
-    height: 102%;
+  .stick {
+    width: var(--stick);
+    height: var(--stick);
+    flex-shrink: 0;
     border-radius: 50%;
-    background: #A49714;
-    top: -1%;
-    left: -0.5%;
-    z-index: -1;
-    pointer-events: none;
-  }
-
-  .joystick-ring {
+    padding: 5%;
+    /* recessed well in the shell */
+    background: radial-gradient(circle at 50% 40%, #0a0a0a 0%, #151515 60%, #202020 100%);
+    box-shadow:
+      inset 0 6px 14px rgba(0,0,0,0.85),
+      inset 0 -1px 0 rgba(255,255,255,0.10),
+      0 1px 0 rgba(255,255,255,0.06);
+    cursor: grab;
+    touch-action: none;
     position: relative;
-    width: 95%;
-    aspect-ratio: 1;
+  }
+  .stick.active { cursor: grabbing; }
+
+  .stick-ring {
+    position: relative;
+    width: 100%; height: 100%;
     border-radius: 50%;
-    background: radial-gradient(circle at 35% 35%, #f5f5f5, #c0c0c0);
-    border: 4px solid #ede6e6;
-    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.15);
-    pointer-events: none;
+    background: radial-gradient(circle at 50% 45%, #2c2c2c 0%, #1f1f1f 60%, #171717 100%);
+    box-shadow: inset 0 2px 6px rgba(0,0,0,0.8);
     overflow: hidden;
   }
+  /* crosshair */
+  .stick-ring::before, .stick-ring::after {
+    content: ""; position: absolute; background: rgba(255,255,255,0.06); pointer-events: none;
+  }
+  .stick-ring::before { left: 50%; top: 0; width: 1px; height: 100%; }
+  .stick-ring::after { top: 50%; left: 0; height: 1px; width: 100%; }
 
-  /* Cross-hairs */
-  .joystick-ring::before,
-  .joystick-ring::after {
-    content: '';
-    position: absolute;
-    background: rgba(0, 0, 0, 0.06);
+  /* direction beam: a ring wedge that swings with the stick */
+  .beam {
+    position: absolute; inset: 0;
+    border-radius: 50%;
+    background: conic-gradient(from calc(var(--ang) - 32deg), var(--mpx-yellow) 0deg 64deg, transparent 64deg);
+    -webkit-mask: radial-gradient(circle, transparent 62%, #000 63%);
+    mask: radial-gradient(circle, transparent 62%, #000 63%);
+    opacity: calc(var(--mag) * 0.9);
+    transition: opacity var(--dur-fast);
     pointer-events: none;
   }
-  .joystick-ring::before {
-    width: 1px;
-    height: 100%;
-    left: 50%;
-    top: 0;
-    transform: translateX(-50%);
-  }
-  .joystick-ring::after {
-    width: 100%;
-    height: 1px;
-    top: 50%;
-    left: 0;
-    transform: translateY(-50%);
-  }
 
-  /* ── deadzone ring ─────────────────────── */
-  .deadzone-indicator {
+  .glyph {
     position: absolute;
-    /* width = 2 × deadzone fraction × ring size */
-    width: calc(var(--dz-pct, 30%) * 2);
-    aspect-ratio: 1;
-    border-radius: 50%;
-    border: 1.5px dashed rgba(0, 0, 0, 0.18);
-    background: rgba(0, 0, 0, 0.04);
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
+    width: 14%; height: 14%;
+    display: grid; place-items: center;
+    color: rgba(255,255,255,0.22);
+    transition: color var(--dur-fast), transform var(--dur-fast);
     pointer-events: none;
-    z-index: 1;
+  }
+  .glyph svg { width: 100%; height: 100%; fill: currentColor; }
+  .glyph.n { top: 4%; left: 50%; transform: translateX(-50%); }
+  .glyph.s { bottom: 4%; left: 50%; transform: translateX(-50%); }
+  .glyph.w { left: 4%; top: 50%; transform: translateY(-50%); }
+  .glyph.e { right: 4%; top: 50%; transform: translateY(-50%); }
+  .glyph.on { color: var(--mpx-ink); }
+  .glyph.n.on { transform: translateX(-50%) scale(1.25); }
+  .glyph.s.on { transform: translateX(-50%) scale(1.25); }
+  .glyph.w.on { transform: translateY(-50%) scale(1.25); }
+  .glyph.e.on { transform: translateY(-50%) scale(1.25); }
+
+  .deadzone {
+    position: absolute;
+    left: 50%; top: 50%;
+    /* travel radius is 31% of the ring; deadzone = dz × travel × 2 */
+    width: calc(var(--dz) * 62%); height: calc(var(--dz) * 62%);
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    border: 1.5px dashed rgba(255,255,255,0.14);
+    pointer-events: none;
   }
 
-  .joystick-thumb {
+  /* thumb cap */
+  .thumb {
     position: absolute;
-    width: 48%;
-    aspect-ratio: 1;
+    left: 50%; top: 50%;
+    width: 38%; height: 38%;
     border-radius: 50%;
-    background: linear-gradient(145deg, #f5f5f5, #c8c8c8);
-    border: 2px solid #ede6e6;
-    box-shadow:
-      0 2px 6px rgba(0, 0, 0, 0.25),
-      inset 0 1px 2px rgba(255, 255, 255, 0.6);
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    transition: box-shadow 0.1s ease;
+    background:
+      radial-gradient(circle at 50% 50%, transparent 58%, rgba(0,0,0,0.12) 60%, transparent 63%),
+      radial-gradient(circle at 40% 32%, #fff6a8 0%, var(--mpx-yellow) 42%, var(--mpx-yellow-deep) 100%);
+    border: 3px solid #0e0e0e;
+    box-shadow: 0 5px 12px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.75), inset 0 -3px 0 rgba(0,0,0,0.18);
+    display: grid; place-items: center;
+    color: var(--mpx-ink);
     will-change: transform;
     pointer-events: none;
+    transition: box-shadow var(--dur-fast);
   }
+  .stick:not(.active) .thumb { transition: transform 180ms var(--ease-spring), box-shadow var(--dur-fast); }
+  .stick.active .thumb { box-shadow: 0 9px 18px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.75), inset 0 -3px 0 rgba(0,0,0,0.18); }
+  .thumb-mark { width: 46%; height: 46%; opacity: 0.5; }
 
-  .joystick-thumb::after {
-    content: '';
-    position: absolute;
-    width: 30%;
-    aspect-ratio: 1;
-    border-radius: 50%;
-    background: radial-gradient(circle at 40% 40%, #ddd, #999);
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
+  .thumb-eyes { display: flex; gap: 14%; width: 56%; justify-content: center; }
+  .thumb-eyes i {
+    display: block;
+    width: 26%; aspect-ratio: 11 / 20;
+    border-radius: 999px 999px 40% 40%;
+    background: var(--mpx-ink);
+    transform-origin: center;
+    animation: blink 6s infinite;
   }
-
-  .joystick-zone.active .joystick-thumb {
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.35),
-      inset 0 1px 2px rgba(255, 255, 255, 0.6);
-  }
+  @keyframes blink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.12); } }
 
   /* ════════════════════════════════════════
-     D-PAD
+     ACTIONS — ABXY diamond with Stop in the middle
      ════════════════════════════════════════ */
-  .dpad {
-    position: absolute;
-    left: 4.05%;
-    top: 40.29%;
-    width: 38.71%;
-    aspect-ratio: 162.588 / 166.554;
+  .actions {
+    min-width: 0; min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--gap);
+  }
+  .tools {
+    height: var(--tools-h);
+    width: calc(3 * var(--abtn) + 16px);
+    display: flex; align-items: center; gap: 8px;
+  }
+  /* emergency stop — its own wide pill, clearly not a face button */
+  .stop-btn {
+    flex: 1; min-width: 0;
+    height: var(--tools-h);
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    padding: 0 10px;
+    border: 1.5px solid rgba(237,118,118,0.55);
+    border-radius: calc(var(--tools-h) / 2);
+    background: linear-gradient(180deg, #2e2e2e, #1a1a1a);
+    color: #fff;
+    font-size: var(--fs-sm);
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 3px 0 #000;
+    cursor: pointer;
+    transition: transform var(--dur-fast), box-shadow var(--dur-fast), background var(--dur-fast);
+  }
+  .stop-btn:active {
+    transform: translateY(3px);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 #000;
+    background: var(--mpx-err);
+    color: var(--mpx-ink);
+  }
+  .stop-square {
+    width: 10px; height: 10px; flex-shrink: 0;
+    border-radius: 2px;
+    background: var(--mpx-err);
+    box-shadow: 0 0 8px rgba(237,118,118,0.6);
+  }
+  .stop-btn:active .stop-square { background: var(--mpx-ink); box-shadow: none; }
+  .stop-status {
+    min-width: 0;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: var(--mpx-yellow);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .stop-status::before { content: "·"; margin-right: 7px; color: var(--ink-on-shell-2); }
+
+  .diamond {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    grid-template-rows: repeat(3, 1fr);
-    gap: 2%;
+    grid-template-columns: repeat(3, var(--abtn));
+    grid-template-rows: repeat(3, calc(var(--abtn) + var(--albl)));
+    column-gap: 8px;
+    /* faint cross behind the diamond, like a moulded recess */
+    background:
+      radial-gradient(circle at 50% calc(50% - var(--albl) / 2), rgba(0,0,0,0.35) 0%, rgba(0,0,0,0.25) 52%, transparent 58%);
   }
+  .dcell {
+    display: flex; flex-direction: column; align-items: center;
+    width: var(--abtn);
+  }
+  .dcell.top    { grid-area: 1 / 2; }
+  .dcell.left   { grid-area: 2 / 1; }
+  .dcell.right  { grid-area: 2 / 3; }
+  .dcell.bottom { grid-area: 3 / 2; }
 
-  .dpad-btn {
-    width: 100%;
-    height: 100%;
+  .abtn {
+    position: relative;
+    width: var(--abtn); height: var(--abtn);
+    border-radius: 50%;
     border: none;
-    border-radius: 12%;
+    display: grid; place-items: center;
+    background:
+      radial-gradient(circle at 40% 30%, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0) 45%),
+      var(--tone);
+    color: var(--mpx-ink);
+    box-shadow:
+      inset 0 -4px 0 rgba(0,0,0,0.22),
+      inset 0 1px 0 rgba(255,255,255,0.5),
+      0 4px 0 rgba(0,0,0,0.55),
+      0 6px 12px rgba(0,0,0,0.35);
     cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.08s ease;
-    background: #f9f7f7;
+    touch-action: none;
+    transition: transform var(--dur-fast), box-shadow var(--dur-fast), filter var(--dur-fast);
+  }
+  .face-glyph {
+    width: 40%; height: 40%;
+    fill: rgba(0,0,0,0.62);
+    filter: drop-shadow(0 1px 0 rgba(255,255,255,0.35));
+    transition: fill var(--dur-fast);
+  }
+  .abtn.pressed .face-glyph, .abtn:active .face-glyph { fill: var(--mpx-ink); }
+  .abtn.pressed, .abtn:active {
+    transform: translateY(4px);
+    filter: brightness(1.12);
     box-shadow:
-      0 2px 0 #c0b000,
-      0 3px 6px rgba(0, 0, 0, 0.2);
+      inset 0 -2px 0 rgba(0,0,0,0.22),
+      inset 0 1px 0 rgba(255,255,255,0.5),
+      0 0 0 rgba(0,0,0,0.55),
+      0 0 0 4px color-mix(in srgb, var(--mpx-yellow) 70%, transparent);
+  }
+  .albl {
+    height: var(--albl);
+    line-height: var(--albl);
+    width: calc(var(--abtn) + 20px);
+    text-align: center;
+    font-size: var(--fs-sm);
+    font-weight: 800;
+    color: var(--ink-on-shell);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* moulded dimple in the middle of the diamond */
+  .dcentre {
+    grid-area: 2 / 2;
+    align-self: start;
+    justify-self: center;
+    margin-top: calc(var(--abtn) * 0.25);
+    width: calc(var(--abtn) * 0.5); height: calc(var(--abtn) * 0.5);
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 35%, #101010, #1e1e1e);
+    box-shadow: inset 0 3px 6px rgba(0,0,0,0.8), 0 1px 0 rgba(255,255,255,0.06);
   }
 
-  .dpad-btn svg {
-    pointer-events: none;
-    width: 45%;
-    height: auto;
+  @media (prefers-reduced-motion: reduce) {
+    .thumb-eyes i { animation: none; }
   }
-
-  /* Position each D-Pad button in the 3x3 grid */
-  .dpad-btn:nth-child(1) {
-    grid-column: 2;
-    grid-row: 1;
-    border-radius: 20% 20% 8% 8%;
-  }
-  .dpad-btn:nth-child(2) {
-    grid-column: 1;
-    grid-row: 2;
-    border-radius: 20% 8% 8% 20%;
-  }
-  .dpad-btn:nth-child(3) {
-    grid-column: 3;
-    grid-row: 2;
-    border-radius: 8% 20% 20% 8%;
-  }
-  .dpad-btn:nth-child(4) {
-    grid-column: 2;
-    grid-row: 3;
-    border-radius: 8% 8% 20% 20%;
-  }
-
-  .dpad-btn.pressed,
-  .dpad-btn:active {
-    transform: scale(0.92);
-    box-shadow:
-      0 1px 0 #c0b000,
-      0 1px 3px rgba(0, 0, 0, 0.2);
-    background: #e8e4e4;
-  }
-
-  /* ════════════════════════════════════════
-     ACTION BUTTONS (Diamond)
-     ════════════════════════════════════════ */
-  .action-btns {
-    position: absolute;
-    right: 7.14%;
-    top: 40.29%;
-    width: 38.57%;
-    aspect-ratio: 1;
-  }
-
-  .action-btn {
-    position: absolute;
-    width: 28.6%;
-    aspect-ratio: 1;
-    border: none;
-    border-radius: 25px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.08s ease;
-    background: #f9f7f7;
-    box-shadow:
-      0 3px 0 #c0b000,
-      0 4px 8px rgba(0, 0, 0, 0.25);
-  }
-
-  .action-btn svg {
-    pointer-events: none;
-    width: 70%;
-    height: auto;
-  }
-
-  /* Diamond positions */
-  .action-btn:nth-child(1) { /* top */
-    top: 0;
-    left: 50%;
-    transform: translateX(-50%);
-  }
-  .action-btn:nth-child(2) { /* right */
-    top: 50%;
-    right: 0;
-    transform: translateY(-50%);
-  }
-  .action-btn:nth-child(3) { /* bottom */
-    bottom: 0;
-    left: 50%;
-    transform: translateX(-50%);
-  }
-  .action-btn:nth-child(4) { /* left */
-    top: 50%;
-    left: 0;
-    transform: translateY(-50%);
-  }
-
-  .action-btn.pressed,
-  .action-btn:active {
-    box-shadow:
-      0 1px 0 #c0b000,
-      0 2px 4px rgba(0, 0, 0, 0.2);
-    background: #e8e4e4;
-  }
-
-  .action-btn:nth-child(1).pressed,
-  .action-btn:nth-child(1):active {
-    transform: translateX(-50%) scale(0.90);
-  }
-  .action-btn:nth-child(2).pressed,
-  .action-btn:nth-child(2):active {
-    transform: translateY(-50%) scale(0.90);
-  }
-  .action-btn:nth-child(3).pressed,
-  .action-btn:nth-child(3):active {
-    transform: translateX(-50%) scale(0.90);
-  }
-  .action-btn:nth-child(4).pressed,
-  .action-btn:nth-child(4):active {
-    transform: translateY(-50%) scale(0.90);
-  }
-
-  /* (status indicators and event log removed) */
 </style>
