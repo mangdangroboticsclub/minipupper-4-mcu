@@ -8,6 +8,138 @@
 namespace sdk {
 
 // ═══════════════════════════════════════════════════════════════
+//  ABI version and the one error convention
+// ═══════════════════════════════════════════════════════════════
+
+/* MPX_ABI_VERSION 2 — a BREAKING change from version 1.
+ *
+ * Seventeen host functions used to be registered with signatures that declare
+ * no result ("()", "(ii)", "($)" ...) even though every one of them computed
+ * an error code. WAMR discards a result the signature does not mention, so
+ * those codes were physically unreachable from a skill: a misspelled gait
+ * name, an out-of-range servo id, a null IMU pointer and a watchdog
+ * cancellation all looked identical from inside a skill — like nothing
+ * happening — while the real reason went to a serial console nobody was
+ * watching.
+ *
+ * They now return int32_t. This is not backwards compatible and cannot be
+ * made so: WAMR's check_symbol_signature() requires the signature string to
+ * be fully consumed after ')' when the calling module declares no result, so
+ * a v1 module trying to call one of these fails to link and traps on first
+ * call. Skills built against SDK v1 must be rebuilt — one `mpx-cli deploy`.
+ * Better to spend that now than after the marketplace fills with binaries
+ * nobody can recompile.
+ */
+/* v4 adds three capabilities that previously required patching firmware:
+ *
+ *   on_tick   a skill can run inside the control loop instead of being a
+ *             script that plays once (mpx_tick_every / mpx_tick_stop)
+ *   overlay   a skill can add to a frame the gait generator produced,
+ *             instead of having to replace it (mpx_overlay*)
+ *   trace     a skill can emit named numbers, not just text (mpx_trace)
+ *
+ * Purely additive: every v3 symbol keeps its name, signature and meaning, so
+ * a v3 module runs unchanged. The version still moves because a v4 module
+ * will not run on v3 firmware, and finding that out as a trap on the first
+ * host call is exactly what the version check exists to prevent.
+ */
+/* v5 adds one symbol, mpx_board_scale_dd(), and it exists because three
+ * places in this firmware asserted that a servo's travel is 270 degrees. It
+ * is not: the AT32 boards hold their own range_position_deg — 310 from the
+ * factory, less once 'guard' has trimmed it — in flash that survives any
+ * reflash of the ESP. A skill replaying recorded SCS ticks needs that number
+ * to know what a tick is worth, and could not ask for it.
+ *
+ * Additive like v4: every v4 symbol is unchanged, so a v4 module still runs.
+ * The version moves because a v5 module will NOT run on v4 firmware — the
+ * import is missing and instantiation fails — and saying so through the
+ * version check is better than a trap on the first call. */
+constexpr int32_t MPX_ABI_VERSION = 5;
+
+/* Every host function returns one of these, or a value >= 0 where it is
+ * documented to return data. Before v2 there were four incompatible
+ * conventions in one 48-symbol table; this is the only one now.
+ *
+ * NOTE: large parts of the older code still return bare literals (-1/-2/-3/-4)
+ * that happen to line up numerically with these. Keep the numbers exactly as
+ * they are — a skill switches on them. */
+enum : int32_t {
+	MPX_OK             =  0,   /**< Success.                                */
+	MPX_ERR_ARG        = -1,   /**< Bad argument: id, index or pointer.     */
+	MPX_ERR_NOT_LOCKED = -2,   /**< YOU do not hold the servo bus.          */
+	MPX_ERR_NO_REPLY   = -3,   /**< The driver board did not answer.        */
+	MPX_ERR_READONLY   = -4,   /**< Calibration parameter; read-only.       */
+	MPX_ERR_CANCELLED  = -5,   /**< The skill was stopped mid-call.         */
+	MPX_ERR_STATE      = -6,   /**< Right call, wrong time.                 */
+	MPX_ERR_BUSY       = -7,   /**< Another control domain holds the joints. */
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  ABI v3 additions
+//
+//  v3 is additive over v2 in behaviour: every v2 symbol keeps its name,
+//  signature and semantics. What v3 adds is (a) the capabilities the board
+//  always had but a skill could not reach, and (b) the arbitration that makes
+//  the control layers composable instead of merely coexistent.
+//
+//  Control arbitration is OPT-IN. Until a skill calls mpx_control_take(),
+//  s_control_owner is MPX_CTRL_NONE and every write path behaves exactly as it
+//  did in v2. A skill that takes a domain gets MPX_ERR_BUSY instead of a silent
+//  fight, which is the whole point.
+// ═══════════════════════════════════════════════════════════════
+
+enum : int32_t {
+	MPX_CTRL_NONE   = 0,   /**< Nobody has claimed the joints (v2 behaviour). */
+	MPX_CTRL_GAIT   = 1,   /**< The gait generator drives; you steer it.      */
+	MPX_CTRL_FEET   = 2,   /**< You place feet; firmware solves the legs.     */
+	MPX_CTRL_JOINTS = 3,   /**< You write joint angles directly.              */
+	MPX_CTRL_BUS    = 4,   /**< You own the servo bus (implies servo_lock).   */
+};
+
+/** Legs, for mpx_foot(). Matches the robot_ik_* ordering. */
+enum : int32_t {
+	MPX_LEG_FR = 0, MPX_LEG_FL = 1, MPX_LEG_RR = 2, MPX_LEG_RL = 3,
+};
+
+/**
+ * @brief May a write to @p domain proceed?
+ *
+ * True when nobody has claimed anything, or when the claimant IS this domain.
+ * This is the whole of the arbitration: it is checked on the write paths and
+ * nowhere else.
+ */
+bool control_allows(int32_t domain);
+
+/**
+ * @brief Does a skill currently own the twelve goal positions?
+ *
+ * Asked by the gait task's idle branch before it rebuilds the neutral stand.
+ * Until this existed a claim was checked only inside the host functions, so it
+ * could refuse the skill's own calls and nothing else - while the buffer the
+ * skill had claimed was rewritten underneath it every tick.
+ *
+ * Deliberately narrow: FEET and JOINTS only. Claiming GAIT or BUS is not a
+ * claim on the goal buffer.
+ */
+bool control_owner_is_pose();
+
+/** Drop any claim. Called at the start and end of every skill run. */
+void control_reset();
+
+/** Forget which gains a skill touched. Called at the start of every run. */
+void forget_skill_gains();
+
+/**
+ * @brief Put back every gain the skill changed, to what it was beforehand.
+ *
+ * Must be called while the servo bus is still held: a config write is a
+ * request/reply pair and is refused without the lock.
+ *
+ * @return How many slots were restored.
+ */
+int restore_skill_gains();
+
+// ═══════════════════════════════════════════════════════════════
 //  print — SDK host function
 // ═══════════════════════════════════════════════════════════════
 
@@ -100,16 +232,58 @@ int32_t host_robot_flush(wasm_exec_env_t exec_env);
 /**
  * @brief Wasm-side: extern void robot_set_servo_speed(int id, int speed);
  * Signature "(ii)". 0 = max speed, higher = slower.
+ *
+ * STORED, NEVER SENT, from the MP4-ESP32-CORE board onwards. The servo driver
+ * boards have no speed field: the command frame's third slot is a max current
+ * limit in milliamps and the boards run their own position loop underneath it.
+ * There is nowhere for a speed to travel.
+ *
+ * The symbol is kept so existing skills keep loading and keep their behaviour
+ * (which was never a real speed either). New code wants
+ * robot_set_servo_current().
  */
 int32_t host_robot_set_servo_speed(wasm_exec_env_t exec_env,
 								   int32_t id, int32_t speed);
 
 /**
+ * @brief Wasm-side: extern void robot_set_servo_current(int id, int mA);
+ * Signature "(ii)".
+ *
+ * The torque control on this hardware: a ceiling on the current the servo's
+ * driver board may source while holding its position. Clamped to 0..1500.
+ * Persisted across reboots.
+ */
+int32_t host_robot_set_servo_current(wasm_exec_env_t exec_env,
+								     int32_t id, int32_t milliamps);
+
+/**
+ * @brief Wasm-side: extern int robot_get_servo_current(int id);
+ * Signature "(i)i". Returns the current limit in mA, or 0 on a bad id.
+ */
+int32_t host_robot_get_servo_current(wasm_exec_env_t exec_env,
+								     int32_t id);
+
+/**
  * @brief Wasm-side: extern int robot_read_position(int id);
  * Signature "(i)i". Returns raw position (0-1023) or -1 on error.
+ *
+ * This is the AT32 frame. It runs OPPOSITE to the frame robot_set_servo_angle()
+ * takes, so a read -> compare -> correct loop built on it diverges instead of
+ * converging - silently, and at speed. Use robot_read_angle_cdeg() for that.
  */
 int32_t host_robot_read_position(wasm_exec_env_t exec_env,
 								 int32_t id);
+
+/**
+ * @brief Wasm-side: extern int robot_read_angle_cdeg(int id);
+ * Signature "(i)i".
+ *
+ * Measured angle in SIGNED CENTIDEGREES relative to centre, in the SAME frame
+ * robot_set_servo_angle() takes - so read, compare, correct actually
+ * converges. Returns INT32_MIN on a bad id.
+ */
+int32_t host_robot_read_angle_cdeg(wasm_exec_env_t exec_env,
+								   int32_t id);
 
 /**
  * @brief Wasm-side: extern int robot_read_speed(int id);
@@ -253,24 +427,183 @@ int32_t host_robot_imu_print(wasm_exec_env_t exec_env);
 //  NativeSymbol table
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+//  ABI v2-v5 host functions
+//
+//  Signatures are the contract: a skill that declares one of these and finds
+//  a different shape here fails to link, which is the intended, loud failure.
+//  WAMR's signature grammar: 'i' int32, 'f' float, '$' a length-prefixed
+//  pointer pair, and a trailing type for the result.
+// ═══════════════════════════════════════════════════════════════
+
+/** Wasm-side: extern int mpx_abi_version(void); Signature "()i". */
+int32_t host_mpx_abi_version(wasm_exec_env_t exec_env);
+
+// ── Direct servo bus (requires servo_lock) ───────────────────
+
+/** extern int servo_lock(void); Signature "()i". Parks the gait. */
+int32_t host_servo_lock(wasm_exec_env_t exec_env);
+
+/** extern int servo_unlock(void); Signature "()i". */
+int32_t host_servo_unlock(wasm_exec_env_t exec_env);
+
+/** extern int servo_is_locked(void); Signature "()i".
+ *  Answers "do *I* hold the bus", not "is it held by anyone". */
+int32_t host_servo_is_locked(wasm_exec_env_t exec_env);
+
+/** extern int servo_set_gain(int id, int param, float value); "(iif)i".
+ *  Calibration parameters are refused with -4. */
+int32_t host_servo_set_gain(wasm_exec_env_t exec_env,
+							int32_t id, int32_t param, float value);
+
+/** extern int servo_get_gain(int id, int param, float *out); "(iii)i". */
+int32_t host_servo_get_gain(wasm_exec_env_t exec_env,
+							int32_t id, int32_t param, int32_t out_ptr);
+
+/** extern int servo_save_config(int id); "(i)i". id 0 = all boards. */
+int32_t host_servo_save_config(wasm_exec_env_t exec_env, int32_t id);
+
+/** extern int servo_restore_config(int id); "(i)i". RAM only. */
+int32_t host_servo_restore_config(wasm_exec_env_t exec_env, int32_t id);
+
+/** extern int servo_stage(int id, float q_deg, float tau_ma,
+ *                         float kp, float kd); "(iffff)i".
+ *  Updates one servo's shadow without touching the bus. */
+int32_t host_servo_stage(wasm_exec_env_t exec_env,
+						 int32_t id, float q_deg, float tau_ma,
+						 float kp, float kd);
+
+/** extern int servo_commit(void); "()i". Pushes all four boards. */
+int32_t host_servo_commit(wasm_exec_env_t exec_env);
+
+/** extern int servo_write_all(const float *cmd, int count); "(ii)i".
+ *  count x {q_deg, tau_ma, kp, kd}, staged then committed in one call. */
+int32_t host_servo_write_all(wasm_exec_env_t exec_env,
+							 int32_t cmd_ptr, int32_t count);
+
+/** extern int servo_read(int id, float *out); "(ii)i".
+ *  Four floats: {q_deg, tau_ma, temp_c, q_raw}. */
+int32_t host_servo_read(wasm_exec_env_t exec_env,
+						int32_t id, int32_t out_ptr);
+
+/** extern int servo_read_all(float *out); "(i)i". 12 x 4 floats, same shape. */
+int32_t host_servo_read_all(wasm_exec_env_t exec_env, int32_t out_ptr);
+
+/** extern int servo_poll(void); "()i". Refreshes the feedback cache. */
+int32_t host_servo_poll(wasm_exec_env_t exec_env);
+
+/** extern int servo_direct(int id, int mode, float q_deg, float tau_ma);
+ *  "(iiff)i". mode 0 idle, 1 position, 2 torque. */
+int32_t host_servo_direct(wasm_exec_env_t exec_env,
+						  int32_t id, int32_t mode, float q_deg, float tau_ma);
+
+/** extern int servo_scan(void); "()i". Bitmask, bit 0 = servo 1. */
+int32_t host_servo_scan(wasm_exec_env_t exec_env);
+
+// ── Control arbitration (v3) ─────────────────────────────────
+
+/** extern int mpx_control_take(int domain); "(i)i". MPX_CTRL_*. */
+int32_t host_mpx_control_take(wasm_exec_env_t exec_env, int32_t domain);
+
+/** extern int mpx_control_release(void); "()i". */
+int32_t host_mpx_control_release(wasm_exec_env_t exec_env);
+
+/** extern int mpx_control_owner(void); "()i". */
+int32_t host_mpx_control_owner(wasm_exec_env_t exec_env);
+
+// ── Clock (v3) ───────────────────────────────────────────────
+
+/** extern int mpx_millis(void); "()i". Per-run, not since boot. */
+int32_t host_mpx_millis(wasm_exec_env_t exec_env);
+
+/** extern int mpx_sleep_until(int t_ms); "(i)i".
+ *  Absolute deadline, so per-frame overhead does not accumulate into drift. */
+int32_t host_mpx_sleep_until(wasm_exec_env_t exec_env, int32_t t_ms);
+
+// ── Continuous drive (v3) ────────────────────────────────────
+
+/** extern int mpx_drive(float fwd, float strafe, float turn); "(fff)i". */
+int32_t host_mpx_drive(wasm_exec_env_t exec_env,
+					   float fwd, float strafe, float turn);
+
+/** extern int mpx_drive_stop(void); "()i". */
+int32_t host_mpx_drive_stop(wasm_exec_env_t exec_env);
+
+/** extern int mpx_set_walk_speed(int mm_s); "(i)i". Clamped 10..200. */
+int32_t host_mpx_set_walk_speed(wasm_exec_env_t exec_env, int32_t mm_s);
+
+/** extern int mpx_get_walk_speed(void); "()i". */
+int32_t host_mpx_get_walk_speed(wasm_exec_env_t exec_env);
+
+/** extern int mpx_foot(int leg, float x, float th0, float z); "(ifff)i".
+ *  z is DOWN-positive from the hip (standing is about +70). */
+int32_t host_mpx_foot(wasm_exec_env_t exec_env,
+					  int32_t leg, float x, float th0, float z);
+
+/** extern int mpx_set_all_servo_speed(int speed); "(i)i". Stored, not sent. */
+int32_t host_mpx_set_all_servo_speed(wasm_exec_env_t exec_env, int32_t speed);
+
+/** extern int mpx_reset_offsets(void); "()i". Zeroes all 12 in NVS. */
+int32_t host_mpx_reset_offsets(wasm_exec_env_t exec_env);
+
+/** extern float mpx_read_temperature_c(int id); "(i)f".
+ *  Fractional, unlike robot_read_temperature() which truncates to a degree. */
+float host_mpx_read_temperature_c(wasm_exec_env_t exec_env, int32_t id);
+
+/** extern float mpx_board_scale_dd(void); "()f".
+ *  The boards' travel x10 in deci-degrees, or 0 if no board answered. */
+float host_mpx_board_scale_dd(wasm_exec_env_t exec_env);
+
+/** extern float mpx_param_f(const char *name, float fallback); "($f)f". */
+float host_mpx_param_f(wasm_exec_env_t exec_env,
+					   int32_t name_ptr, float fallback);
+
+/** extern int mpx_param_i(const char *name, int fallback); "($i)i". */
+int32_t host_mpx_param_i(wasm_exec_env_t exec_env,
+						 int32_t name_ptr, int32_t fallback);
+
+// ── v4: overlay, tick, trace ─────────────────────────────────
+
+/** extern int mpx_overlay(int id, float deg); "(if)i". Additive, clamped. */
+int32_t host_mpx_overlay(wasm_exec_env_t exec_env, int32_t id, float deg);
+
+/** extern float mpx_overlay_get(int id); "(i)f". */
+float host_mpx_overlay_get(wasm_exec_env_t exec_env, int32_t id);
+
+/** extern int mpx_overlay_clear(void); "()i". */
+int32_t host_mpx_overlay_clear(wasm_exec_env_t exec_env);
+
+/** extern int mpx_tick_every(int period_ms); "(i)i". Clamped 10..1000. */
+int32_t host_mpx_tick_every(wasm_exec_env_t exec_env, int32_t period_ms);
+
+/** extern int mpx_tick_stop(void); "()i". */
+int32_t host_mpx_tick_stop(wasm_exec_env_t exec_env);
+
+/** extern int mpx_trace(const char *name, float value); "($f)i". */
+int32_t host_mpx_trace(wasm_exec_env_t exec_env,
+					   int32_t name_ptr, float value);
+
 // NOTE: intentionally NOT const. WAMR's wasm_runtime_register_natives()
 // sorts this table in place with qsort() so it can binary-search symbol
 // names later. If the array is const it is placed in flash (.rodata) and
 // the in-place sort triggers a "Dbus write to cache rejected" cache-error
 // panic on the ESP32-S3. Keeping it non-const puts it in writable RAM.
 static NativeSymbol NATIVE_SYMBOLS[] = {
+	// ABI
+	{ "mpx_abi_version",        (void *)host_mpx_abi_version,        "()i",  nullptr },
+
 	// SDK
-	{ "print", (void *)host_print, "($i)", nullptr },
+	{ "print", (void *)host_print, "($i)i", nullptr },
 
 	// Robot — high-level gait
-	{ "robot_gait",         (void *)host_robot_gait,         "($)",   nullptr },
+	{ "robot_gait",         (void *)host_robot_gait,         "($)i",   nullptr },
 	{ "robot_get_mode",     (void *)host_robot_get_mode,     "()i",   nullptr },
-	{ "robot_set_body_pose",(void *)host_robot_set_body_pose,"(fff)", nullptr },
-	{ "robot_set_attitude_speed",(void *)host_robot_set_attitude_speed,"(i)", nullptr },
-	{ "robot_set_attitude_speed_xyz",(void *)host_robot_set_attitude_speed_xyz,"(iii)", nullptr },
+	{ "robot_set_body_pose",(void *)host_robot_set_body_pose,"(fff)i", nullptr },
+	{ "robot_set_attitude_speed",(void *)host_robot_set_attitude_speed,"(i)i", nullptr },
+	{ "robot_set_attitude_speed_xyz",(void *)host_robot_set_attitude_speed_xyz,"(iii)i", nullptr },
 
 	// Robot — configuration
-	{ "robot_set_config",   (void *)host_robot_set_config,   "(iiiii)", nullptr },
+	{ "robot_set_config",   (void *)host_robot_set_config,   "(iiiii)i", nullptr },
 	{ "robot_get_period",   (void *)host_robot_get_period,   "()i",   nullptr },
 	{ "robot_get_height",   (void *)host_robot_get_height,   "()i",   nullptr },
 	{ "robot_get_up_height",(void *)host_robot_get_up_height,"()i",   nullptr },
@@ -278,10 +611,13 @@ static NativeSymbol NATIVE_SYMBOLS[] = {
 	{ "robot_get_tilt",     (void *)host_robot_get_tilt,     "()i",   nullptr },
 
 	// Robot — low-level servo
-	{ "robot_set_servo_angle",    (void *)host_robot_set_servo_angle,    "(ii)", nullptr },
-	{ "robot_flush",              (void *)host_robot_flush,              "()",   nullptr },
-	{ "robot_set_servo_speed",    (void *)host_robot_set_servo_speed,    "(ii)", nullptr },
+	{ "robot_set_servo_angle",    (void *)host_robot_set_servo_angle,    "(ii)i", nullptr },
+	{ "robot_flush",              (void *)host_robot_flush,              "()i",   nullptr },
+	{ "robot_set_servo_speed",    (void *)host_robot_set_servo_speed,    "(ii)i", nullptr },
+	{ "robot_set_servo_current",  (void *)host_robot_set_servo_current,  "(ii)i", nullptr },
+	{ "robot_get_servo_current",  (void *)host_robot_get_servo_current,  "(i)i", nullptr },
 	{ "robot_read_position",      (void *)host_robot_read_position,      "(i)i", nullptr },
+	{ "robot_read_angle_cdeg",    (void *)host_robot_read_angle_cdeg,    "(i)i", nullptr },
 	{ "robot_read_speed",         (void *)host_robot_read_speed,         "(i)i", nullptr },
 	{ "robot_read_load",          (void *)host_robot_read_load,          "(i)i", nullptr },
 	{ "robot_read_voltage",       (void *)host_robot_read_voltage,       "(i)i", nullptr },
@@ -290,22 +626,74 @@ static NativeSymbol NATIVE_SYMBOLS[] = {
 	{ "robot_read_current",       (void *)host_robot_read_current,       "(i)i", nullptr },
 
 	// Robot — calibration
-	{ "robot_set_offset",   (void *)host_robot_set_offset,   "(ii)", nullptr },
+	{ "robot_set_offset",   (void *)host_robot_set_offset,   "(ii)i", nullptr },
 	{ "robot_get_offset",   (void *)host_robot_get_offset,   "(i)i", nullptr },
 	{ "robot_ping_servo",   (void *)host_robot_ping_servo,   "(i)i", nullptr },
 
 	// Robot — utility
-	{ "robot_delay_ms",     (void *)host_robot_delay_ms,     "(i)",  nullptr },
+	{ "robot_delay_ms",     (void *)host_robot_delay_ms,     "(i)i",  nullptr },
 
 	// Robot — IK (per-leg)
-	{ "robot_ik_fr",        (void *)host_robot_ik_fr,        "(fff)", nullptr },
-	{ "robot_ik_fl",        (void *)host_robot_ik_fl,        "(fff)", nullptr },
-	{ "robot_ik_rr",        (void *)host_robot_ik_rr,        "(fff)", nullptr },
-	{ "robot_ik_rl",        (void *)host_robot_ik_rl,        "(fff)", nullptr },
+	{ "robot_ik_fr",        (void *)host_robot_ik_fr,        "(fff)i", nullptr },
+	{ "robot_ik_fl",        (void *)host_robot_ik_fl,        "(fff)i", nullptr },
+	{ "robot_ik_rr",        (void *)host_robot_ik_rr,        "(fff)i", nullptr },
+	{ "robot_ik_rl",        (void *)host_robot_ik_rl,        "(fff)i", nullptr },
 
 	// Robot — IMU
-	{ "robot_imu_read",     (void *)host_robot_imu_read,     "(i)",  nullptr },
-	{ "robot_imu_print",    (void *)host_robot_imu_print,    "()",   nullptr },
+	{ "robot_imu_read",     (void *)host_robot_imu_read,     "(i)i",  nullptr },
+	{ "robot_imu_print",    (void *)host_robot_imu_print,    "()i",   nullptr },
+
+	// Robot — low-level servo (Unitree-style, SDK v2)
+	{ "servo_lock",           (void *)host_servo_lock,           "()i",     nullptr },
+	{ "servo_unlock",         (void *)host_servo_unlock,         "()i",     nullptr },
+	{ "servo_is_locked",      (void *)host_servo_is_locked,      "()i",     nullptr },
+	{ "servo_set_gain",       (void *)host_servo_set_gain,       "(iif)i",  nullptr },
+	{ "servo_get_gain",       (void *)host_servo_get_gain,       "(iii)i",  nullptr },
+	{ "servo_save_config",    (void *)host_servo_save_config,    "(i)i",    nullptr },
+	{ "servo_restore_config", (void *)host_servo_restore_config, "(i)i",    nullptr },
+	{ "servo_stage",          (void *)host_servo_stage,          "(iffff)i",nullptr },
+	{ "servo_commit",         (void *)host_servo_commit,         "()i",     nullptr },
+	{ "servo_write_all",      (void *)host_servo_write_all,      "(ii)i",   nullptr },
+	{ "servo_read",           (void *)host_servo_read,           "(ii)i",   nullptr },
+	{ "servo_read_all",       (void *)host_servo_read_all,       "(i)i",    nullptr },
+	{ "servo_poll",           (void *)host_servo_poll,           "()i",     nullptr },
+	{ "servo_direct",         (void *)host_servo_direct,         "(iiff)i", nullptr },
+	{ "servo_scan",           (void *)host_servo_scan,           "()i",     nullptr },
+
+	// ── ABI v3 ──────────────────────────────────────────────────────────────
+	// Control arbitration (opt-in; no effect until a skill calls take())
+	{ "mpx_control_take",     (void *)host_mpx_control_take,     "(i)i",    nullptr },
+	{ "mpx_control_release",  (void *)host_mpx_control_release,  "()i",     nullptr },
+	{ "mpx_control_owner",    (void *)host_mpx_control_owner,    "()i",     nullptr },
+	// Clock
+	{ "mpx_millis",           (void *)host_mpx_millis,           "()i",     nullptr },
+	{ "mpx_sleep_until",      (void *)host_mpx_sleep_until,      "(i)i",    nullptr },
+	// Continuous drive
+	{ "mpx_drive",            (void *)host_mpx_drive,            "(fff)i",  nullptr },
+	{ "mpx_drive_stop",       (void *)host_mpx_drive_stop,       "()i",     nullptr },
+	{ "mpx_set_walk_speed",   (void *)host_mpx_set_walk_speed,   "(i)i",    nullptr },
+	{ "mpx_get_walk_speed",   (void *)host_mpx_get_walk_speed,   "()i",     nullptr },
+	// Foot placement
+	{ "mpx_foot",             (void *)host_mpx_foot,             "(ifff)i", nullptr },
+	// Previously unreachable capabilities
+	{ "mpx_set_all_servo_speed",(void *)host_mpx_set_all_servo_speed,"(i)i",nullptr },
+	{ "mpx_reset_offsets",    (void *)host_mpx_reset_offsets,    "()i",     nullptr },
+	{ "mpx_read_temperature_c",(void *)host_mpx_read_temperature_c,"(i)f",  nullptr },
+	{ "mpx_board_scale_dd",   (void *)host_mpx_board_scale_dd,   "()f",     nullptr },
+	// Skill parameters
+	{ "mpx_param_f",          (void *)host_mpx_param_f,          "($f)f",   nullptr },
+	{ "mpx_param_i",          (void *)host_mpx_param_i,          "($i)i",   nullptr },
+
+	// ── ABI v4 ──────────────────────────────────────────────────────────────
+	// Composing with the gait rather than replacing it
+	{ "mpx_overlay",          (void *)host_mpx_overlay,          "(if)i",   nullptr },
+	{ "mpx_overlay_get",      (void *)host_mpx_overlay_get,      "(i)f",    nullptr },
+	{ "mpx_overlay_clear",    (void *)host_mpx_overlay_clear,    "()i",     nullptr },
+	// Running inside the control loop
+	{ "mpx_tick_every",       (void *)host_mpx_tick_every,       "(i)i",    nullptr },
+	{ "mpx_tick_stop",        (void *)host_mpx_tick_stop,        "()i",     nullptr },
+	// Being able to see what a control loop is doing
+	{ "mpx_trace",            (void *)host_mpx_trace,            "($f)i",   nullptr },
 };
 
 static constexpr uint32_t NUM_NATIVE_SYMBOLS =

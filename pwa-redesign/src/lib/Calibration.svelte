@@ -19,22 +19,32 @@
     { id: "rr", label: "RR", name: "Rear right",  x: 212, y: 238, sx: -1, sy:  1, lx: 294, ly: 338 },
   ];
 
-  // Servo index base for each leg: FL=1, FR=4, RL=7, RR=10
-  const legServoBase = { fl: 0, fr: 3, rl: 6, rr: 9 };
+  // Servo index base (0-based into offsets[0..11]) for each leg.
+  //
+  // THESE MUST MATCH THE FIRMWARE. robot.h / stanford_kinematics.h lay the
+  // twelve servos out as FR=1-3, FL=4-6, RR=7-9, RL=10-12, so offsets[0..2]
+  // are the FRONT RIGHT leg. This map used to read {fl:0, fr:3, rl:6, rr:9},
+  // which labelled each leg's sliders with the neighbouring leg's name -
+  // nudging "FL" moved the front right leg. On a symmetric stance that is
+  // nearly invisible, and it has already been misread once as evidence that
+  // the servo loom was mirrored left/right. Fix the label here, not the loom.
+  const legServoBase = { fr: 0, fl: 3, rr: 6, rl: 9 };
 
-  const ZERO = () => ({ shoulder: 0, hip: 0, knee: 0 });
+  const ZERO = () => ({ abd: 0, hip: 0, knee: 0 });
   let calValues = $state({ fl: ZERO(), fr: ZERO(), rl: ZERO(), rr: ZERO() });
 
+  // Joint order within a leg, matching the firmware: base+1 = abduction
+  // (hip yaw), base+2 = hip, base+3 = knee.
   const calProps = [
-    { id: "shoulder", label: "Shoulder", hint: "Swings the whole leg in/out", min: -50, max: 50, step: 1 },
-    { id: "hip",      label: "Hip",      hint: "Upper leg forward/back",       min: -50, max: 50, step: 1 },
-    { id: "knee",     label: "Knee",     hint: "Lower leg bend",               min: -50, max: 50, step: 1 },
+    { id: "abd",  label: "Abduction", hint: "Swings the whole leg in/out", min: -50, max: 50, step: 1 },
+    { id: "hip",  label: "Hip",       hint: "Upper leg forward/back",       min: -50, max: 50, step: 1 },
+    { id: "knee", label: "Knee",      hint: "Lower leg bend",               min: -50, max: 50, step: 1 },
   ];
 
   let currentLegValues = $derived(selectedLeg ? calValues[selectedLeg] : null);
   let selectedLegMeta = $derived(legs.find((l) => l.id === selectedLeg) ?? null);
   let hasAnyOffset = $derived(
-    Object.values(calValues).some((v) => v.shoulder !== 0 || v.hip !== 0 || v.knee !== 0),
+    Object.values(calValues).some((v) => v.abd !== 0 || v.hip !== 0 || v.knee !== 0),
   );
 
   // ── Active joint feedback: which joint is moving and which way ─
@@ -66,10 +76,10 @@
         if (data.offsets && data.offsets.length === 12) {
           const o = data.offsets;
           calValues = {
-            fl: { shoulder: o[0] || 0, hip: o[1]  || 0, knee: o[2]  || 0 },
-            fr: { shoulder: o[3] || 0, hip: o[4]  || 0, knee: o[5]  || 0 },
-            rl: { shoulder: o[6] || 0, hip: o[7]  || 0, knee: o[8]  || 0 },
-            rr: { shoulder: o[9] || 0, hip: o[10] || 0, knee: o[11] || 0 },
+            fr: { abd: o[0] || 0, hip: o[1] || 0, knee: o[2] || 0 },
+            fl: { abd: o[3] || 0, hip: o[4] || 0, knee: o[5] || 0 },
+            rr: { abd: o[6] || 0, hip: o[7] || 0, knee: o[8] || 0 },
+            rl: { abd: o[9] || 0, hip: o[10] || 0, knee: o[11] || 0 },
           };
         }
       }
@@ -264,7 +274,7 @@
             <rect x="-70" y="-14" width="86" height="88" fill="transparent" />
 
             <!-- shoulder rotation -->
-            <g class="seg-root" style="transform: rotate({rot(leg.id, 'shoulder')}deg)">
+            <g class="seg-root" style="transform: rotate({rot(leg.id, 'abd')}deg)">
               <line x1="0" y1="0" x2="-32" y2="8" class="bone"/>
 
               <!-- hip rotation -->
@@ -291,9 +301,9 @@
                 {/if}
               </g>
 
-              <!-- shoulder joint -->
-              <circle cx="0" cy="0" r="9" class="joint shoulder" class:active={isActive(leg.id, 'shoulder')}/>
-              {#if isActive(leg.id, "shoulder")}
+              <!-- abduction joint -->
+              <circle cx="0" cy="0" r="9" class="joint abd" class:active={isActive(leg.id, 'abd')}/>
+              {#if isActive(leg.id, "abd")}
                 <circle cx="0" cy="0" r="9" class="ring"/>
                 <path d={activeJoint.dir > 0 ? "M -10 -17 A 19.5 19.5 0 0 1 17 -10" : "M 17 -10 A 19.5 19.5 0 0 0 -10 -17"} class="dir-arrow" marker-end="url(#cal-arrow)"/>
               {/if}
@@ -327,7 +337,7 @@
           <button
             class="cal-leg-btn"
             class:selected={selectedLeg === leg.id}
-            class:touched={calValues[leg.id].shoulder || calValues[leg.id].hip || calValues[leg.id].knee}
+            class:touched={calValues[leg.id].abd || calValues[leg.id].hip || calValues[leg.id].knee}
             onclick={() => selectLeg(leg.id)}
             role="tab"
             aria-selected={selectedLeg === leg.id}
@@ -397,7 +407,7 @@
       {:else}
         <div class="cal-empty">
           <p class="cal-empty-title">Pick a leg</p>
-          <p class="cal-empty-desc">Choose from the diagram or the chips above. Each leg has three servos: shoulder, hip and knee.</p>
+          <p class="cal-empty-desc">Choose from the diagram or the chips above. Each leg has three servos: abduction, hip and knee.</p>
         </div>
       {/if}
 
@@ -520,7 +530,7 @@
   .body .vents rect { fill: rgba(0,0,0,0.18); }
 
   .leg { cursor: pointer; outline: none; transition: opacity var(--dur-med); }
-  .leg:focus-visible .joint.shoulder { stroke: var(--mpx-info); stroke-width: 3; }
+  .leg:focus-visible .joint.abd { stroke: var(--mpx-info); stroke-width: 3; }
   .leg.dimmed { opacity: 0.45; }
   .leg .bone { stroke: var(--mpx-muted-2); stroke-width: 10; stroke-linecap: round; transition: stroke var(--dur-med); }
   .leg .bone.thin { stroke-width: 8; }

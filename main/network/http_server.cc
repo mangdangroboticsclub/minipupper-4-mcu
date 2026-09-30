@@ -5,6 +5,7 @@
 #include "network/wifi_sta.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <cerrno>
@@ -24,6 +25,8 @@
 #include "lua/lua_vm.h"
 #include "sdkconfig.h"
 #include "robot/robot.h"
+#include "robot/driver_board.h"
+#include "util/trace_ring.h"
 #include "wasm/wasm_sandbox.h"
 
 #include "lwip/sockets.h"
@@ -314,11 +317,22 @@ static esp_err_t api_skills_list(httpd_req_t *req)
  */
 static volatile bool s_skill_running = false;
 
-struct SkillRunArgs { std::string path; std::string name; };
+struct SkillRunArgs { std::string path; std::string name; std::string params; };
 
 static void skill_run_task(void *arg)
 {
     SkillRunArgs *a = static_cast<SkillRunArgs *>(arg);
+
+    /* Hand the parameters to the sandbox before the module runs, because the
+     * skill's very first mpx_param_*() call may be in on_start(). Cleared by
+     * the sandbox at the end of the run, so they cannot leak into the next
+     * skill.
+     *
+     * A malformed list is not an error: every mpx_param_*() then falls back to
+     * the skill's own default, which is exactly what a skill run with no
+     * parameters at all gets. */
+    wasm::set_params(a->params.empty() ? nullptr : a->params.c_str());
+
     ESP_LOGI(TAG, "Running skill (async): %s", a->path.c_str());
     auto result = wasm::load_and_run(a->path.c_str(), "on_start", 60000);
     ESP_LOGI(TAG, "Skill '%s' completed with result=%d",
@@ -331,7 +345,10 @@ static void skill_run_task(void *arg)
 /* POST /v1/skills/run — execute a .wasm skill via WAMR (async) */
 static esp_err_t api_skills_run(httpd_req_t *req)
 {
-    char buf[256] = {};
+    // 1024 rather than 256: the body carries both the skill name and the
+    // optional per-run parameter list, and silently truncating the parameters
+    // would look to the skill like they were never supplied at all.
+    char buf[1024] = {};
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) {
         httpd_resp_set_status(req, "400 Bad Request");
@@ -353,6 +370,24 @@ static esp_err_t api_skills_run(httpd_req_t *req)
 
     std::string path = "/" + skill_name;
 
+    /* Optional "params":"name=value;name=value" for mpx_param_f()/i().
+     *
+     * Extracted as a raw string rather than parsed here: the sandbox owns the
+     * format, this handler would only be a second place for it to be wrong.
+     * Backslash escapes are honoured so a value can contain a quote. */
+    std::string params;
+    {
+        const char *pkey = "\"params\":\"";
+        const char *p = std::strstr(buf, pkey);
+        if (p) {
+            p += std::strlen(pkey);
+            while (*p && *p != '"') {
+                if (*p == '\\' && p[1]) ++p;
+                params += *p++;
+            }
+        }
+    }
+
     // ── Reject if a skill is already running (single WASM instance) ──
     if (s_skill_running) {
         httpd_resp_set_status(req, "409 Conflict");
@@ -363,7 +398,7 @@ static esp_err_t api_skills_run(httpd_req_t *req)
 
     // ── Launch the skill on its own task and return immediately ──
     s_skill_running = true;
-    auto *args = new SkillRunArgs{ path, skill_name };
+    auto *args = new SkillRunArgs{ path, skill_name, params };
     // No core affinity: the scheduler keeps httpd (core 0) responsive while the
     // skill yields during its robot_delay_ms calls.  8 KB task stack is enough;
     // the WASM operand stack is allocated separately inside load_and_run.
@@ -698,111 +733,24 @@ static float json_get_float(const char *body, const char *key, float def)
     return (end == p) ? def : val;
 }
 
-/* ── Gait name → GaitCmd mapping ──────────────────────────── */
+/* ── Gait name ↔ GaitCmd ──────────────────────────────────────
+ *
+ * Both directions are one call into robot.cc now. They used to be a 46-branch
+ * if-chain here and another 46-case switch below, plus a third copy inside the
+ * SDK's robot_gait() - three hand-maintained tables that had already drifted,
+ * so a name the SDK accepted could be one the HTTP layer rejected.
+ *
+ * There is one table, in robot.cc. If you add a gait, add it there. */
 static robot::GaitCmd gait_name_to_cmd(const std::string &name)
 {
-    if (name == "init")     return robot::GaitCmd::Init;
-    if (name == "step")     return robot::GaitCmd::Step;
-    if (name == "roll")     return robot::GaitCmd::Roll;
-    if (name == "pitch")    return robot::GaitCmd::Pitch;
-    if (name == "stretch")  return robot::GaitCmd::Stretch;
-    if (name == "advance")  return robot::GaitCmd::Advance;
-    if (name == "back")     return robot::GaitCmd::Back;
-    if (name == "left")     return robot::GaitCmd::Left;
-    if (name == "right")    return robot::GaitCmd::Right;
-    if (name == "turnL")    return robot::GaitCmd::TurnL;
-    if (name == "turnR")    return robot::GaitCmd::TurnR;
-    if (name == "twerk")    return robot::GaitCmd::Twerk;
-    if (name == "jump")     return robot::GaitCmd::Jump;
-    if (name == "jumpfwd")  return robot::GaitCmd::JumpFwd;
-    if (name == "testspeed") return robot::GaitCmd::TestSpeed;
-    if (name == "lookup")    return robot::GaitCmd::LookUp;
-    if (name == "lookdown")  return robot::GaitCmd::LookDown;
-    if (name == "lookleft")  return robot::GaitCmd::LookLeft;
-    if (name == "lookright") return robot::GaitCmd::LookRight;
-    if (name == "lookul")    return robot::GaitCmd::LookUpperLeft;
-    if (name == "lookur")    return robot::GaitCmd::LookUpperRight;
-    if (name == "lookll")    return robot::GaitCmd::LookLowerLeft;
-    if (name == "looklr")    return robot::GaitCmd::LookLowerRight;
-    if (name == "flegL")     return robot::GaitCmd::ForelegLiftL;
-    if (name == "flegR")     return robot::GaitCmd::ForelegLiftR;
-    if (name == "blegL")     return robot::GaitCmd::BacklegLiftL;
-    if (name == "blegR")     return robot::GaitCmd::BacklegLiftR;
-    if (name == "heightup")  return robot::GaitCmd::HeightUp;
-    if (name == "heightdown")return robot::GaitCmd::HeightDown;
-    if (name == "balance")   return robot::GaitCmd::Balance;
-    if (name == "bowback")   return robot::GaitCmd::BowBack;
-    if (name == "bodycycle") return robot::GaitCmd::BodyCycle;
-    if (name == "headellipse")return robot::GaitCmd::HeadEllipse;
-    if (name == "moveLF")    return robot::GaitCmd::MoveLeftFront;
-    if (name == "moveRF")    return robot::GaitCmd::MoveRightFront;
-    if (name == "moveLB")    return robot::GaitCmd::MoveLeftBack;
-    if (name == "moveRB")    return robot::GaitCmd::MoveRightBack;
-    if (name == "stanford")  return robot::GaitCmd::StanfordWalk;
-    if (name == "frontkick") return robot::GaitCmd::FrontKick;
-    if (name == "wiggle")    return robot::GaitCmd::Wiggle;
-    if (name == "buttshrug") return robot::GaitCmd::ButtShrug;
-    if (name == "wiggleL")   return robot::GaitCmd::WiggleLeft;
-    if (name == "wiggleR")   return robot::GaitCmd::WiggleRight;
-    if (name == "buttshrugL")return robot::GaitCmd::ButtShrugLeft;
-    if (name == "buttshrugR")return robot::GaitCmd::ButtShrugRight;
-    if (name == "none")     return robot::GaitCmd::None;
-    return robot::GaitCmd::None;
+    robot::GaitCmd cmd = robot::GaitCmd::None;
+    robot::gait_from_name(name.c_str(), cmd);
+    return cmd;
 }
 
-/* ── GaitCmd → name string ─────────────────────────────────── */
 static const char *gait_cmd_to_name(robot::GaitCmd cmd)
 {
-    switch (cmd) {
-        case robot::GaitCmd::None:      return "none";
-        case robot::GaitCmd::Init:      return "init";
-        case robot::GaitCmd::Step:      return "step";
-        case robot::GaitCmd::Roll:      return "roll";
-        case robot::GaitCmd::Pitch:     return "pitch";
-        case robot::GaitCmd::Stretch:   return "stretch";
-        case robot::GaitCmd::Advance:   return "advance";
-        case robot::GaitCmd::Back:      return "back";
-        case robot::GaitCmd::Left:      return "left";
-        case robot::GaitCmd::Right:     return "right";
-        case robot::GaitCmd::TurnL:     return "turnL";
-        case robot::GaitCmd::TurnR:     return "turnR";
-        case robot::GaitCmd::Twerk:     return "twerk";
-        case robot::GaitCmd::Jump:      return "jump";
-        case robot::GaitCmd::JumpFwd:   return "jumpfwd";
-        case robot::GaitCmd::TestSpeed: return "testspeed";
-        case robot::GaitCmd::LookUp:         return "lookup";
-        case robot::GaitCmd::LookDown:       return "lookdown";
-        case robot::GaitCmd::LookLeft:       return "lookleft";
-        case robot::GaitCmd::LookRight:      return "lookright";
-        case robot::GaitCmd::LookUpperLeft:  return "lookul";
-        case robot::GaitCmd::LookUpperRight: return "lookur";
-        case robot::GaitCmd::LookLowerLeft:  return "lookll";
-        case robot::GaitCmd::LookLowerRight: return "looklr";
-        case robot::GaitCmd::ForelegLiftL:   return "flegL";
-        case robot::GaitCmd::ForelegLiftR:   return "flegR";
-        case robot::GaitCmd::BacklegLiftL:   return "blegL";
-        case robot::GaitCmd::BacklegLiftR:   return "blegR";
-        case robot::GaitCmd::HeightUp:       return "heightup";
-        case robot::GaitCmd::HeightDown:     return "heightdown";
-        case robot::GaitCmd::Balance:        return "balance";
-        case robot::GaitCmd::BowBack:        return "bowback";
-        case robot::GaitCmd::BodyCycle:      return "bodycycle";
-        case robot::GaitCmd::HeadEllipse:    return "headellipse";
-        case robot::GaitCmd::MoveLeftFront:  return "moveLF";
-        case robot::GaitCmd::MoveRightFront: return "moveRF";
-        case robot::GaitCmd::MoveLeftBack:   return "moveLB";
-        case robot::GaitCmd::MoveRightBack:  return "moveRB";
-        case robot::GaitCmd::StanfordWalk:   return "stanford";
-        case robot::GaitCmd::FrontKick:      return "frontkick";
-        case robot::GaitCmd::Wiggle:         return "wiggle";
-        case robot::GaitCmd::ButtShrug:      return "buttshrug";
-        case robot::GaitCmd::WiggleLeft:     return "wiggleL";
-        case robot::GaitCmd::WiggleRight:    return "wiggleR";
-        case robot::GaitCmd::ButtShrugLeft:  return "buttshrugL";
-        case robot::GaitCmd::ButtShrugRight: return "buttshrugR";
-        case robot::GaitCmd::BodyAttitude:   return "attitude";
-    }
-    return "unknown";
+    return robot::gait_to_name(cmd);
 }
 
 /* POST /v1/robot/gait — set gait mode */
@@ -1003,14 +951,19 @@ static esp_err_t api_robot_diag_ping(httpd_req_t *req)
 
     ESP_LOGI(TAG, "POST /v1/robot/diagnostic/ping  servo=%d", servo);
 
+    // There is no bus ping on this hardware, so this does one parameter read
+    // and reports whether the channel answered. The old reply carried a
+    // "model" number because the SCSCL servos returned one; the driver boards
+    // do not, and inventing a 1 there would be worse than saying nothing.
     int result = robot::ping_servo(servo);
     char resp[128];
     if (result > 0) {
         std::snprintf(resp, sizeof(resp),
-                      R"({"ok":true,"servo":%d,"model":%d})", servo, result);
+                      R"({"ok":true,"servo":%d,"responding":true})", servo);
     } else {
         std::snprintf(resp, sizeof(resp),
-                      R"({"ok":false,"servo":%d,"error":%d})", servo, result);
+                      R"({"ok":false,"servo":%d,"responding":false,"error":%d})",
+                      servo, result);
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -1035,10 +988,24 @@ static esp_err_t api_robot_diag_sweep(httpd_req_t *req)
 
     ESP_LOGI(TAG, "POST /v1/robot/diagnostic/sweep  servo=%d", servo);
 
-    // Sweep servo back and forth
+    /* Park the gait for the duration.
+     *
+     * Without this the sweep does not happen. The gait task's idle branch
+     * re-solves the neutral stand and calls flush() every tick, so anything
+     * this handler writes to a goal buffer is overwritten within ~10 ms and
+     * the servo twitches instead of sweeping. Studio mode is the mechanism
+     * that already exists for exactly this, and flush() honours it.
+     *
+     * The old version called set_all_servo_speed(200) here, which on the
+     * previous hardware at least meant something and on this one is stored and
+     * never sent - so it was doubly not working. The current cap below is the
+     * value that actually governs how hard the sweep pushes. */
+    robot::set_studio_mode(true);
+    const uint16_t prev_current = robot::get_servo_current(servo);
+    robot::set_servo_current(servo, 600);   // modest: this is a bench test
+
     for (int i = 0; i < 3; ++i) {
         robot::set_servo_angle(servo, -45.0f);
-        robot::set_all_servo_speed(200);
         robot::flush();
         vTaskDelay(pdMS_TO_TICKS(400));
 
@@ -1047,13 +1014,374 @@ static esp_err_t api_robot_diag_sweep(httpd_req_t *req)
         vTaskDelay(pdMS_TO_TICKS(400));
     }
 
-    // Return to centre
+    // Return to centre, then hand the bus back.
     robot::set_servo_angle(servo, 0.0f);
     robot::flush();
+    robot::set_servo_current(servo, prev_current);
+    robot::set_studio_mode(false);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, R"({"ok":true})", -1);
     return ESP_OK;
+}
+
+/* GET /v1/trace - named numbers emitted by the running skill.
+ *
+ * A skill calls mpx_trace("knee_err", v); this drains those samples so a
+ * client can plot them. Sequence-numbered and polled over plain HTTP rather
+ * than pushed down a held socket, because httpd runs with max_open_sockets=5
+ * plus lru_purge_enable and a pinned trace socket would starve the PWA.
+ *
+ * Read-only, so it is not behind any write gate.
+ */
+static esp_err_t api_trace(httpd_req_t *req)
+{
+    uint32_t since = 0;
+    std::size_t max_samples = 200;
+
+    char query[96];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[24];
+        if (httpd_query_key_value(query, "since", val, sizeof(val)) == ESP_OK) {
+            since = static_cast<uint32_t>(std::strtoul(val, nullptr, 10));
+        }
+        if (httpd_query_key_value(query, "max", val, sizeof(val)) == ESP_OK) {
+            const long m = std::strtol(val, nullptr, 10);
+            if (m > 0 && m < 500) max_samples = static_cast<std::size_t>(m);
+        }
+    }
+
+    uint32_t next = since;
+    std::string samples = util::trace_ring_json(since, max_samples, next);
+
+    std::string resp = "{\"next\":" + std::to_string(next)
+                     + ",\"samples\":" + samples + "}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp.c_str(), resp.size());
+    return ESP_OK;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ *  Servo Studio API   (/v1/studio/...)
+ *
+ *  A thin JSON wrapper over robot/driver_board.h, ported from the reference
+ *  firmware's /api/... routes. This is the only way to tune the AT32 boards'
+ *  own position and current loops, to read their NTC temperatures, and to
+ *  prove which leg is on which connector - all three of which are required
+ *  before the gait can be trusted on a new chassis.
+ *
+ *  Two rules, both about who owns the SPI bus:
+ *
+ *   - Every PARAMETER operation requires studio mode. A config exchange is a
+ *     request followed by a NOP that clocks the reply back out, and the two
+ *     must not be separated: splitting them leaves a config frame pending in
+ *     the AT32's tx buffer, which the next feedback decode reads as a
+ *     temperature (a real 31.03 degC reply decodes as 1540.8 degC).
+ *   - Read-only telemetry (status, temps) deliberately does NOT require it.
+ *     The AT32 puts position, current and NTC temperature in every feedback
+ *     frame, so while the gait is running those are already fresh and free.
+ * ═══════════════════════════════════════════════════════════════ */
+
+static int studio_qint(httpd_req_t *r, const char *key, int def)
+{
+    char q[128], v[24];
+    if (httpd_req_get_url_query_str(r, q, sizeof q) == ESP_OK &&
+        httpd_query_key_value(q, key, v, sizeof v) == ESP_OK) {
+        return atoi(v);
+    }
+    return def;
+}
+
+static float studio_qfloat(httpd_req_t *r, const char *key, float def)
+{
+    char q[128], v[24];
+    if (httpd_req_get_url_query_str(r, q, sizeof q) == ESP_OK &&
+        httpd_query_key_value(q, key, v, sizeof v) == ESP_OK) {
+        return strtof(v, nullptr);
+    }
+    return def;
+}
+
+static esp_err_t studio_json(httpd_req_t *r, const char *s)
+{
+    httpd_resp_set_type(r, "application/json");
+    httpd_resp_set_hdr(r, "Cache-Control", "no-store");
+    return httpd_resp_send(r, s, HTTPD_RESP_USE_STRLEN);
+}
+
+#define STUDIO_NEED_MODE(r)                                                     \
+    do {                                                                        \
+        if (!robot::studio_mode())                                              \
+            return studio_json((r),                                             \
+                R"({"ok":false,"err":"studio mode off - GET /v1/studio/mode?on=1"})"); \
+    } while (0)
+
+#define STUDIO_NEED_ID(r, id)                                                   \
+    do {                                                                        \
+        if ((id) < 1 || (id) > 12)                                              \
+            return studio_json((r), R"({"ok":false,"err":"bad id"})");          \
+    } while (0)
+
+/* GET /v1/studio/mode[?on=0|1] - read or set studio mode. */
+static esp_err_t studio_mode_handler(httpd_req_t *req)
+{
+    const int on = studio_qint(req, "on", -1);
+    if (on == 0 || on == 1) {
+        robot::set_studio_mode(on == 1);
+    }
+    char b[64];
+    std::snprintf(b, sizeof b, R"({"ok":true,"studio":%s})",
+                  robot::studio_mode() ? "true" : "false");
+    return studio_json(req, b);
+}
+
+/* GET /v1/studio/status - all 12 servos: position, current, temperature.
+ * Works with the gait running; that is the point of it. */
+static esp_err_t studio_status_handler(httpd_req_t *req)
+{
+    // Parked gait means a stale cache - replay each board's last frame so the
+    // numbers on screen are live. Safe: an idle servo stays idle.
+    if (robot::studio_mode()) {
+        for (int bd = 0; bd < 4; ++bd) driver_board_poll_board(bd);
+    }
+
+    char b[768];
+    int n = std::snprintf(b, sizeof b, R"({"ok":true,"studio":%s,"servos":[)",
+                          robot::studio_mode() ? "true" : "false");
+    for (int id = 1; id <= 12; ++id) {
+        const uint16_t scs = driver_board_present_position(id);
+        // The boards' own range, not a constant - same reason as everywhere else.
+        const float    deg = static_cast<float>(scs)
+                           * driver_board_get_scale_dd() / 10240.0f;
+        const float    t   = driver_board_present_temperature(id);
+        n += std::snprintf(b + n, sizeof b - n,
+                           R"(%s{"id":%d,"scs":%u,"deg":%.1f,"ma":%d,"c":)",
+                           id == 1 ? "" : ",", id, scs, deg,
+                           driver_board_present_current(id));
+        if (t > DB_TEMP_INVALID) n += std::snprintf(b + n, sizeof b - n, "%.1f}", t);
+        else                     n += std::snprintf(b + n, sizeof b - n, "null}");
+    }
+    std::snprintf(b + n, sizeof b - n, "]}");
+    return studio_json(req, b);
+}
+
+/* GET /v1/studio/scan - which channels answer a parameter read. */
+static esp_err_t studio_scan_handler(httpd_req_t *req)
+{
+    STUDIO_NEED_MODE(req);
+    char b[128];
+    int n = std::snprintf(b, sizeof b, R"({"ok":true,"found":[)");
+    bool first = true;
+    for (int id = 1; id <= 12; ++id) {
+        float v;
+        if (driver_board_get_param(id, DB_PARAM_KP_POSITION, &v)) {
+            n += std::snprintf(b + n, sizeof b - n, "%s%d", first ? "" : ",", id);
+            first = false;
+        }
+    }
+    std::snprintf(b + n, sizeof b - n, "]}");
+    return studio_json(req, b);
+}
+
+/* GET /v1/studio/dump?id=N - every config parameter of one servo. */
+static esp_err_t studio_dump_handler(httpd_req_t *req)
+{
+    const int id = studio_qint(req, "id", 0);
+    STUDIO_NEED_MODE(req);
+    STUDIO_NEED_ID(req, id);
+
+    char b[640];
+    int n = std::snprintf(b, sizeof b, R"({"ok":true,"id":%d,"params":[)", id);
+    for (int p = 0; p < DB_PARAM_COUNT; ++p) {
+        float v;
+        const char *name = driver_board_param_name(p);
+        if (driver_board_get_param(id, p, &v)) {
+            n += std::snprintf(b + n, sizeof b - n, R"(%s{"p":%d,"n":"%s","v":%g})",
+                               p ? "," : "", p, name ? name : "", v);
+        } else {
+            n += std::snprintf(b + n, sizeof b - n, R"(%s{"p":%d,"n":"%s","v":null})",
+                               p ? "," : "", p, name ? name : "");
+        }
+    }
+    std::snprintf(b + n, sizeof b - n, "]}");
+    return studio_json(req, b);
+}
+
+/* GET /v1/studio/set?id=N&p=P&v=V - write one parameter to RAM, read it back. */
+static esp_err_t studio_set_handler(httpd_req_t *req)
+{
+    const int   id = studio_qint(req, "id", 0);
+    const int   p  = studio_qint(req, "p", -1);
+    const float v  = studio_qfloat(req, "v", 0);
+    STUDIO_NEED_MODE(req);
+    STUDIO_NEED_ID(req, id);
+    if (p < 0 || p >= DB_PARAM_COUNT) {
+        return studio_json(req, R"({"ok":false,"err":"bad param"})");
+    }
+
+    float rb = 0;
+    if (driver_board_set_param(id, p, v) && driver_board_get_param(id, p, &rb)) {
+        char b[96];
+        std::snprintf(b, sizeof b, R"({"ok":true,"p":%d,"v":%g})", p, rb);
+        return studio_json(req, b);
+    }
+    return studio_json(req, R"({"ok":false,"err":"no reply"})");
+}
+
+/* GET /v1/studio/setall?p=P&v=V[&save=1] - one parameter to all 12 servos. */
+static esp_err_t studio_setall_handler(httpd_req_t *req)
+{
+    const int   p    = studio_qint(req, "p", -1);
+    const int   save = studio_qint(req, "save", 0);
+    const float v    = studio_qfloat(req, "v", 0);
+    STUDIO_NEED_MODE(req);
+    if (p < 0 || p >= DB_PARAM_COUNT) {
+        return studio_json(req, R"({"ok":false,"err":"bad param"})");
+    }
+
+    char fail[64];
+    int fn = 0, n = 0;
+    fail[0] = '\0';
+    for (int id = 1; id <= 12; ++id) {
+        float rb = 0;
+        if (driver_board_set_param(id, p, v) && driver_board_get_param(id, p, &rb)) {
+            n++;
+        } else {
+            fn += std::snprintf(fail + fn, sizeof fail - fn, "%s%d", fn ? "," : "", id);
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));   // give the AT32 time between writes
+    }
+    const bool saved = (save && n) ? driver_board_save_config(-1) : false;
+
+    char b[192];
+    std::snprintf(b, sizeof b,
+                  R"({"ok":%s,"p":%d,"v":%g,"n":%d,"fail":[%s],"saved":%s})",
+                  n ? "true" : "false", p, v, n, fail, saved ? "true" : "false");
+    return studio_json(req, b);
+}
+
+/* GET /v1/studio/live?id=N - the AT32's live control-loop values.
+ * Needs AT32 firmware that implements GET_LIVE; falls back to the feedback
+ * cache if it does not, and says which of the two it answered with. */
+static esp_err_t studio_live_handler(httpd_req_t *req)
+{
+    const int id = studio_qint(req, "id", 0);
+    STUDIO_NEED_MODE(req);
+    STUDIO_NEED_ID(req, id);
+
+    float lv[DB_LIVE_COUNT];
+    bool ok = true;
+    // Everything below DB_LIVE_TEMPERATURE_C is required; temperature is
+    // optional so a board on older AT32 firmware degrades to "no temp"
+    // instead of dropping the whole trace to the reduced path.
+    for (int i = 0; i < DB_LIVE_TEMPERATURE_C && ok; ++i) {
+        ok = driver_board_get_live(id, i, &lv[i]);
+    }
+
+    char b[640];
+    if (ok) {
+        float t;
+        bool have_t = driver_board_get_live(id, DB_LIVE_TEMPERATURE_C, &t);
+        if (!have_t || t <= DB_TEMP_INVALID) {
+            t = driver_board_present_temperature(id);
+            have_t = (t > DB_TEMP_INVALID);
+        }
+        int n = std::snprintf(b, sizeof b,
+            R"({"ok":true,"full":true,"pos_adc":%g,"cur_adc":%g,)"
+            R"("set_deg":%g,"now_deg":%g,"err_deg":%g,)"
+            R"("cap_ma":%g,"set_ma":%g,"now_ma":%g,"err_ma":%g,)"
+            R"("duty":%g,"mode":%d,"loop":%lu)",
+            lv[DB_LIVE_POS_ADC], lv[DB_LIVE_CUR_ADC],
+            lv[DB_LIVE_SETPOINT_POS_DEG], lv[DB_LIVE_PRESENT_POS_DEG],
+            lv[DB_LIVE_ERROR_POS_DEG],
+            lv[DB_LIVE_MAX_CURRENT_MA], lv[DB_LIVE_SETPOINT_CUR_MA],
+            lv[DB_LIVE_PRESENT_CUR_MA], lv[DB_LIVE_ERROR_CUR_MA],
+            lv[DB_LIVE_PWM_DUTY], static_cast<int>(lv[DB_LIVE_MODE]),
+            static_cast<unsigned long>(lv[DB_LIVE_LOOP_COUNTER]));
+        if (have_t) n += std::snprintf(b + n, sizeof b - n, R"(,"temp_c":%.1f)", t);
+        std::snprintf(b + n, sizeof b - n, "}");
+    } else if (driver_board_poll(id)) {
+        const float t = driver_board_present_temperature(id);
+        int n = std::snprintf(b, sizeof b,
+            R"({"ok":true,"full":false,"now_deg":%g,"now_ma":%d)",
+            static_cast<float>(driver_board_present_position(id))
+                * driver_board_get_scale_dd() / 10240.0f,
+            driver_board_present_current(id));
+        if (t > DB_TEMP_INVALID) n += std::snprintf(b + n, sizeof b - n, R"(,"temp_c":%.1f)", t);
+        std::snprintf(b + n, sizeof b - n, "}");
+    } else {
+        std::snprintf(b, sizeof b, R"({"ok":false,"err":"spi"})");
+    }
+    return studio_json(req, b);
+}
+
+/* GET /v1/studio/temps - NTC temperature of all 12. No studio mode needed. */
+static esp_err_t studio_temps_handler(httpd_req_t *req)
+{
+    if (robot::studio_mode()) {
+        for (int bd = 0; bd < 4; ++bd) driver_board_poll_board(bd);
+    }
+    char b[512];
+    int n = std::snprintf(b, sizeof b, R"({"ok":true,"studio":%s,"temps":[)",
+                          robot::studio_mode() ? "true" : "false");
+    for (int id = 1; id <= 12; ++id) {
+        const float t = driver_board_present_temperature(id);
+        if (t > DB_TEMP_INVALID) {
+            n += std::snprintf(b + n, sizeof b - n, R"(%s{"id":%d,"c":%.1f})",
+                               id == 1 ? "" : ",", id, t);
+        } else {
+            n += std::snprintf(b + n, sizeof b - n, R"(%s{"id":%d,"c":null})",
+                               id == 1 ? "" : ",", id);
+        }
+    }
+    std::snprintf(b + n, sizeof b - n, "]}");
+    return studio_json(req, b);
+}
+
+/* GET /v1/studio/save?id=N - commit board config to AT32 flash (0 = all). */
+static esp_err_t studio_save_handler(httpd_req_t *req)
+{
+    const int id = studio_qint(req, "id", 0);
+    STUDIO_NEED_MODE(req);
+    const int board = (id >= 1 && id <= 12) ? (id - 1) / 3 : -1;
+    return studio_json(req, driver_board_save_config(board)
+                              ? R"({"ok":true})"
+                              : R"({"ok":false,"err":"save failed"})");
+}
+
+/* GET /v1/studio/restore?id=N - factory defaults, RAM only (0 = all).
+ * RAM only, so this is undoable by power-cycling; follow with save?id=N to
+ * make it stick, which is why the two are separate routes. */
+static esp_err_t studio_restore_handler(httpd_req_t *req)
+{
+    const int id = studio_qint(req, "id", 0);
+    STUDIO_NEED_MODE(req);
+    const int board = (id >= 1 && id <= 12) ? (id - 1) / 3 : -1;
+    return studio_json(req, driver_board_factory_restore(board)
+                              ? R"({"ok":true})"
+                              : R"({"ok":false,"err":"restore failed"})");
+}
+
+/* GET /v1/studio/direct?id=N&m=0|1|2&deg=..&cur=..
+ * m: 0 idle (motor off), 1 position hold, 2 torque. deg is the RAW AT32 angle
+ * with 135 = centre - the boards' own units, NOT the gait frame. */
+static esp_err_t studio_direct_handler(httpd_req_t *req)
+{
+    const int   id  = studio_qint(req, "id", 0);
+    const int   m   = studio_qint(req, "m", 0);
+    const float deg = studio_qfloat(req, "deg", 135.0f);
+    const float cur = studio_qfloat(req, "cur", 130.0f);
+    STUDIO_NEED_MODE(req);
+    STUDIO_NEED_ID(req, id);
+
+    const uint16_t mode = (m == 1) ? DB_MODE_POSITION
+                        : (m == 2) ? DB_MODE_TORQUE
+                                   : DB_MODE_IDLE;
+    return studio_json(req, driver_board_direct(id, mode, deg,
+                                                static_cast<int16_t>(cur))
+                              ? R"({"ok":true})"
+                              : R"({"ok":false,"err":"spi"})");
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1434,6 +1762,35 @@ static esp_err_t api_lua_delete(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── Registering a handler, with the failure made loud ───────────────────
+ *
+ * httpd_register_uri_handler() returns ESP_ERR_HTTPD_HANDLERS_FULL when the
+ * table is full, and the table fills in registration order. Discarding that
+ * code does not produce an error - it produces routes that quietly do not
+ * exist, and they are always the ones registered LAST. The symptom is an
+ * endpoint that 404s (or 405s) while an identical one beside it works, which
+ * reads like a client bug and gets debugged as one.
+ *
+ * COUNT THE TABLE WHEN YOU ADD ROUTES. The arithmetic in start_http_server()
+ * is: register_api() calls + register_static() calls + 2 websockets + 4
+ * marketplace wildcard methods. Adding the Servo Studio routes took that
+ * total from 41 to 52, past the 48 the table used to hold - which is how this
+ * was found. max_uri_handlers is now 64; if you exceed it, this logs by name.
+ */
+static int s_uri_reg_failed = 0;
+
+static bool register_uri(httpd_handle_t server, const httpd_uri_t *h,
+                         const char *method_str)
+{
+    const esp_err_t rc = httpd_register_uri_handler(server, h);
+    if (rc == ESP_OK) return true;
+
+    s_uri_reg_failed++;
+    ESP_LOGE(TAG, "  UNREGISTERED: %s %s (%s) - this endpoint will 404/405",
+             method_str, h->uri, esp_err_to_name(rc));
+    return false;
+}
+
 /* ── Helper to register an API handler ─────────────────────── */
 static void register_api(httpd_handle_t server, const char *method_str,
                          const char *uri, httpd_method_t method,
@@ -1448,8 +1805,9 @@ static void register_api(httpd_handle_t server, const char *method_str,
         .handle_ws_control_frames = false,
         .supported_subprotocol = nullptr,
     };
-    httpd_register_uri_handler(server, &h);
-    ESP_LOGI(TAG, "  API: %s %s", method_str, uri);
+    if (register_uri(server, &h, method_str)) {
+        ESP_LOGI(TAG, "  API: %s %s", method_str, uri);
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1730,7 +2088,10 @@ bool start_http_server()
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 48;
+    // 41 register_api() + 6 register_static() + 2 websockets + 4 marketplace
+    // wildcard methods = 53. See the note on register_uri() - this number is
+    // load-bearing, and being one short deletes a route without saying so.
+    config.max_uri_handlers = 64;
     // LWIP has CONFIG_LWIP_MAX_SOCKETS (16) total.  HTTPD also reserves 3
     // internal sockets on top of max_open_sockets.  At 5, HTTPD uses at most
     // 5+3=8, GUARANTEEING ~8 sockets stay free for OUTBOUND use (upstream cloud
@@ -1774,7 +2135,7 @@ bool start_http_server()
             .handle_ws_control_frames = false,
             .supported_subprotocol = nullptr,
         };
-        httpd_register_uri_handler(s_server, &h);
+        register_uri(s_server, &h, "GET");
     };
 
     // ── Register handlers for each known static file ──
@@ -1803,7 +2164,7 @@ bool start_http_server()
         .handle_ws_control_frames = false,
         .supported_subprotocol = nullptr,
     };
-    httpd_register_uri_handler(s_server, &ws_uri);
+    register_uri(s_server, &ws_uri, "GET");
 
     // ── Register Chat WebSocket endpoint ──
     httpd_uri_t chat_ws_uri = {
@@ -1815,7 +2176,7 @@ bool start_http_server()
         .handle_ws_control_frames = false,
         .supported_subprotocol = nullptr,
     };
-    httpd_register_uri_handler(s_server, &chat_ws_uri);
+    register_uri(s_server, &chat_ws_uri, "GET");
 
     // ── Register REST API endpoints ──
     register_api(s_server, "GET",  "/v1/skills/list",   HTTP_GET,  api_skills_list);
@@ -1836,6 +2197,22 @@ bool start_http_server()
     register_api(s_server, "POST", "/v1/robot/calibrate/reset",HTTP_POST, api_robot_cal_reset);
     register_api(s_server, "POST", "/v1/robot/diagnostic/ping", HTTP_POST, api_robot_diag_ping);
     register_api(s_server, "POST", "/v1/robot/diagnostic/sweep",HTTP_POST, api_robot_diag_sweep);
+    register_api(s_server, "GET",  "/v1/trace",               HTTP_GET,  api_trace);
+
+    // ── Servo Studio ────────────────────────────────────────────
+    // Parameter routes need studio mode (?on=1 first); status and temps do not,
+    // because the AT32 ships that telemetry on every feedback frame anyway.
+    register_api(s_server, "GET", "/v1/studio/mode",    HTTP_GET, studio_mode_handler);
+    register_api(s_server, "GET", "/v1/studio/status",  HTTP_GET, studio_status_handler);
+    register_api(s_server, "GET", "/v1/studio/scan",    HTTP_GET, studio_scan_handler);
+    register_api(s_server, "GET", "/v1/studio/dump",    HTTP_GET, studio_dump_handler);
+    register_api(s_server, "GET", "/v1/studio/set",     HTTP_GET, studio_set_handler);
+    register_api(s_server, "GET", "/v1/studio/setall",  HTTP_GET, studio_setall_handler);
+    register_api(s_server, "GET", "/v1/studio/live",    HTTP_GET, studio_live_handler);
+    register_api(s_server, "GET", "/v1/studio/temps",   HTTP_GET, studio_temps_handler);
+    register_api(s_server, "GET", "/v1/studio/save",    HTTP_GET, studio_save_handler);
+    register_api(s_server, "GET", "/v1/studio/restore", HTTP_GET, studio_restore_handler);
+    register_api(s_server, "GET", "/v1/studio/direct",  HTTP_GET, studio_direct_handler);
 
     // ── Register WiFi config API endpoints ──
     register_api(s_server, "GET",  "/v1/wifi/status",          HTTP_GET,  api_wifi_status);
@@ -1871,17 +2248,24 @@ bool start_http_server()
             .handle_ws_control_frames = false,
             .supported_subprotocol = nullptr,
         };
-        httpd_register_uri_handler(s_server, &h);
+        register_uri(s_server, &h, "GET");
         h.method = HTTP_POST;
-        httpd_register_uri_handler(s_server, &h);
+        register_uri(s_server, &h, "POST");
         h.method = HTTP_PATCH;
-        httpd_register_uri_handler(s_server, &h);
+        register_uri(s_server, &h, "PATCH");
         h.method = HTTP_DELETE;
-        httpd_register_uri_handler(s_server, &h);
+        register_uri(s_server, &h, "DELETE");
         ESP_LOGI(TAG, "  API: GET|POST|PATCH|DELETE /v1/marketplace/* (proxied to gateway)");
     }
 
     ESP_LOGI(TAG, "HTTP server running on port 80 (Core 0, Priority 6)");
+    if (s_uri_reg_failed) {
+        // Say it once, at the end, in one place. A route that failed to
+        // register is a missing feature, not a warning - see register_uri().
+        ESP_LOGE(TAG, "%d URI handler(s) FAILED to register (table is %d). "
+                      "Those endpoints do not exist. Raise max_uri_handlers.",
+                 s_uri_reg_failed, config.max_uri_handlers);
+    }
     ESP_LOGI(TAG, "  → PWA:  http://%s/", AP_IP_ADDR);
     ESP_LOGI(TAG, "  → WS:   ws://%s/v1/telemetry/stream", AP_IP_ADDR);
     ESP_LOGI(TAG, "  → WS:   ws://%s/v1/chat/ui", AP_IP_ADDR);

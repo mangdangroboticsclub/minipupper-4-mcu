@@ -26,18 +26,23 @@ extern "C" {
  *   robot.set_config(p, h, u, s, t) — Set gait parameters
  *
  *   robot.set_servo_angle(id, deg) — Set servo angle (degrees)
- *   robot.set_servo_speed(id, speed) — Set servo speed (0=max)
- *   robot.set_all_servo_speed(speed) — Set all servos speed
+ *   robot.set_servo_speed(id, speed) — Stored, NOT sent (no speed field on the
+ *                                   driver boards; kept for compatibility)
+ *   robot.set_all_servo_speed(speed) — Same, for all 12
+ *   robot.set_servo_current(id, mA) — Current limit: the real torque control
+ *   robot.get_servo_current(id) → mA
  *   robot.flush()              — Commit servo positions
  *
- *   robot.read_position(id)    → raw 0-1023
- *   robot.read_speed(id)       → signed speed
- *   robot.read_load(id)        → signed load
- *   robot.read_voltage(id)     → 0.1V units
- *   robot.read_temperature(id) → °C
+ *   robot.read_position(id)    → raw 0-1023, AT32 frame
+ *   robot.read_angle_cdeg(id)  → centidegrees from centre, SAME frame as
+ *                                set_servo_angle() - use this for a control loop
+ *   robot.read_speed(id)       → always -1 (not reported by this hardware)
+ *   robot.read_load(id)        → signed load (present motor current)
+ *   robot.read_voltage(id)     → always -1
+ *   robot.read_temperature(id) → °C, from the servo's NTC
  *   robot.read_moving(id)      → 0/1
  *   robot.read_current(id)     → mA
- *   robot.ping(id)             → model number or 0
+ *   robot.ping(id)             → 1 if the channel answers, else -1
  *
  *   robot.set_offset(id, deg)  — Calibration offset (degrees)
  *   robot.get_offset(id)       → offset in degrees
@@ -53,7 +58,7 @@ extern "C" {
  *   crypto.base64_encode(str)  → Encode raw bytes as base64 string
  *   robot.ik_rl(x, th0, z)     — Rear-left   leg IK
  *
- *   robot.imu_read()           → {ax, ay, az, gx, gy, gz}
+ *   robot.imu_read()           → {ax, ay, az, gx, gy, gz, mx, my, mz, mag_valid}
  *   robot.imu_print()          — Log IMU to console
  *
  * @param L  Lua state to register into

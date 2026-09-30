@@ -279,6 +279,37 @@ static int l_robot_set_all_servo_speed(lua_State *L)
 }
 
 /**
+ * robot.set_servo_current(id, mA) — Set the per-servo current limit.
+ *
+ * This is the torque control on the MP4-ESP32-CORE hardware: a ceiling on the
+ * current the servo's driver board may source while holding position. Clamped
+ * to 0..1500 mA and persisted across reboots.
+ *
+ * Contrast robot.set_servo_speed(), which is stored and never sent - the
+ * driver boards have no speed field for it to travel in.
+ */
+static int l_robot_set_servo_current(lua_State *L)
+{
+    int id;
+    if (!check_servo_id(L, 1, &id)) return 0;
+    lua_Integer ma = luaL_checkinteger(L, 2);
+    if (ma < 0) ma = 0;
+    robot::set_servo_current(id, (uint16_t)ma);
+    return 0;
+}
+
+/**
+ * robot.get_servo_current(id) → current limit in mA, or 0 on a bad id.
+ */
+static int l_robot_get_servo_current(lua_State *L)
+{
+    int id;
+    if (!check_servo_id(L, 1, &id)) return 0;
+    lua_pushinteger(L, (lua_Integer)robot::get_servo_current(id));
+    return 1;
+}
+
+/**
  * robot.flush() — Commit buffered servo positions (SyncWrite).
  */
 static int l_robot_flush(lua_State *L)
@@ -297,6 +328,22 @@ static int l_robot_read_position(lua_State *L)
     int id;
     if (!check_servo_id(L, 1, &id)) return 0;
     lua_pushinteger(L, robot::read_position(id));
+    return 1;
+}
+
+/**
+ * robot.read_angle_cdeg(id) → signed centidegrees from centre, or
+ *                             INT32_MIN on a bad id.
+ *
+ * The value is in the SAME frame robot.set_servo_angle() takes, so
+ * read -> compare -> correct converges. robot.read_position() is in the
+ * opposite frame and cannot be used for that.
+ */
+static int l_robot_read_angle_cdeg(lua_State *L)
+{
+    int id;
+    if (!check_servo_id(L, 1, &id)) return 0;
+    lua_pushinteger(L, robot::read_angle_cdeg(id));
     return 1;
 }
 
@@ -488,20 +535,31 @@ static int l_robot_ik_rl(lua_State *L)
 /* ── IMU ──────────────────────────────────────────────────────────────── */
 
 /**
- * robot.imu_read() → {ax, ay, az, gx, gy, gz}
- *   — Returns a table with accelerometer (g) and gyroscope (dps) data.
+ * robot.imu_read() → {ax, ay, az, gx, gy, gz, mx, my, mz, mag_valid}
+ *   — Returns a table with accelerometer (g), gyroscope (dps) and
+ *     magnetometer (uT) data.
+ *
+ * The magnetometer is the BMM150 on the BMI270's auxiliary bus, present on
+ * the new board only. mag_valid is false until it has been read at least
+ * once: a dead or absent magnetometer must not cost the gait, so accel and
+ * gyro still report and the m* fields stay at zero. Scripts written against
+ * the old six fields keep working — the extra keys are additive.
  */
 static int l_robot_imu_read(lua_State *L)
 {
     robot::ImuData imu = robot::imu_read();
 
-    lua_createtable(L, 0, 6);
+    lua_createtable(L, 0, 10);
     lua_pushnumber(L, imu.ax); lua_setfield(L, -2, "ax");
     lua_pushnumber(L, imu.ay); lua_setfield(L, -2, "ay");
     lua_pushnumber(L, imu.az); lua_setfield(L, -2, "az");
     lua_pushnumber(L, imu.gx); lua_setfield(L, -2, "gx");
     lua_pushnumber(L, imu.gy); lua_setfield(L, -2, "gy");
     lua_pushnumber(L, imu.gz); lua_setfield(L, -2, "gz");
+    lua_pushnumber(L, imu.mx); lua_setfield(L, -2, "mx");
+    lua_pushnumber(L, imu.my); lua_setfield(L, -2, "my");
+    lua_pushnumber(L, imu.mz); lua_setfield(L, -2, "mz");
+    lua_pushboolean(L, imu.mag_valid); lua_setfield(L, -2, "mag_valid");
     return 1;
 }
 
@@ -527,9 +585,12 @@ static const struct luaL_Reg ROBOT_LIB[] = {
     { "set_servo_angle",   l_robot_set_servo_angle   },
     { "set_servo_speed",   l_robot_set_servo_speed   },
     { "set_all_servo_speed", l_robot_set_all_servo_speed },
+    { "set_servo_current", l_robot_set_servo_current },
+    { "get_servo_current", l_robot_get_servo_current },
     { "flush",             l_robot_flush             },
     /* Servo feedback */
     { "read_position",     l_robot_read_position     },
+    { "read_angle_cdeg",   l_robot_read_angle_cdeg   },
     { "read_speed",        l_robot_read_speed        },
     { "read_load",         l_robot_read_load         },
     { "read_voltage",      l_robot_read_voltage      },

@@ -13,9 +13,12 @@ set(sources
     "network/chat_ws.cc"
     "network/marketplace_proxy.cc"
     "robot/robot.cc"
+    "robot/driver_board.c"
     "robot/stanford_gait.cc"
     "robot/stanford_kinematics.cc"
     "robot/imu.cc"
+    "platform/shared_i2c.cc"
+    "util/trace_ring.cc"
     "lua/lua_vm.cc"
     "lua/lua_bindings.cc"
 )
@@ -58,7 +61,7 @@ set(common_assets
 # ── Register component ───────────────────────────────────────
 idf_component_register(
     SRCS        ${sources}
-    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua"
+    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util"
     EMBED_FILES
         ${common_assets}
         ${design_assets}
@@ -68,7 +71,9 @@ idf_component_register(
         lua
         littlefs
         driver
-        ftservo
+        esp_driver_spi
+        esp_driver_i2c
+        esp_driver_gpio
         esp_http_server
         esp_wifi
         esp_netif

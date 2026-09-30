@@ -200,9 +200,9 @@
       });
       const data = await res.json();
       if (data.ok) {
-        diagResult = `✅ Servo ${servoId} responded (model=${data.model})`;
+        diagResult = `✅ Servo ${servoId} is responding`;
       } else {
-        diagResult = `❌ Servo ${servoId} NO RESPONSE (error=${data.error})`;
+        diagResult = `❌ Servo ${servoId} did NOT respond (err=${data.error})`;
       }
     } catch (e) {
       diagResult = `❌ Ping failed: ${e.message}`;

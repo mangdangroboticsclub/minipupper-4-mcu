@@ -70,48 +70,90 @@ export const ROBOT_COMPLETIONS: RobotCompletion[] = [
     info:
       "Set movement speed for a single servo.\n" +
       "  id    — servo number (1-12)\n" +
-      "  speed — 0 = maximum speed, larger values = slower",
+      "  speed — 0 = maximum speed, larger values = slower\n" +
+      "\n" +
+      "STORED, NEVER SENT on this robot. The servo driver boards have no speed\n" +
+      "field: the command frame carries a max current limit instead, and the\n" +
+      "board runs its own position loop underneath it. Use\n" +
+      "robot.set_servo_current() for the control that actually does something.",
   },
   {
     label: "robot.set_all_servo_speed",
     detail: "robot.set_all_servo_speed(speed)",
     info:
       "Set movement speed for all 12 servos at once.\n" +
-      "  speed — 0 = maximum speed, larger values = slower",
+      "Stored, not sent — see robot.set_servo_speed().",
+  },
+  {
+    label: "robot.set_servo_current",
+    detail: "robot.set_servo_current(id, mA)",
+    info:
+      "Set a servo's current limit in milliamps — the torque control on this robot.\n" +
+      "  id — servo number (1-12)\n" +
+      "  mA — 0..1500; clamped to that range\n" +
+      "A ceiling, not a forced draw: a lightly loaded leg still only takes what\n" +
+      "it needs. 0 means hold with no torque, which for a loaded joint is the\n" +
+      "same as releasing it. Persisted across reboots.",
+  },
+  {
+    label: "robot.get_servo_current",
+    detail: "robot.get_servo_current(id) → number (mA)",
+    info: "Read a servo's current limit in milliamps. Returns 0 for a bad id.",
   },
   {
     label: "robot.flush",
     detail: "robot.flush()",
     info:
-      "Commit all buffered servo positions via SyncWrite.\n" +
-      "Must be called after set_servo_angle or IK functions for changes to take effect.",
+      "Push all buffered servo positions to the four driver boards in one SPI pass.\n" +
+      "Must be called after set_servo_angle or IK functions for changes to take effect.\n" +
+      "Does nothing while Servo Studio or a skill holds the servo bus.",
   },
 
   // ── Servo feedback ──────────────────────────────────────────
   {
     label: "robot.read_position",
     detail: "robot.read_position(id) → number (0-1023)",
-    info: "Read a servo's raw position. Returns -1 on error.",
+    info:
+      "Read a servo's raw position. Returns -1 on error.\n" +
+      "\n" +
+      "This is the driver boards' own frame, which runs OPPOSITE to the frame\n" +
+      "robot.set_servo_angle() takes — so a read/compare/correct loop built on it\n" +
+      "diverges instead of converging. Use robot.read_angle_cdeg() for that.",
+  },
+  {
+    label: "robot.read_angle_cdeg",
+    detail: "robot.read_angle_cdeg(id) → number (centidegrees)",
+    info:
+      "Read a servo's measured angle as signed centidegrees from centre, in the\n" +
+      "SAME frame robot.set_servo_angle() takes. This is the one to close a loop\n" +
+      "with. Returns INT32_MIN on a bad id.",
   },
   {
     label: "robot.read_speed",
-    detail: "robot.read_speed(id) → number",
-    info: "Read a servo's signed speed value. Returns -1 on error.",
+    detail: "robot.read_speed(id) → -1",
+    info:
+      "Always -1 on this robot: the driver boards do not report speed, because\n" +
+      "position control is current limited rather than velocity commanded.",
   },
   {
     label: "robot.read_load",
     detail: "robot.read_load(id) → number",
-    info: "Read a servo's signed load value. Returns -1 on error.",
+    info: "Read a servo's load, which on this robot is its measured motor current in mA.",
   },
   {
     label: "robot.read_voltage",
-    detail: "robot.read_voltage(id) → number (0.1V units)",
-    info: "Read servo voltage (in 0.1V units). Returns -1 on error.",
+    detail: "robot.read_voltage(id) → -1",
+    info:
+      "Always -1: the servo rail is battery voltage straight through, so there\n" +
+      "is no per-servo supply for the driver boards to measure.",
   },
   {
     label: "robot.read_temperature",
     detail: "robot.read_temperature(id) → number (°C)",
-    info: "Read servo temperature in degrees Celsius. Returns -1 on error.",
+    info:
+      "Read a servo's NTC temperature in degrees Celsius. A real reading on this\n" +
+      "robot, and a free one: it rides on the feedback frame the gait already\n" +
+      "fetches. Returns -1 if that servo has never answered.",
   },
   {
     label: "robot.read_moving",
@@ -121,14 +163,14 @@ export const ROBOT_COMPLETIONS: RobotCompletion[] = [
   {
     label: "robot.read_current",
     detail: "robot.read_current(id) → number (mA)",
-    info: "Read servo current in milliamps. Returns -1 on error.",
+    info: "Read servo current in milliamps. A real reading on this robot.",
   },
   {
     label: "robot.ping",
-    detail: "robot.ping(id) → number",
+    detail: "robot.ping(id) → 1 | -1",
     info:
-      "Ping a servo to check if it's connected.\n" +
-      "Returns the servo model number (>0) on success, ≤0 on failure.",
+      "Check whether a servo channel answers.\n" +
+      "Returns 1 if the board replies to a parameter read, -1 if not.",
   },
 
   // ── Calibration ──────────────────────────────────────────────
