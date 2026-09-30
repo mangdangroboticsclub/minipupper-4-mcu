@@ -2,6 +2,62 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Design Tokens ───────────────────────────────────────────── */
+
+:root {
+  /* brand */
+  --mpx-yellow: #FFE605;
+  --mpx-yellow-deep: #E2CD18;
+  --mpx-yellow-soft: #FFF6B3;
+  --mpx-yellow-tint: rgba(255, 230, 5, 0.18);
+  --mpx-ink: #000000;
+  --mpx-ink-soft: #2B2B2B;
+
+  /* surfaces */
+  --mpx-surface: #FFFFFF;
+  --mpx-surface-2: #F5F5F5;
+  --mpx-surface-3: #ECECEC;
+  --mpx-line: #E6E6E6;
+  --mpx-muted: #969494;
+  --mpx-muted-2: #BDBDBD;
+
+  /* semantic */
+  --mpx-ok: #22C55E;
+  --mpx-warn: #F5B301;
+  --mpx-err: #ED7676;
+  --mpx-info: #0357B7;
+
+  /* action colours */
+  --mpx-green: #6AAE6C;
+  --mpx-red: #ED7676;
+  --mpx-purple: #A476ED;
+  --mpx-blue: #89B0DB;
+
+  /* shape */
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+  --r-xl: 28px;
+  --r-pill: 999px;
+
+  /* elevation */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 18px rgba(0, 0, 0, 0.06);
+  --shadow-float: 0 12px 32px rgba(0, 0, 0, 0.16);
+  --shadow-press: inset 0 2px 4px rgba(0, 0, 0, 0.12);
+
+  /* motion */
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 140ms;
+  --dur-med: 260ms;
+  --dur-slow: 480ms;
+
+  /* layout */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --page-max: 560px;
+}
+
 /* ── Global Resets ───────────────────────────────────────────── */
 
 *,
@@ -10,6 +66,24 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+
+input, select, textarea {
+  font: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 html,
