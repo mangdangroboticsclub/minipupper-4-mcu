@@ -3,6 +3,7 @@
   import { marked } from "marked";
   import ChatSidebar from "./ChatSidebar.svelte";
   import ChatMessage from "./ChatMessage.svelte";
+  import AgentActivity from "./AgentActivity.svelte";
   import EmptyChat from "./EmptyChat.svelte";
   import {
     saveConversation,
@@ -10,7 +11,11 @@
     generateUUID,
   } from "../conversationStore.js";
 
-  let { navigate } = $props();
+  /**
+   * @prop navigate — (view) => void
+   * @prop network  — robot link snapshot from app.svelte ({ online, linkState, … })
+   */
+  let { navigate, network = null } = $props();
 
   // ── UUID helper (matches original) ─────────
   function makeUUID() {
@@ -47,6 +52,34 @@
   let scrollAnchor = $state(null);
   let inputEl = $state(null);
   let pendingActions = $state([]);
+
+  // ── Render model: group consecutive `step` messages into one activity block ──
+  let renderItems = $derived.by(() => {
+    const items = [];
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.role === "step") {
+        const prev = items[items.length - 1];
+        if (prev && prev.kind === "activity") {
+          prev.steps.push(m);
+          prev.endIndex = i;
+        } else {
+          items.push({ kind: "activity", steps: [m], startIndex: i, endIndex: i, firstMsg: m });
+        }
+      } else {
+        items.push({ kind: "msg", msg: m, index: i });
+      }
+    }
+    return items;
+  });
+
+  // Overall channel status shown in the action bar
+  let channel = $derived.by(() => {
+    if (network && network.online === false) return { tone: "err", label: "Robot offline" };
+    if (!connected) return { tone: "warn", label: "Connecting agent…" };
+    if (sending) return { tone: "busy", label: "Agent working" };
+    return { tone: "ok", label: "Agent ready" };
+  });
 
   // Live timer for response counter
   let now = $state(Date.now());
@@ -209,8 +242,10 @@
       if (messages[i].actionId === actionId) {
         const updated = { ...messages[i] };
         updated.pending = false;
-        const prefix = approved ? "✅ Approved: " : "⛔ Denied: ";
-        updated.text = prefix + messages[i].text.replace("🔧 OpenClaw requests: ", "");
+        updated.kind = "permission";
+        updated.status = approved ? "approved" : "denied";
+        updated.description ??= (messages[i].text || "").replace("🔧 OpenClaw requests: ", "");
+        updated.text = `${approved ? "Approved" : "Denied"}: ${updated.description}`;
         messages[i] = updated;
         break;
       }
@@ -287,6 +322,14 @@
     connected = false;
   }
 
+  /** Index of the most recent user message (steps/system frames may follow it). */
+  function lastUserIdx() {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "user") return i;
+    }
+    return -1;
+  }
+
   function handleMessage(data) {
     // ── Chunked chat_reply reassembly (array-based like original) ──
     if (data.type === "chat_reply_chunk") {
@@ -322,19 +365,43 @@
         pendingActions = [...pendingActions, action];
       } else if (action.id) {
         pendingActions = pendingActions.filter((a) => a.id !== action.id);
-        const icon = action.status === "approved" ? "✅" : action.status === "denied" ? "⛔" : action.status === "timeout" ? "⏱️" : "ℹ️";
-        messages = [...messages, {
-          role: "system",
-          text: `${icon} OpenClaw action: ${action.type} — ${action.description} [${action.status}]`,
-        }];
+        // Resolve the inline permission card if we still have it pending
+        // (e.g. the user answered from the global modal, or it timed out).
+        let resolved = false;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].actionId === action.id && messages[i].pending) {
+            messages[i] = {
+              ...messages[i],
+              pending: false,
+              kind: "permission",
+              status: action.status,
+              text: `${action.status}: ${action.description}`,
+            };
+            resolved = true;
+            break;
+          }
+        }
+        if (!resolved) {
+          messages = [...messages, {
+            role: "system",
+            kind: "action_result",
+            actionType: action.type,
+            description: action.description,
+            status: action.status,
+            text: `OpenClaw action: ${action.type} — ${action.description} [${action.status}]`,
+          }];
+        }
       }
       if (action.status === "pending") {
         messages = [...messages, {
           role: "system",
+          kind: "permission",
           text: `🔧 OpenClaw requests: ${action.description}`,
+          description: action.description,
           actionId: action.id,
           actionType: action.type,
           pending: true,
+          receivedAt: Date.now(),
         }];
       }
       sending = false;
@@ -344,8 +411,8 @@
     // ── step ──
     if (data.type === "step") {
       // Update the most recent user message's history
-      const lastIdx = messages.length - 1;
-      if (lastIdx >= 0 && messages[lastIdx].role === "user") {
+      const lastIdx = lastUserIdx();
+      if (lastIdx >= 0) {
         const updated = { ...messages[lastIdx] };
         if (!updated.history) updated.history = [];
         updated.status = `step_${data.seq}_of_${data.total}`;
@@ -392,9 +459,9 @@
         sending = false;
         return;
       }
-      // Mark last user message as completed
-      const lastIdx = messages.length - 1;
-      if (lastIdx >= 0 && messages[lastIdx].role === "user") {
+      // Mark the most recent user message as completed
+      const lastIdx = lastUserIdx();
+      if (lastIdx >= 0) {
         const updated = { ...messages[lastIdx] };
         updated.status = "completed";
         if (!updated.history) updated.history = [];
@@ -421,8 +488,8 @@
 
     // ── ack ──
     if (data.type === "ack") {
-      const lastIdx = messages.length - 1;
-      if (lastIdx >= 0 && messages[lastIdx].role === "user") {
+      const lastIdx = lastUserIdx();
+      if (lastIdx >= 0 && messages[lastIdx].status !== "completed") {
         const updated = { ...messages[lastIdx] };
         updated.status = data.status || "sent";
         if (!updated.history) updated.history = [];
@@ -471,7 +538,13 @@
       messages = convo.messages;
     }
     connect();
-    return () => disconnect();
+    // Dev-only: lets you replay server frames from the console, e.g.
+    //   __mpxChat.inject({ type: "step", text: "Planning", seq: 1, total: 3 })
+    if (import.meta.env.DEV) window.__mpxChat = { inject: handleMessage };
+    return () => {
+      disconnect();
+      if (import.meta.env.DEV) delete window.__mpxChat;
+    };
   });
 
   // ── Auto-scroll ────────────────────────────
@@ -493,7 +566,7 @@
 
 <div class="chat-root">
   <!-- Sidebar (slide animation) -->
-  <div class="sidebar-backdrop" class:visible={showSidebar} onclick={() => (showSidebar = false)}></div>
+  <div class="sidebar-backdrop" class:visible={showSidebar} role="presentation" onclick={() => (showSidebar = false)}></div>
   <div class="sidebar-panel" class:open={showSidebar}>
     <ChatSidebar
       activeId={sessionId}
@@ -533,46 +606,45 @@
         </svg>
         <span>New</span>
       </button>
-      <span class="flex items-center gap-1.5 text-xs ml-auto">
-        {#if sessionAckBadge}
-          <span class="flex items-center gap-1 text-mpx-orange-light">
-            <span class="w-2 h-2 rounded-full bg-mpx-orange-light"></span>
-            Session reset
-          </span>
-        {:else}
-          <span class="flex items-center gap-1.5 {connected ? 'text-green-500' : 'text-red-500'}">
-            <span class="w-2 h-2 rounded-full {connected ? 'bg-green-500' : 'bg-red-500'}"></span>
-            {sending ? "Sending…" : connected ? "Online" : "Offline"}
-          </span>
-        {/if}
+
+      <span class="channel-pill" data-tone={sessionAckBadge ? "info" : channel.tone} role="status">
+        <span class="channel-dot"></span>
+        {sessionAckBadge ? "Session reset" : channel.label}
       </span>
     </div>
 
     <!-- Messages or Empty state -->
     {#if messages.length === 0 && !sending}
-      <EmptyChat />
+      <EmptyChat online={connected && network?.online !== false} onSuggest={(t) => sendMessage(t)} />
     {:else}
       <div class="messages-area">
         <div class="messages-scroll">
-          {#each messages as msg, i}
-            <!-- Date delineator -->
-            {#if i === 0 || (i > 0 && isNewDay(findPrevTimestampMsg(messages, i - 1), msg))}
-              <div class="date-delineator">
-                <span>{formatDateLabel(msg)}</span>
-              </div>
+          {#each renderItems as item, k (item.kind === "msg" ? `m${item.index}` : `a${item.startIndex}`)}
+            {#if item.kind === "activity"}
+              <AgentActivity steps={item.steps} active={sending && k === renderItems.length - 1} />
+            {:else}
+              {@const i = item.index}
+              {@const msg = item.msg}
+              <!-- Date delineator -->
+              {#if i === 0 || (i > 0 && isNewDay(findPrevTimestampMsg(messages, i - 1), msg))}
+                <div class="date-delineator">
+                  <span>{formatDateLabel(msg)}</span>
+                </div>
+              {/if}
+              <ChatMessage
+                {msg}
+                isFirst={i === 0}
+                isLastInGroup={i === messages.length - 1 || messages[i + 1]?.role !== msg.role}
+                busy={i === messages.length - 1}
+                {respondPermission}
+              />
             {/if}
-            <ChatMessage
-              {msg}
-              isFirst={i === 0}
-              isLastInGroup={i === messages.length - 1 || messages[i + 1]?.role !== msg.role}
-              {respondPermission}
-            />
           {/each}
 
-          <!-- Sending indicator -->
-          {#if sending && lastSentTs}
+          <!-- Thinking indicator (before the first step arrives) -->
+          {#if sending && lastSentTs && messages[messages.length - 1]?.role !== "step"}
             <div class="sending-indicator">
-              <span class="spinner"></span>
+              <span class="typing"><span></span><span></span><span></span></span>
               <span class="timer">{Math.floor((now - lastSentTs) / 1000)}s</span>
             </div>
           {/if}
@@ -589,9 +661,10 @@
           bind:this={inputEl}
           bind:value={inputText}
           onkeydown={(e) => e.key === "Enter" && sendMessage(inputText)}
-          placeholder={connected ? "Type a message…" : "Reconnecting…"}
+          placeholder={sending ? "Pupper is working…" : connected ? "Ask Pupper to do something…" : "Connecting to agent…"}
           disabled={sending || !connected}
           class="chat-input"
+          enterkeyhint="send"
         />
         <button
           class="send-btn"
@@ -616,7 +689,7 @@
   .chat-root {
     display: flex;
     height: 100%;
-    background: #f8f8f8;
+    background: var(--mpx-surface-2);
     position: relative;
   }
 
@@ -664,8 +737,8 @@
     align-items: center;
     gap: 6px;
     padding: 8px 14px;
-    border-bottom: 1px solid #eee;
-    background: #f8f8f8;
+    border-bottom: 1px solid var(--mpx-line);
+    background: var(--mpx-surface);
     flex-shrink: 0;
   }
 
@@ -673,145 +746,143 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    padding: 6px 12px;
-    border: 1px solid #e0e0e0;
-    border-radius: 8px;
-    background: #fff;
-    color: #666;
+    height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--mpx-line);
+    border-radius: var(--r-pill);
+    background: var(--mpx-surface);
+    color: var(--mpx-ink-soft);
     font-size: 0.75rem;
-    font-weight: 600;
+    font-weight: 700;
     cursor: pointer;
-    transition: all 0.15s;
+    transition: border-color var(--dur-fast), background var(--dur-fast);
   }
-  .action-bar-btn:hover {
-    border-color: #FFE605;
-    color: #333;
-    background: #fffef5;
+  .action-bar-btn:hover { border-color: var(--mpx-yellow); background: #fffef2; }
+  .action-bar-btn.active { border-color: var(--mpx-yellow); background: var(--mpx-yellow-soft); }
+
+  .channel-pill {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 10px;
+    border-radius: var(--r-pill);
+    font-size: 0.7rem;
+    font-weight: 700;
+    background: var(--mpx-surface-2);
+    color: var(--mpx-ink-soft);
+    white-space: nowrap;
   }
-  .action-bar-btn.active {
-    border-color: #FFE605;
-    background: #fffde0;
-    color: #333;
-  }
+  .channel-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mpx-muted-2); }
+  .channel-pill[data-tone="ok"] .channel-dot { background: var(--mpx-ok); }
+  .channel-pill[data-tone="busy"] .channel-dot { background: var(--mpx-yellow-deep); animation: blink 1s infinite; }
+  .channel-pill[data-tone="warn"] .channel-dot { background: #f59e0b; animation: blink 1.4s infinite; }
+  .channel-pill[data-tone="err"] { background: #fde8e8; color: #b42318; }
+  .channel-pill[data-tone="err"] .channel-dot { background: var(--mpx-err); }
+  .channel-pill[data-tone="info"] .channel-dot { background: var(--mpx-info); }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
   /* ── Date delineator ──────────────────── */
-  .date-delineator {
-    display: flex;
-    justify-content: center;
-    margin: 10px 0;
-  }
+  .date-delineator { display: flex; justify-content: center; margin: 10px 0; }
   .date-delineator span {
-    font-size: 0.68rem;
-    color: #999;
-    background: #f0f0f0;
+    font-size: 0.66rem;
+    font-weight: 700;
+    color: var(--mpx-muted);
+    background: var(--mpx-surface-3);
     padding: 3px 12px;
-    border-radius: 100px;
-    border: 1px solid #e0e0e0;
+    border-radius: var(--r-pill);
   }
 
   /* ── Messages ─────────────────────────── */
-  .messages-area {
-    flex: 1;
-    overflow-y: auto;
-    min-height: 0;
-  }
-
+  .messages-area { flex: 1; overflow-y: auto; min-height: 0; -webkit-overflow-scrolling: touch; }
   .messages-scroll {
-    padding: 8px 0;
+    padding: 8px 0 12px;
     display: flex;
     flex-direction: column;
     gap: 6px;
+    max-width: 820px;
+    margin: 0 auto;
+    width: 100%;
   }
 
   .sending-indicator {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 16px;
-    margin: 4px 16px;
-    border-radius: 12px;
-    background: #f5f5f5;
-    border: 1px solid #eee;
+    padding: 10px 14px;
+    margin: 2px 16px;
+    border-radius: 18px 18px 18px 6px;
+    background: var(--mpx-surface);
+    border: 1px solid var(--mpx-line);
     width: fit-content;
   }
+  .typing { display: inline-flex; gap: 4px; }
+  .typing span {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--mpx-yellow-deep);
+    animation: bounce 1.2s ease-in-out infinite;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.15s; }
+  .typing span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.5; } 30% { transform: translateY(-4px); opacity: 1; } }
 
   .spinner {
-    width: 18px;
-    height: 18px;
+    width: 18px; height: 18px;
     border: 2.5px solid rgba(255, 230, 5, 0.4);
-    border-top-color: #FFE605;
+    border-top-color: var(--mpx-yellow);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
-  .spinner.small {
-    width: 16px;
-    height: 16px;
-    border-width: 2px;
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
+  .spinner.small { width: 16px; height: 16px; border-width: 2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 
-  .timer {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #999;
-    font-variant-numeric: tabular-nums;
-  }
+  .timer { font-size: 0.74rem; font-weight: 700; color: var(--mpx-muted); font-variant-numeric: tabular-nums; }
 
   /* ── Input bar ───────────────────────── */
   .input-bar {
-    padding: 10px 14px 16px;
-    border-top: 1px solid #eee;
-    background: #f8f8f8;
+    padding: 10px 14px calc(12px + var(--safe-bottom));
+    border-top: 1px solid var(--mpx-line);
+    background: var(--mpx-surface);
     flex-shrink: 0;
   }
-
   .input-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    background: #f0f0f0;
-    border-radius: 100px;
+    background: var(--mpx-surface-2);
+    border-radius: var(--r-pill);
     padding: 4px 4px 4px 18px;
+    max-width: 820px;
+    margin: 0 auto;
+    transition: box-shadow var(--dur-fast);
   }
+  .input-row:focus-within { box-shadow: 0 0 0 2px var(--mpx-yellow); }
 
   .chat-input {
     flex: 1;
     border: none;
     outline: none;
     background: transparent;
-    font-size: 0.9rem;
-    color: #333;
+    font-size: 0.92rem;
+    color: var(--mpx-ink);
     padding: 10px 0;
     min-width: 0;
   }
-  .chat-input::placeholder {
-    color: #bbb;
-  }
-  .chat-input:disabled {
-    opacity: 0.5;
-  }
+  .chat-input::placeholder { color: var(--mpx-muted-2); }
+  .chat-input:disabled { opacity: 0.6; }
 
   .send-btn {
-    width: 40px;
-    height: 40px;
+    width: 40px; height: 40px;
     border-radius: 50%;
     border: none;
-    background: #222;
-    color: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    background: var(--mpx-ink);
+    color: var(--mpx-yellow);
+    display: grid; place-items: center;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: transform var(--dur-fast), opacity var(--dur-fast);
     flex-shrink: 0;
   }
-  .send-btn:hover {
-    background: #444;
-  }
-  .send-btn:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
+  .send-btn:active:not(:disabled) { transform: scale(0.94); }
+  .send-btn:disabled { opacity: 0.35; cursor: default; }
 </style>
