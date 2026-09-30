@@ -35,6 +35,15 @@ export default defineConfig({
     host: "0.0.0.0",
     port: 5173,
     strictPort: true,
+    // Forward robot API + WebSocket calls to a live robot during development.
+    // Override the target with:  ROBOT_HOST=192.168.x.x npm run dev
+    proxy: {
+      "/v1": {
+        target: `http://${process.env.ROBOT_HOST || "192.168.1.102"}`,
+        changeOrigin: true,
+        ws: true,
+      },
+    },
   },
 
   preview: {
