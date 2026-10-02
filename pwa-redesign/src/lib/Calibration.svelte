@@ -1,5 +1,9 @@
 <script>
   import { colors } from "./colors.js";
+  import {
+    LEGS, SIGN, FOOT_Z, BODY_VERTS, BODY_FACES, SCREEN, EYES,
+    legPoints, makeCamera, dot3, pts,
+  } from "./pupperModel.js";
 
   let { onBack } = $props();
 
@@ -10,14 +14,8 @@
   let saveState = $state("idle"); // idle | saving | saved | error
   let saveTimer = null;
 
-  // Top-view layout: shoulder anchor on the body edge + mirroring per side.
-  //   sx = -1 mirrors to the right side, sy = -1 makes the leg bend forward.
-  const legs = [
-    { id: "fl", label: "FL", name: "Front left",  x: 108, y: 112, sx:  1, sy: -1, lx: 26,  ly: 22  },
-    { id: "fr", label: "FR", name: "Front right", x: 212, y: 112, sx: -1, sy: -1, lx: 294, ly: 22  },
-    { id: "rl", label: "RL", name: "Rear left",   x: 108, y: 238, sx:  1, sy:  1, lx: 26,  ly: 338 },
-    { id: "rr", label: "RR", name: "Rear right",  x: 212, y: 238, sx: -1, sy:  1, lx: 294, ly: 338 },
-  ];
+  // Leg table (geometry + per-leg camera heading) lives in pupperModel.js.
+  const legs = LEGS;
 
   // Servo index base (0-based into offsets[0..11]) for each leg.
   //
@@ -60,11 +58,130 @@
     return activeJoint && activeJoint.leg === leg && activeJoint.joint === joint;
   }
 
-  // Offset (−50..50) → visual rotation of that segment in degrees.
-  const DEG_PER_UNIT = 0.45;
-  function rot(leg, joint) {
-    return (calValues[leg]?.[joint] ?? 0) * DEG_PER_UNIT;
+  // Offsets are servo degrees (POST /v1/robot/calibrate), so the sketch
+  // rotates 1:1 — the robot really moves this far.
+  const DEG_PER_UNIT = 1;
+  function targetAngle(legId, joint) {
+    return (calValues[legId]?.[joint] ?? 0) * DEG_PER_UNIT * SIGN[joint][legId];
   }
+
+  // ── 3D sketch: view + displayed joint angles, eased every frame ──
+  const VIEW_W = 320, VIEW_H = 270, VIEW_SCALE = 1.45;
+  const HOME_VIEW = { yaw: -36, pitch: 26 };
+  const reduceMotion =
+    typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const zeroAngles = () => ({ fl: ZERO(), fr: ZERO(), rl: ZERO(), rr: ZERO() });
+  let view = $state({ ...HOME_VIEW });           // where the camera should be
+  let disp = $state({ ...HOME_VIEW, ang: zeroAngles() }); // what is drawn now
+
+  let raf = 0, lastT = 0;
+  function kick() { if (!raf) raf = requestAnimationFrame(step); }
+  function step(t) {
+    raf = 0;
+    const dt = lastT ? Math.min(t - lastT, 64) : 16;
+    lastT = t;
+    const k = reduceMotion ? 1 : 1 - Math.exp(-dt / 90);
+    let busy = false;
+    const ease = (cur, tgt) => {
+      const d = tgt - cur;
+      if (Math.abs(d) < 0.02) return tgt;
+      busy = true;
+      return cur + d * k;
+    };
+    disp.yaw = ease(disp.yaw, view.yaw);
+    disp.pitch = ease(disp.pitch, view.pitch);
+    for (const l of legs)
+      for (const p of calProps)
+        disp.ang[l.id][p.id] = ease(disp.ang[l.id][p.id], targetAngle(l.id, p.id));
+    if (busy) raf = requestAnimationFrame(step);
+    else lastT = 0;
+  }
+  // Any change to the goal (view or offsets) wakes the loop; it sleeps when settled.
+  $effect(() => {
+    view.yaw; view.pitch;
+    for (const l of legs) for (const p of calProps) calValues[l.id][p.id];
+    kick();
+  });
+  $effect(() => () => cancelAnimationFrame(raf));
+
+  // Shortest-way yaw so the camera never swings the long way round.
+  function lookAt(yaw, pitch = HOME_VIEW.pitch) {
+    const delta = ((yaw - disp.yaw + 540) % 360) - 180;
+    view.yaw = disp.yaw + delta;
+    view.pitch = pitch;
+  }
+
+  // Drag on the diagram orbits the camera; a tap still selects a leg.
+  let orbit = $state(null);
+  function orbitDown(e) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    suppressClick = false;
+    orbit = { x: e.clientX, y: e.clientY, yaw: view.yaw, pitch: view.pitch, moved: false };
+  }
+  function orbitMove(e) {
+    if (!orbit) return;
+    const dx = e.clientX - orbit.x, dy = e.clientY - orbit.y;
+    if (!orbit.moved && Math.hypot(dx, dy) < 6) return;
+    orbit.moved = true;
+    const scale = VIEW_W / Math.max(1, e.currentTarget.clientWidth || VIEW_W);
+    view.yaw = orbit.yaw + dx * scale * 0.55;
+    view.pitch = Math.max(6, Math.min(72, orbit.pitch + dy * scale * 0.45));
+    disp.yaw = view.yaw; disp.pitch = view.pitch; // follow the finger exactly
+  }
+  function orbitUp() { if (orbit?.moved) suppressClick = true; orbit = null; }
+  let suppressClick = false;
+  function orbitClickCapture(e) {
+    if (suppressClick) { e.stopPropagation(); e.preventDefault(); }
+    suppressClick = false;
+  }
+
+  // Projected scene, rebuilt whenever disp changes (cheap: ~40 points).
+  let scene = $derived.by(() => {
+    const cam = makeCamera(disp.yaw, disp.pitch, VIEW_SCALE, VIEW_W / 2, VIEW_H / 2 + 4);
+    const P = (p) => cam.project(p);
+
+    const bodyVerts = BODY_VERTS.map(P);
+    const faces = BODY_FACES
+      .map((f) => ({ ...f, light: dot3(f.n, cam.dir) }))
+      .filter((f) => f.light > 0.02)
+      .map((f) => ({ id: f.id, light: f.light, points: pts(f.idx.map((i) => bodyVerts[i])) }));
+    const frontVisible = faces.some((f) => f.id === "front");
+    const screen = frontVisible ? pts(SCREEN.map(P)) : null;
+    const eyes = frontVisible ? EYES.map((e) => pts(e.map(P))) : null;
+
+    const legItems = legs.map((leg) => {
+      const w = legPoints(leg, disp.ang[leg.id]);
+      const H = P(w.H), T = P(w.T), K = P(w.K), F = P(w.F);
+      const shadow = P([w.F[0], w.F[1], FOOT_Z]);
+      // Legs hang off the flanks, so a leg is in front of the body exactly
+      // when its side faces the camera; within a group sort by true depth.
+      const side = leg.s * cam.dir[1] >= 0 ? 1 : -1;
+      return { kind: "leg", leg, H, T, K, F, shadow, depth: side * 1000 + H.d };
+    });
+
+    const order = [{ kind: "body", depth: 0 }, ...legItems].sort((a, b) => a.depth - b.depth);
+
+    // Direction cue for the joint being nudged: where will the segment go?
+    let arrow = null;
+    if (activeJoint) {
+      const leg = legs.find((l) => l.id === activeJoint.leg);
+      const ang = disp.ang[leg.id];
+      const j = activeJoint.joint;
+      const nudged = { ...ang, [j]: ang[j] + activeJoint.dir * 10 * SIGN[j][leg.id] };
+      const key = j === "hip" ? "K" : "F";
+      const a = P(legPoints(leg, ang)[key]);
+      const b = P(legPoints(leg, nudged)[key]);
+      const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy);
+      const item = legItems.find((i) => i.leg === leg);
+      const pivot = j === "abd" ? item.H : j === "hip" ? item.T : item.K;
+      arrow = len > 1.5
+        ? { x1: a.x + (dx / len) * 10, y1: a.y + (dy / len) * 10, x2: a.x + (dx / len) * 28, y2: a.y + (dy / len) * 28, pivot }
+        : { pivot };
+    }
+
+    return { faces, screen, eyes, shadowRy: Math.max(0.15, cam.sp), order, legItems, arrow };
+  });
 
   // ── API: Load offsets from robot ────────────────────────────
   async function loadOffsets() {
@@ -124,6 +241,9 @@
 
   function selectLeg(id) {
     selectedLeg = selectedLeg === id ? null : id;
+    // Swing the camera round so the chosen leg is nearest the viewer.
+    if (selectedLeg) lookAt(legs.find((l) => l.id === selectedLeg).yaw, 22);
+    else lookAt(HOME_VIEW.yaw, HOME_VIEW.pitch);
   }
 
   function resetLeg() {
@@ -200,7 +320,7 @@
   }
 
   function goBack() {
-    if (selectedLeg) selectedLeg = null;
+    if (selectedLeg) selectLeg(selectedLeg);
     else onBack?.();
   }
 
@@ -228,92 +348,96 @@
 
   <div class="cal-body">
     <!-- ═══ Diagram ═══ -->
-    <section class="cal-diagram" aria-label="Robot top view">
-      <svg viewBox="0 0 320 360" class="cal-svg" class:loading role="img" aria-label="Mini Pupper seen from above">
+    <section class="cal-diagram" aria-label="Robot 3D view">
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <svg
+        viewBox="0 0 {VIEW_W} {VIEW_H}"
+        class="cal-svg"
+        class:loading
+        class:orbiting={orbit?.moved}
+        role="img"
+        aria-label="Mini Pupper, drag to rotate the view"
+        onpointerdown={orbitDown}
+        onpointermove={orbitMove}
+        onpointerup={orbitUp}
+        onpointercancel={orbitUp}
+        onpointerleave={orbitUp}
+        onclickcapture={orbitClickCapture}
+      >
         <defs>
           <marker id="cal-arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
             <path d="M0 0 L10 5 L0 10 z" fill="currentColor"/>
           </marker>
         </defs>
 
-        <!-- Body -->
-        <g class="body">
-          <rect x="112" y="64" width="96" height="222" rx="36" class="shell"/>
-          <rect x="124" y="76" width="72" height="198" rx="28" class="panel"/>
-          <!-- eyes (front) -->
-          <g class="eyes">
-            <rect x="142" y="94" width="13" height="26" rx="5"/>
-            <rect x="165" y="94" width="13" height="26" rx="5"/>
-          </g>
-          <!-- front marker -->
-          <path d="M152 70 L160 62 L168 70" class="front-mark"/>
-          <!-- vent lines -->
-          <g class="vents">
-            <rect x="146" y="180" width="28" height="3" rx="1.5"/>
-            <rect x="146" y="190" width="28" height="3" rx="1.5"/>
-            <rect x="146" y="200" width="28" height="3" rx="1.5"/>
-          </g>
+        <!-- Foot shadows on the floor -->
+        <g class="shadows">
+          {#each scene.legItems as it (it.leg.id)}
+            <ellipse cx={it.shadow.x} cy={it.shadow.y} rx="8" ry={8 * scene.shadowRy}/>
+          {/each}
         </g>
 
-        <!-- Legs -->
-        {#each legs as leg (leg.id)}
-          {@const sel = selectedLeg === leg.id}
-          <g
-            class="leg"
-            class:selected={sel}
-            class:dimmed={selectedLeg && !sel}
-            transform="translate({leg.x} {leg.y}) scale({leg.sx} {leg.sy})"
-            role="button"
-            tabindex="0"
-            aria-label="Select {leg.name} leg"
-            aria-pressed={sel}
-            onclick={() => selectLeg(leg.id)}
-            onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), selectLeg(leg.id))}
-          >
-            <!-- hit area -->
-            <rect x="-70" y="-14" width="86" height="88" fill="transparent" />
-
-            <!-- shoulder rotation -->
-            <g class="seg-root" style="transform: rotate({rot(leg.id, 'abd')}deg)">
-              <line x1="0" y1="0" x2="-32" y2="8" class="bone"/>
-
-              <!-- hip rotation -->
-              <g style="transform: translate(-32px, 8px) rotate({rot(leg.id, 'hip')}deg)">
-                <line x1="0" y1="0" x2="-12" y2="34" class="bone"/>
-
-                <!-- knee rotation -->
-                <g style="transform: translate(-12px, 34px) rotate({rot(leg.id, 'knee')}deg)">
-                  <line x1="0" y1="0" x2="12" y2="20" class="bone thin"/>
-                  <circle cx="12" cy="20" r="5.5" class="foot"/>
-                  <!-- knee joint -->
-                  <circle cx="0" cy="0" r="7.5" class="joint" class:active={isActive(leg.id, 'knee')}/>
-                  {#if isActive(leg.id, "knee")}
-                    <circle cx="0" cy="0" r="7.5" class="ring"/>
-                    <path d={activeJoint.dir > 0 ? "M -9 -15 A 17.5 17.5 0 0 1 15 -9" : "M 15 -9 A 17.5 17.5 0 0 0 -9 -15"} class="dir-arrow" marker-end="url(#cal-arrow)"/>
-                  {/if}
+        <!-- Painter's order: far → near -->
+        {#each scene.order as item}
+          {#if item.kind === "body"}
+            <g class="body">
+              {#each scene.faces as face (face.id)}
+                <polygon points={face.points} class="face {face.id}" style="--light: {face.light.toFixed(2)}"/>
+              {/each}
+              {#if scene.screen}
+                <polygon points={scene.screen} class="screen"/>
+                <g class="eyes">
+                  {#each scene.eyes as e}<polygon points={e}/>{/each}
                 </g>
-
-                <!-- hip joint -->
-                <circle cx="0" cy="0" r="8" class="joint" class:active={isActive(leg.id, 'hip')}/>
-                {#if isActive(leg.id, "hip")}
-                  <circle cx="0" cy="0" r="8" class="ring"/>
-                  <path d={activeJoint.dir > 0 ? "M -9 -15 A 17.5 17.5 0 0 1 15 -9" : "M 15 -9 A 17.5 17.5 0 0 0 -9 -15"} class="dir-arrow" marker-end="url(#cal-arrow)"/>
-                {/if}
-              </g>
-
-              <!-- abduction joint -->
-              <circle cx="0" cy="0" r="9" class="joint abd" class:active={isActive(leg.id, 'abd')}/>
-              {#if isActive(leg.id, "abd")}
-                <circle cx="0" cy="0" r="9" class="ring"/>
-                <path d={activeJoint.dir > 0 ? "M -10 -17 A 19.5 19.5 0 0 1 17 -10" : "M 17 -10 A 19.5 19.5 0 0 0 -10 -17"} class="dir-arrow" marker-end="url(#cal-arrow)"/>
               {/if}
             </g>
-          </g>
+          {:else}
+            {@const leg = item.leg}
+            {@const sel = selectedLeg === leg.id}
+            <g
+              class="leg"
+              class:selected={sel}
+              class:dimmed={selectedLeg && !sel}
+              class:behind={item.depth < 0}
+              role="button"
+              tabindex="0"
+              aria-label="Select {leg.name} leg"
+              aria-pressed={sel}
+              onclick={() => selectLeg(leg.id)}
+              onkeydown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), selectLeg(leg.id))}
+            >
+              <!-- hit area along the whole limb -->
+              <polyline points={pts([item.H, item.T, item.K, item.F])} class="hit"/>
 
-          <!-- label (un-mirrored) -->
-          <g class="leg-label" class:selected={sel} class:dimmed={selectedLeg && !sel} transform="translate({leg.lx} {leg.ly})" pointer-events="none">
-            <rect x="-18" y="-12" width="36" height="24" rx="12"/>
-            <text x="0" y="4.5" text-anchor="middle">{leg.label}</text>
+              <!-- abduction bracket: hip axis → thigh pivot -->
+              <line x1={item.H.x} y1={item.H.y} x2={item.T.x} y2={item.T.y} class="bracket"/>
+              <!-- thigh -->
+              <line x1={item.T.x} y1={item.T.y} x2={item.K.x} y2={item.K.y} class="bone"/>
+              <!-- shin -->
+              <line x1={item.K.x} y1={item.K.y} x2={item.F.x} y2={item.F.y} class="bone thin"/>
+              <circle cx={item.F.x} cy={item.F.y} r="5.5" class="foot"/>
+
+              <circle cx={item.K.x} cy={item.K.y} r="7" class="joint" class:active={isActive(leg.id, "knee")}/>
+              <circle cx={item.T.x} cy={item.T.y} r="8" class="joint" class:active={isActive(leg.id, "hip")}/>
+              <circle cx={item.H.x} cy={item.H.y} r="9" class="joint abd" class:active={isActive(leg.id, "abd")}/>
+            </g>
+          {/if}
+        {/each}
+
+        <!-- Overlay: never occluded -->
+        {#if scene.arrow}
+          <circle cx={scene.arrow.pivot.x} cy={scene.arrow.pivot.y} r="8" class="ring"/>
+          {#if scene.arrow.x1 !== undefined}
+            <line x1={scene.arrow.x1} y1={scene.arrow.y1} x2={scene.arrow.x2} y2={scene.arrow.y2} class="dir-arrow" marker-end="url(#cal-arrow)"/>
+          {/if}
+        {/if}
+
+        {#each scene.legItems as it (it.leg.id)}
+          {@const sel = selectedLeg === it.leg.id}
+          <g class="leg-label" class:selected={sel} class:dimmed={selectedLeg && !sel}
+             transform="translate({it.H.x.toFixed(1)} {(it.H.y - 24).toFixed(1)})" pointer-events="none">
+            <rect x="-16" y="-10" width="32" height="20" rx="10"/>
+            <text x="0" y="4" text-anchor="middle">{it.leg.label}</text>
           </g>
         {/each}
       </svg>
@@ -322,9 +446,9 @@
         {#if loading}
           Reading current offsets from Pupper…
         {:else if selectedLegMeta}
-          Adjusting <b>{selectedLegMeta.name}</b>. Move a slider — the joint lights up and rotates the way the servo moves.
+          Adjusting <b>{selectedLegMeta.name}</b>. Move a slider — the joint lights up and the leg moves the way the servo will.
         {:else}
-          Tap a leg to start. Offsets are saved to Pupper as you go.
+          Tap a leg to start, drag to turn the robot. Offsets are saved to Pupper as you go.
         {/if}
       </p>
     </section>
@@ -484,13 +608,18 @@
     padding: 6px 14px 0;
   }
   .cal-svg {
-    /* Keep the pupper a sensible size on phones: never taller than ~38% of
+    /* Keep the pupper a sensible size on phones: never taller than ~36% of
        the viewport, never wider than the column. */
-    width: min(100%, 380px, calc(38dvh * 320 / 360));
+    width: min(100%, 420px, calc(36dvh * 320 / 270));
     height: auto;
-    aspect-ratio: 320 / 360;
+    aspect-ratio: 320 / 270;
     transition: opacity var(--dur-med);
+    touch-action: none;   /* drag = orbit, not scroll */
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
   }
+  .cal-svg.orbiting { cursor: grabbing; }
   .cal-svg.loading { opacity: 0.55; }
 
   .cal-panel {
@@ -520,30 +649,43 @@
     }
   }
 
-  /* ── SVG art ───────────────────────────── */
-  .body .shell { fill: var(--mpx-ink); }
-  .body .panel { fill: var(--yellow); }
-  .body .eyes rect { fill: var(--mpx-ink); transform-box: fill-box; transform-origin: center; animation: blink 5.2s infinite; }
-  .body .eyes rect:nth-child(2) { animation-delay: 0.05s; }
+  /* ── SVG art (projected 3D sketch) ─────── */
+  .shadows ellipse { fill: rgba(0,0,0,0.08); }
+
+  /* Body faces: flat-shaded by the face/camera dot product (--light 0..1). */
+  .body .face { stroke: var(--mpx-ink); stroke-width: 1.2; stroke-linejoin: round; }
+  .body .face.top { fill: var(--yellow); filter: brightness(calc(0.82 + 0.18 * var(--light, 1))); }
+  .body .face.bottom { fill: #1a1a1a; }
+  .body .face.front, .body .face.rear, .body .face.left, .body .face.right {
+    fill: var(--mpx-ink);
+    fill-opacity: calc(0.72 + 0.28 * var(--light, 1));
+  }
+  .body .screen { fill: #111; stroke: #333; stroke-width: 0.8; }
+  .body .eyes polygon {
+    fill: var(--yellow);
+    transform-box: fill-box; transform-origin: center;
+    animation: blink 5.2s infinite;
+  }
+  .body .eyes polygon:nth-child(2) { animation-delay: 0.05s; }
   @keyframes blink { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.08); } }
-  .body .front-mark { fill: none; stroke: var(--yellow); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
-  .body .vents rect { fill: rgba(0,0,0,0.18); }
 
   .leg { cursor: pointer; outline: none; transition: opacity var(--dur-med); }
   .leg:focus-visible .joint.abd { stroke: var(--mpx-info); stroke-width: 3; }
   .leg.dimmed { opacity: 0.45; }
+  .leg.behind:not(.selected) { opacity: 0.8; }
+  .leg.behind.dimmed { opacity: 0.35; }
+  .leg .hit { fill: none; stroke: transparent; stroke-width: 28; stroke-linecap: round; stroke-linejoin: round; pointer-events: stroke; }
+  .leg .bracket { stroke: var(--mpx-muted); stroke-width: 12; stroke-linecap: round; transition: stroke var(--dur-med); }
   .leg .bone { stroke: var(--mpx-muted-2); stroke-width: 10; stroke-linecap: round; transition: stroke var(--dur-med); }
-  .leg .bone.thin { stroke-width: 8; }
+  .leg .bone.thin { stroke-width: 7; }
   .leg .joint { fill: var(--mpx-muted); stroke: #fff; stroke-width: 2.5; transition: fill var(--dur-med); }
   .leg .foot { fill: var(--mpx-muted); transition: fill var(--dur-med); }
   .leg:hover .bone { stroke: #a9a9a9; }
+  .leg.selected .bracket { stroke: var(--mpx-ink-soft); }
   .leg.selected .bone { stroke: var(--mpx-ink); }
   .leg.selected .joint { fill: var(--yellow); stroke: var(--mpx-ink); }
   .leg.selected .foot { fill: var(--mpx-ink); }
   .leg .joint.active { fill: var(--mpx-ink); stroke: var(--yellow); }
-
-  /* segments rotate around their own pivot */
-  .seg-root, .seg-root g { transform-box: view-box; transition: transform 220ms var(--ease-spring); }
 
   .ring {
     fill: none; stroke: var(--yellow); stroke-width: 3;
@@ -694,6 +836,6 @@
   .danger-btn:disabled { color: var(--mpx-muted-2); cursor: default; }
 
   @media (prefers-reduced-motion: reduce) {
-    .body .eyes rect, .ring { animation: none; }
+    .body .eyes polygon, .ring { animation: none; }
   }
 </style>
