@@ -1,6 +1,7 @@
 #include "network/http_server.h"
 #include "network/chat_ws.h"
 #include "network/http_display.h"
+#include "network/http_voice.h"
 #include "network/marketplace_proxy.h"
 #include "network/wifi_ap.h"
 #include "network/wifi_sta.h"
@@ -411,6 +412,41 @@ static void resolve_skill_name(const std::string &given, std::string &path,
     if (!fs::file_exists(path.c_str()) && fs::file_exists((path + ".wasm").c_str())) {
         path += ".wasm";
     }
+}
+
+/* The public face of the three helpers above (http_server.h), for the voice
+ * tools. Same rules as the HTTP handlers; only the error reporting differs
+ * (a reason string rather than a status line). */
+const char *skill_start(const std::string &given, const std::string &params,
+                        std::string *resolved)
+{
+    if (given.empty()) return "no such skill";
+    std::string path, name;
+    resolve_skill_name(given, path, name);
+    if (!fs::file_exists(path.c_str())) return "no such skill";
+    const char *fail = start_skill_async(path, name, params);
+    if (fail) return fail[0] == '4' ? "a skill is already running" : "failed to start skill task";
+    if (resolved) *resolved = name;
+    return nullptr;
+}
+
+const char *skill_start_for_movement(const char *movement, std::string *resolved)
+{
+    const skills::Entry *e = movement ? skills::by_gait(movement) : nullptr;
+    if (!e) return "no such movement";
+    const char *fail = start_skill_async(e->file, e->slug, "");
+    if (fail) return fail[0] == '4' ? "a skill is already running" : "failed to start skill task";
+    if (resolved) *resolved = e->slug;
+    return nullptr;
+}
+
+bool skill_running() { return s_skill_running; }
+
+const char *skill_running_name() { return s_skill_running ? s_skill_name : ""; }
+
+void skill_stop()
+{
+    if (s_skill_running) wasm::request_stop();
 }
 
 /* POST /v1/skills/run — execute a .wasm skill via WAMR (async) */
@@ -2390,12 +2426,13 @@ bool start_http_server()
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    // 50 register_api() + up to 12 register_static() + 2 websockets + 4
-    // marketplace wildcard methods = 68.
+    // 51 register_api() + up to 12 register_static() + 2 websockets + 4
+    // marketplace wildcard methods + 5 display routes (http_display.cc) + 6
+    // voice routes (http_voice.cc) = 80.
     // See the note on register_uri() - this number is load-bearing, and being
     // one short deletes a route without saying so. Each slot is a pointer, so
     // the headroom is cheap.
-    config.max_uri_handlers = 80;
+    config.max_uri_handlers = 96;
     // LWIP has CONFIG_LWIP_MAX_SOCKETS (16) total.  HTTPD also reserves 3
     // internal sockets on top of max_open_sockets.  At 5, HTTPD uses at most
     // 5+3=8, GUARANTEEING ~8 sockets stay free for OUTBOUND use (upstream cloud
@@ -2544,6 +2581,9 @@ bool start_http_server()
 
     // ── The screen (ported from mpv2-claw): 5 routes, in http_display.cc ──
     network::register_display_routes(s_server, register_uri);
+
+    // ── AI & Voice (ported from mpv2-claw): up to 6 routes, in http_voice.cc ──
+    network::register_voice_routes(s_server, register_uri);
 
     // ── Register Lua async enqueue endpoint (non-blocking) ──
     register_api(s_server, "POST", "/v1/lua/enqueue",          HTTP_POST, api_lua_enqueue);

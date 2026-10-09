@@ -41,11 +41,32 @@ set(sources
     "display/display_assets.cc"
     "display/display_glue.cc"
     "network/http_display.cc"
+    # Voice: the AI & Voice setting (/v1/ai) and the voice routes exist in
+    # every build; what they can do depends on CONFIG_APP_VOICE_ENABLE.
+    "network/http_voice.cc"
+    "voice/voice_glue.cc"
     "platform/shared_i2c.cc"
     "util/trace_ring.cc"
     "lua/lua_vm.cc"
     "lua/lua_bindings.cc"
 )
+
+# The voice stack itself (mpv2-claw's mpx_voice_link, mpx_voice_wake and
+# cap_music, plus the native MCP bridge) only when it is on: these files
+# include esp-sr, Opus and the audio player, and a board with voice off has
+# no reason to compile them. Kconfig values are available here (unlike in a
+# REQUIRES list, which is expanded before them), so gating SRCS is safe.
+if(CONFIG_APP_VOICE_ENABLE)
+    list(APPEND sources
+        "voice/mpx_voice_codec.cc"
+        "voice/mpx_voice_ws.c"
+        "voice/mpx_voice_ota.c"
+        "voice/mpx_voice_stream.c"
+        "voice/mpx_voice_wake.c"
+        "voice/cap_music.c"
+        "voice/voice_tools.cc"
+    )
+endif()
 
 # ── Design-specific assets ───────────────────────────────────
 if(CONFIG_PWA_DESIGN_CLAW)
@@ -108,7 +129,7 @@ endif()
 # ── Register component ───────────────────────────────────────
 idf_component_register(
     SRCS        ${sources}
-    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "pi" "audio" "display"
+    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "pi" "audio" "display" "voice"
     EMBED_FILES
         ${common_assets}
         ${design_assets}
@@ -125,6 +146,20 @@ idf_component_register(
         esp_lvgl_port
         lvgl
         esp_new_jpeg
+        # Voice (main/voice): esp-sr for the wake word, the xiaozhi author's
+        # Opus wrappers (esp-opus-encoder keeps esp-opus private, so opus.h
+        # has to be asked for by name), the websocket client, the audio
+        # player for music and the TLS/HTTP/NVS/app-desc pieces around them.
+        esp-sr
+        esp-opus-encoder
+        esp-opus
+        esp_websocket_client
+        esp_audio_simple_player
+        gmf_core
+        gmf_io
+        esp_http_client
+        esp-tls
+        app_update
         driver
         esp_driver_spi
         esp_driver_i2c

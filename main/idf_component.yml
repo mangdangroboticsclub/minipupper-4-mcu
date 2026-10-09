@@ -28,6 +28,26 @@ dependencies:
   espressif/esp_lvgl_port: ^2.6.0
   espressif/esp_new_jpeg: ^1.0.2
 
+  ## ── Voice (local-claw): wake word, the voice gateway, music ──
+  ## Pulled in unconditionally, not gated on CONFIG_APP_VOICE_ENABLE: the
+  ## component manager evaluates `rules:` from build/config/sdkconfig.json,
+  ## which does not exist on the first configure pass, and mpv2-claw spent
+  ## a note the length of this file on the two-pass dance that follows. A
+  ## voice-off build compiles these and links none of them (main's sources
+  ## are what is gated, in CMakeLists.txt).
+  ##
+  ## esp-sr: AFE (AEC + VAD) and WakeNet ("Hi ESP"). Its models are packed
+  ## into srmodels.bin and flashed to the `model` partition (CONFIG_MODEL_IN_FLASH).
+  espressif/esp-sr: ^2.5.2
+  ## The xiaozhi author's Opus wrappers: libopus plus OpusEncoderWrapper /
+  ## OpusDecoderWrapper. The far end is a xiaozhi-protocol server that
+  ## expects exactly this framing. ~2.4.0 as mpv2-claw pins it.
+  78/esp-opus-encoder: "~2.4.0"
+  espressif/esp_websocket_client: ^1.4.0
+  ## Internet radio for cap_music: HTTP(S) in, MP3/AAC/M4A/FLAC/WAV decoded,
+  ## resampled to 16 kHz mono by its own converters (sdkconfig.defaults).
+  espressif/esp_audio_simple_player: ^0.9.6
+
   ## ── IMU: BMI270 + BMM150 ─────────────────────────────────
   ##
   ## The BMI270 will not produce a sample until an 8 KB Bosch configuration

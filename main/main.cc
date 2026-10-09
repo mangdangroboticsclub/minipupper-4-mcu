@@ -16,6 +16,7 @@
 #include "robot/mpx_robot.h"
 #include "robot/robot.h"
 #include "sdk/wasm_host_functions.h"
+#include "voice/voice_glue.h"
 #include "wasm/registry.h"
 #include "wasm/wasm_sandbox.h"
 
@@ -34,12 +35,14 @@ static const mpx_robot_skill_hooks_t s_skill_hooks = {
 
 /* The Raspberry Pi took (true) or released (false) the robot. Runs on the
  * Pi link task: nothing here may block. The screen's "ROS" badge goes
- * through display_glue's queue. */
+ * through display_glue's queue; voice and music off (and hands-free back
+ * when the Pi lets go) through voice_glue's. */
 static void on_master_changed(bool active)
 {
 	ESP_LOGW(TAG, "Raspberry Pi %s control of the robot",
 	         active ? "took" : "released");
 	display_glue::on_master_changed(active);
+	voice_glue::on_master_changed(active);
 }
 
 static void init_nvs()
@@ -142,4 +145,11 @@ extern "C" void app_main(void)
 	} else {
 		ESP_LOGI(TAG, "Lua VM ready — robot bindings registered");
 	}
+
+	// ── Voice: wake word, the MangDang voice gateway, music ───
+	// Last, as in mpv2-claw: esp-sr's front end is the biggest consumer of
+	// internal RAM to come up, and the voice tools start skills through the
+	// HTTP server's helpers and the sandbox, which both exist by now. Nothing
+	// touches the network until the first wake word.
+	voice_glue::start();
 }

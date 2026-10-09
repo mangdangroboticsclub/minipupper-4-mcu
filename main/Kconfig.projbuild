@@ -364,4 +364,57 @@ config APP_DISPLAY_BUFFER_LINES
 
 endif  # APP_DISPLAY_ENABLE
 
+# ── Voice: wake word, the MangDang voice gateway, music ─────────────
+# mpv2-claw's mpx_voice_link, mpx_voice_wake and cap_music (main/voice/),
+# ported, with a native MCP bridge (voice_tools.cc) in place of mpx_mcp_ws.
+
+config APP_VOICE_ENABLE
+    bool "Voice: wake word, MangDang voice gateway, music"
+    default y
+    depends on APP_AUDIO_ENABLE
+    help
+        Say "Hi ESP" and talk to the robot: esp-sr's wake word on the
+        microphones, speech to and from the MangDang voice gateway over a
+        WebSocket (Opus), the robot's tools offered to the server's model
+        (robot_move, display_show_emotion, music_play, ...), and internet
+        radio on the speaker. The owner can still turn voice off at run
+        time (Settings > AI & Voice, POST /v1/ai {"mode":"off"}).
+
+        Off: none of it is compiled, esp-sr's models are still built but
+        unused, /v1/ai offers only "off" and /v1/voice does not exist.
+
+        The first `idf.py flash` after turning this on must be a full
+        flash: the wake-word models live in the `model` partition.
+
+if APP_VOICE_ENABLE
+
+config APP_VOICE_OTA_URL
+    string "Voice gateway provisioning URL"
+    default "http://35.220.215.160:8000/xiaozhi/ota/"
+    help
+        The MangDang voice gateway's OTA endpoint. The robot POSTs its
+        identity here on the first wake word and gets back the WebSocket
+        URL and token to talk to (saved in NVS). The same host serves the
+        marketplace proxy and the chat ingress (APP_CHAT_SERVER_IP).
+
+config APP_VOICE_AUTO_LISTEN
+    bool "Listen for the wake word from boot (hands-free)"
+    default y
+    help
+        Start the hands-free loop at boot: listen for "Hi ESP", beep,
+        stream what is said, play the reply, keep listening for a
+        follow-up until the server ends the session. Off: nothing listens
+        until POST /v1/voice {"hands_free":true}.
+
+config APP_VOICE_AUTO_MAX_SECONDS
+    int "Longest a turn listens with nothing heard (seconds)"
+    range 3 60
+    default 12
+    help
+        After the wake word the microphone streams until the server's VAD
+        hears the end of what was said, or this long with nothing usable,
+        whichever comes first.
+
+endif  # APP_VOICE_ENABLE
+
 endmenu

@@ -41,7 +41,7 @@
  * is never touched again, the app still updates correctly.
  */
 
-const CACHE_VERSION = "v10-claw";  // v9: mpv2-claw app ported to mpx-dog; v10: Display page screen settings
+const CACHE_VERSION = "v11-claw";  // v9: mpv2-claw app ported to mpx-dog; v10: Display page screen settings; v11: AI modes list + voice card
 const CACHE = `mpx-dog-${CACHE_VERSION}`;
 
 /**

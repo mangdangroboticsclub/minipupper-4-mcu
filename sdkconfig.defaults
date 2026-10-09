@@ -65,3 +65,30 @@ CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_LV_BUILD_DEMOS=n
+
+# local-claw: voice (main/voice). esp-sr's models: WakeNet 9 "Hi ESP", the
+# medium VADNet, WebRTC noise suppression (no model), no command recogniser;
+# packed into srmodels.bin and flashed to the `model` partition. Same set as
+# mpv2-claw's build; the AFE input layout they were measured with is in
+# mpx_voice_wake.c (WAKE_FORMAT_4CH).
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_AFE_INTERFACE_V1=y
+CONFIG_SR_WN_WN9_HIESP=y
+CONFIG_SR_VADN_VADNET1_MEDIUM=y
+CONFIG_SR_NSN_WEBRTC=y
+CONFIG_SR_MN_CN_NONE=y
+CONFIG_SR_MN_EN_NONE=y
+
+# local-claw: music (voice/cap_music.c). The player's own converters turn
+# whatever the station sends into 16 kHz mono 16-bit, the voice rate -- the
+# microphone shares the I2S clock and the wake word listens at 16 kHz, so
+# the speaker cannot run at anything else. cap_music.c refuses to compile
+# with a different RESAMPLE_DEST_RATE.
+CONFIG_ESP_AUDIO_SIMPLE_PLAYER_HTTP_EN=y
+CONFIG_ESP_AUDIO_SIMPLE_PLAYER_FILE_EN=y
+CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN=y
+CONFIG_AUDIO_SIMPLE_PLAYER_RESAMPLE_DEST_RATE=16000
+CONFIG_ESP_AUDIO_SIMPLE_PLAYER_CH_CVT_EN=y
+CONFIG_AUDIO_SIMPLE_PLAYER_CH_CVT_DEST=1
+CONFIG_ESP_AUDIO_SIMPLE_PLAYER_BIT_CVT_EN=y
+CONFIG_AUDIO_SIMPLE_PLAYER_BIT_CVT_DEST_16BIT=y
