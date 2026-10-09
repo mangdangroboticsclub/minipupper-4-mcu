@@ -148,6 +148,16 @@ void driver_board_power(bool on);
  */
 void driver_board_sync_write(const uint16_t pos[12], const uint16_t cur_mA[12]);
 
+/* Every servo to IDLE -- motor off, the joint goes limp -- in one pass, with
+ * feedback read on the way (so present positions are fresh). The next
+ * driver_board_sync_write() puts them back in position control. Returns how
+ * many of the four boards answered. */
+int driver_board_sync_idle(void);
+
+/* Did this servo's board answer the LAST driver_board_sync_idle()? Its
+ * present position is only worth anything if it did. ch = 1..12. */
+bool driver_board_present_fresh(int ch);
+
 /* ---- SCS full scale, AT32 deci-degrees (default 3100 = 310.0 deg) -------
  * Keep equal to the boards' own range_position_deg x 10. The boards keep
  * that in their flash, so it outlives any ESP reflash and is NOT safe to
@@ -209,8 +219,16 @@ enum {
     DB_PARAM_KP_CURRENT,            /* 7 */
     DB_PARAM_KFF_CURRENT,           /* 8 */
     DB_PARAM_MAX_PWM_DUTY_CYCLE,    /* 9 */
+    DB_PARAM_KI_POSITION,           /* 10  AT32 fw >= 0.0.7: position integral gain (0 = off)   */
+    DB_PARAM_CONTROL_MODE,          /* 11  AT32 fw >= 0.0.8: DB_CONTROL_MODE_CURRENT / _PWM      */
+    DB_PARAM_PWM_SCALE,             /* 12  AT32 fw >= 0.0.9: PWM mode duty per PID output        */
     DB_PARAM_COUNT
 };
+
+/* Values of DB_PARAM_CONTROL_MODE (from minipupperesp): which algorithm runs
+ * inside the AT32 - switched at run time, no reflash. */
+#define DB_CONTROL_MODE_CURRENT  0   /* position PD -> current loop -> PWM (AT32 fw 0.0.6 loop) */
+#define DB_CONTROL_MODE_PWM      1   /* position PID -> PWM directly                          */
 
 /* Parameter name for id, or NULL if out of range. */
 const char *driver_board_param_name(int param_id);

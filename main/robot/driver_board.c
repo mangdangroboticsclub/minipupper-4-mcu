@@ -147,10 +147,13 @@ static inline bool fb_frame_valid(const SMS_host_t *rx)
 
 /* Pull position / current / temperature out of one feedback frame into the
  * caches. b = index of the board's first physical channel (0,3,6,9). */
+static bool fb_fresh[12];   /* set by fb_store; driver_board_sync_idle clears it first */
+
 static void fb_store(int b, const SMS_host_t *rx)
 {
     const servo_fb_sub_t *fb[3] = { &rx->s1, &rx->s2, &rx->s3 };
     for (int j = 0; j < 3; j++) {
+        fb_fresh[b + j] = true;
         fb_position[b + j] = (uint16_t)((float)fb[j]->position * 1024.0f / db_scale_dd);
         fb_current[b + j]  = fb[j]->torque;          /* present motor current, mA */
         fb_temp_dc[b + j]  = (int16_t)fb[j]->res1;   /* NTC temperature, 0.1 degC */
@@ -276,7 +279,7 @@ bool driver_board_init(void)
     }
 
     driver_board_power(true);
-    ESP_LOGI(TAG, "driver board SPI init OK (4 boards, 12 servos, variant %d)",
+    ESP_LOGD(TAG, "driver board SPI init OK (4 boards, 12 servos, variant %d)",
              SERVO_BOARD);
     return true;
 }
@@ -304,7 +307,7 @@ float driver_board_probe_scale(void)
                      PROBE[i], deg, db_scale_dd / 10.0f,
                      100.0f * (dd - db_scale_dd) / db_scale_dd);
         } else {
-            ESP_LOGI(TAG, "servo %d confirms range_position_deg = %.1f", PROBE[i], deg);
+            ESP_LOGD(TAG, "servo %d confirms range_position_deg = %.1f", PROBE[i], deg);
         }
         driver_board_set_scale_dd(dd);
         db_probe_answered = true;
@@ -354,6 +357,45 @@ void driver_board_sync_write(const uint16_t pos[12], const uint16_t cur_mA[12])
     DB_UNLOCK();
 }
 
+/* Every servo to IDLE (motor off, limp) in one pass, reading feedback on the
+ * way. Position rides along unchanged; the current cap is 0. Returns how many
+ * boards answered with a valid frame (0..4). */
+int driver_board_sync_idle(void)
+{
+    host_SMS_t frame;
+    SMS_host_t rx;
+    int answered = 0;
+
+    DB_LOCK();
+    for (int i = 0; i < 12; i++) {
+        fb_fresh[i] = false;
+    }
+    for (int i = 0; i < 4; i++) {
+        const int b = i * 3;
+        frame.start = START_FIELD;
+        frame.mode  = MODE_FIELD;
+        servo_cmd_sub_t *sub[3] = { &frame.s1, &frame.s2, &frame.s3 };
+        for (int j = 0; j < 3; j++) {
+            const int idx = b + j;
+            sub[j]->mode     = DB_MODE_IDLE;
+            sub[j]->position = sh_posdd[idx];
+            sub[j]->torque   = 0;
+            sub[j]->kp = 0;
+            sub[j]->kd = 0;
+            sh_mode[idx] = DB_MODE_IDLE;
+            sh_cur[idx]  = 0;
+        }
+        frame.check_sum = 0;
+        if (spi_xfer((uint8_t)i, sizeof(host_SMS_t), (uint8_t *)&frame, (uint8_t *)&rx) == ESP_OK
+            && fb_frame_valid(&rx)) {
+            fb_store(b, &rx);
+            answered++;
+        }
+    }
+    DB_UNLOCK();
+    return answered;
+}
+
 /* ---- AT32 sms_config parameter access (config frames, start 0xC0DE) ---- */
 /* START_CONFIG is defined near the top, next to the other wire constants */
 #define CFG_OP_NOP      0
@@ -376,6 +418,7 @@ static const char *param_names[DB_PARAM_COUNT] = {
     "reverse_position_sensor", "min_position_adc", "max_position_adc",
     "range_position_deg", "reverse_motor", "kp_position", "kd_position",
     "kp_current", "kff_current", "max_pwm_duty_cycle",
+    "ki_position", "control_mode", "pwm_scale",
 };
 
 const char *driver_board_param_name(int param_id)
@@ -748,6 +791,12 @@ int16_t driver_board_present_current(int ch)
 {
     if (ch < 1 || ch > 12) return 0;
     return fb_current[db_phys(ch) - 1];
+}
+
+bool driver_board_present_fresh(int ch)
+{
+    if (ch < 1 || ch > 12) return false;
+    return fb_fresh[db_phys(ch) - 1];
 }
 
 uint16_t driver_board_present_position(int ch)

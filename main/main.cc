@@ -10,10 +10,23 @@
 #include "network/wifi_ap.h"
 #include "network/wifi_sta.h"
 #include "network/www_assets.h"
+#include "robot/mpx_robot.h"
 #include "robot/robot.h"
+#include "sdk/wasm_host_functions.h"
 #include "wasm/wasm_sandbox.h"
 
 static const char *TAG = "main";
+
+/* ── The robot's view of the WASM skill runtime ───────────────
+ * robot.cc (mpv2's) does not include the sandbox; it asks these three
+ * questions through mpx_robot_set_skill_hooks() so the gait loop knows when
+ * a skill owns the servos and so the Pi link can stop one when it takes
+ * control. The struct must outlive the registration: it is static. */
+static const mpx_robot_skill_hooks_t s_skill_hooks = {
+	.skill_is_running = [] { return wasm::is_running(); },
+	.skill_owns_pose  = [] { return sdk::control_owner_is_pose(); },
+	.request_stop     = [] { wasm::request_stop(); },
+};
 
 static void init_nvs()
 {
@@ -30,6 +43,7 @@ extern "C" void app_main(void)
 	init_nvs();
 
 	// ── Robot HAL (servo bus, gait task on Core 1) ─────────────
+	mpx_robot_set_skill_hooks(&s_skill_hooks);
 	if (!robot::init()) {
 		ESP_LOGE(TAG, "Robot HAL init failed — continuing without servo control");
 	}

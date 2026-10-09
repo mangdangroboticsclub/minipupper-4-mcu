@@ -2,9 +2,11 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "driver/gpio.h"
+#include "esp_cpu.h"   /* cycle counter - boot timing */
 #include "esp_log.h"
 #include "esp_rom_sys.h"   /* esp_rom_delay_us - sub-tick wait in flush() */
 #include "esp_timer.h"
@@ -17,21 +19,135 @@ extern "C" {
 #include "robot/driver_board.h"
 }
 
+#include "robot/alive.h"
 #include "robot/board_config.h"
+#include "robot/mpe_tables.h"      // minipupperesp jump + Character tables
 #include "robot/stanford_gait.h"
 #include "robot/stanford_kinematics.h"
-#include "wasm/wasm_sandbox.h"
+#include "mpx_robot.h"
 
 static const char *TAG = "robot";
 
-// Does a running skill currently own the twelve goal positions? Defined in
-// wasm_host_functions.cc, inside the GLOBAL namespace sdk.
+/* Boot timing of the servo bring-up, for checking on the bench.
+ *
+ * Two clocks are read together at the SPI start (on core 0, where app_main
+ * runs):
+ *   - the CPU cycle counter, which is the clock the log column shows: time
+ *     since the chip came out of reset (ESP-IDF rescales it whenever the CPU
+ *     speed changes). Read directly it gives 1/240 us instead of whole ms.
+ *   - esp_timer, the 16 MHz system timer, which times every later step to
+ *     the microsecond on either core.
+ * Each step is printed as ms since reset with two decimals, plus ms since the
+ * SPI start. Recording is silent; the table is printed only after the first
+ * position command has gone out, since an INFO line costs ~5-6 ms at
+ * 115200 baud and blocks the caller. */
+static struct {
+    double   reset_ms;                // ms since reset at the SPI start (cycle counter)
+    uint32_t log_ms;                  // the log column's value at the same moment
+    int64_t  t0;                      // esp_timer at the SPI start (us)
+    int64_t  spi_up, boards_at, range_at, check_at, task_at;
+    volatile int64_t first_cmd_at;    // set by the gait task on core 1
+    int boards, alive, joints;
+    float far_deg;
+} s_bt;
+
+static inline int64_t bt_now() { return esp_timer_get_time(); }
+
+static void boot_timing_start(void)
+{
+    const uint32_t cycles = esp_cpu_get_cycle_count();
+    s_bt.t0 = bt_now();
+    s_bt.log_ms = esp_log_timestamp();
+    // Each core has its own counter; core 0's is the one the log uses.
+    s_bt.reset_ms = esp_cpu_get_core_id() == 0
+                  ? cycles / (double)esp_rom_get_cpu_ticks_per_us() / 1000.0
+                  : (double)s_bt.log_ms;
+}
+
+static void boot_timing_print(void)
+{
+    // The first command goes out within a few ms of the gait task starting;
+    // wait briefly for it so the table is complete (the legs are moving by
+    // then, so this wait costs nothing that matters).
+    for (int i = 0; i < 40 && !s_bt.first_cmd_at; ++i) vTaskDelay(pdMS_TO_TICKS(5));
+
+    ESP_LOGI(TAG, "servo boot timing -- ms since the ESP32 came out of reset (same clock as the log column, to 0.01 ms):");
+    auto row = [](int64_t t, const char *what) {
+        if (!t) { ESP_LOGI(TAG, "      --    %-34s (did not happen)", what); return; }
+        const double since = (t - s_bt.t0) / 1000.0;
+        ESP_LOGI(TAG, "  %8.2f  %-34s +%.2f", s_bt.reset_ms + since, what, since);
+    };
+    char boards[40], checked[40];
+    snprintf(boards, sizeof boards, "%d/4 driver boards answering", s_bt.boards);
+    snprintf(checked, sizeof checked, "%d/12 servos checked", s_bt.alive);
+    row(s_bt.t0,           "SPI to driver boards starts");
+    row(s_bt.spi_up,       "SPI bus ready");
+    row(s_bt.boards_at,    boards);
+    row(s_bt.range_at,     "servo angle range read");
+    row(s_bt.check_at,     checked);
+    row(s_bt.task_at,      "gait task started");
+    row(s_bt.first_cmd_at, "FIRST POSITION COMMAND sent");
+    ESP_LOGI(TAG, "  (%d/12 joints read before moving, furthest %.0f deg from start pose; "
+                  "log column read %u ms at the SPI start)",
+             s_bt.joints, s_bt.far_deg, (unsigned)s_bt.log_ms);
+}
+
+// -- What is playing, for the face -----------------------------------------
 //
-// Declared out here on purpose: written inside `namespace robot`, this would
-// have declared robot::sdk::control_owner_is_pose() - a different function
-// that nothing defines, and the link fails with a message that points at the
-// call site rather than at the declaration.
-namespace sdk { bool control_owner_is_pose(); }
+// The display polls this ~30 times a second (cap_display_motion_t.move) to
+// run each move's face track. Plain word stores: the name pointer is into a
+// constant table and the counter only ever moves on.
+static const char *volatile s_play_name;
+static volatile uint32_t    s_play_seq;
+
+static void play_mark(const char *name)
+{
+    s_play_name = name;
+    s_play_seq = s_play_seq + 1;
+}
+
+namespace robot {
+const char *playing_move(uint32_t *seq)
+{
+    if (seq) *seq = s_play_seq;
+    return s_play_name;
+}
+}  // namespace robot
+
+// -- The seam to the WASM skill runtime (mpv2-claw) ------------------------
+//
+// In mpv2 this file called the WASM runtime directly. In the ESP-Claw build
+// the skill runtime is its own component (mpx_wasm) that depends on this one,
+// so it registers these predicates through mpx_robot_set_skill_hooks()
+// instead. With no runtime linked the hooks stay null and every question
+// answers "no".
+namespace {
+const mpx_robot_skill_hooks_t *s_skill_hooks = nullptr;
+
+inline bool skill_is_running()
+{
+    return s_skill_hooks && s_skill_hooks->skill_is_running &&
+           s_skill_hooks->skill_is_running();
+}
+
+inline bool skill_owns_pose()
+{
+    return s_skill_hooks && s_skill_hooks->skill_owns_pose &&
+           s_skill_hooks->skill_owns_pose();
+}
+
+inline void skill_request_stop()
+{
+    if (s_skill_hooks && s_skill_hooks->request_stop) {
+        s_skill_hooks->request_stop();
+    }
+}
+}  // namespace
+
+extern "C" void mpx_robot_set_skill_hooks(const mpx_robot_skill_hooks_t *hooks)
+{
+    s_skill_hooks = hooks;
+}
 
 /* Ticks per degree, from the boards' OWN range - not a constant.
  *
@@ -192,6 +308,18 @@ const GaitName GAIT_NAMES[] = {
     { "wiggleR",      GaitCmd::WiggleRight },
     { "buttshrugL",   GaitCmd::ButtShrugLeft },
     { "buttshrugR",   GaitCmd::ButtShrugRight },
+    // minipupperesp moves (robot/moves_mpe.inc)
+    { "mate",         GaitCmd::Mate },
+    { "longjump",     GaitCmd::LongJump },
+    { "farjump",      GaitCmd::FarJump },
+    { "charshow",     GaitCmd::CharShow },
+    { "alive",        GaitCmd::Alive },
+    { "hiptest",      GaitCmd::HipTest },
+    // "backflip" = the "Backflip stable" preset (BF_PRESETS[1] in
+    // moves_mpe.inc): minipupperesp calls it the more repeatable one. The
+    // other presets and every trajopt table are found by their own names -
+    // see gait_from_name().
+    { "backflip",     static_cast<GaitCmd>(GAIT_BF_BASE + 1) },
 };
 constexpr int GAIT_NAME_COUNT = sizeof(GAIT_NAMES) / sizeof(GAIT_NAMES[0]);
 
@@ -236,6 +364,51 @@ static inline float step_toward(float cur, float target, float max_step)
 static inline uint32_t millis()
 {
     return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+}
+
+// ── External master (Raspberry Pi over UART, see pi/pi_link.cc) ──
+//
+// s_master fences every public motion entry point off from the PWA, Lua and
+// WASM skills; robot::master::* is the only way in while it is set.
+volatile bool     s_master    = false;
+uint32_t          s_master_warn_ms = 0;
+
+// Velocity from the Pi, in the robot's units but REP-103 signs:
+// mm/s forward, mm/s LEFT, rad/s counter-clockwise. Expires after
+// PI_VEL_TIMEOUT_MS so a silent host gets stepping in place, not a runaway.
+volatile float    s_pi_vx = 0.0f, s_pi_vy = 0.0f, s_pi_wz = 0.0f;
+volatile uint32_t s_pi_vel_ms = 0;
+
+// What the walk is executing this tick, REP-103 SI units (for odometry).
+volatile float    s_exec_vx = 0.0f, s_exec_vy = 0.0f, s_exec_wz = 0.0f;
+
+// Foot targets from the Pi (GaitCmd::FootTargets), per-hip sg_foot_t.
+portMUX_TYPE      s_pi_feet_mux = portMUX_INITIALIZER_UNLOCKED;
+sg_foot_t         s_pi_feet[4] = {};
+bool              s_pi_feet_valid = false;
+
+// True (and logs, at most every 2 s) when a local caller tried to move the
+// robot while the Pi owns it.
+static bool master_blocks(const char *what)
+{
+    if (!s_master) return false;
+    const uint32_t now = millis();
+    if (now - s_master_warn_ms > 2000) {
+        s_master_warn_ms = now;
+        ESP_LOGW(TAG, "%s ignored - the Raspberry Pi is in control", what);
+    }
+    return true;
+}
+
+// The gait task is the only writer allowed near the servos in slave mode.
+static inline bool in_gait_task()
+{
+    return xTaskGetCurrentTaskHandle() == s_gait_task_handle;
+}
+
+static inline float clampf(float v, float lo, float hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
 }
 
 // ── NVS persistence helpers ──────────────────────────────────
@@ -347,9 +520,17 @@ static void sg_rest(float h, sg_foot_t feet[4])
 // foot's position in the rotated body frame and returns the per-hip
 // Stanford foot targets (fed to the exact IK by sg_write()).
 //
-//   roll  > 0  ->  lean right       (ROLL_SIGN)
-//   pitch > 0  ->  nose up          (PITCH_SIGN)
-//   yaw   > 0  ->  head turns right (YAW_SIGN)
+//   roll  > 0  ->  lean right
+//   pitch > 0  ->  nose up
+//   yaw   > 0  ->  head turns right
+//
+// The rotation is minipupperesp's look_write(), which is Controller.py's
+// `euler2mat(roll, pitch, yaw) @ foot_locations` and is verified on this
+// robot ("stand BEHIND the robot, hold Look LEFT - the nose turns to YOUR
+// left"). Pitch and yaw go in unchanged; roll goes in negated, because
+// Controller.py's +roll leans the body LEFT and this firmware's API (the PWA,
+// Lua, the SDK and the Pi's REP-103 mapping) has always meant +roll = lean
+// right.
 //
 // sg_attitude_feet() is the general form: it applies the body rotation
 // on top of ARBITRARY per-hip foot targets (`base`), exactly like the
@@ -358,15 +539,16 @@ static void sg_rest(float h, sg_foot_t feet[4])
 static void sg_attitude_feet(float roll_deg, float pitch_deg, float yaw_deg,
                              const sg_foot_t base[4], sg_foot_t feet[4])
 {
-    const float r = roll_deg  * ROLL_SIGN  * PI / 180.0f;
-    const float p = pitch_deg * PITCH_SIGN * PI / 180.0f;
-    const float y = yaw_deg   * YAW_SIGN   * PI / 180.0f;
+    const float r = -roll_deg * PI / 180.0f;   // see above: +roll = lean right
+    const float p =  pitch_deg * PI / 180.0f;
+    const float y =  yaw_deg   * PI / 180.0f;
 
     const float cr = std::cos(r), sr = std::sin(r);
     const float cp = std::cos(p), sp = std::sin(p);
     const float cy = std::cos(y), sy = std::sin(y);
 
-    // Body->world rotation R = Rz(yaw) * Ry(pitch) * Rx(roll).
+    // R = Rz(yaw) * Ry(pitch) * Rx(roll) == transforms3d euler2mat, applied
+    // to the feet (minipupperesp look_write / Controller.py).
     const float R00 = cy * cp;
     const float R01 = cy * sp * sr - sy * cr;
     const float R02 = cy * sp * cr + sy * sr;
@@ -388,10 +570,10 @@ static void sg_attitude_feet(float roll_deg, float pitch_deg, float yaw_deg,
         const float py = oy[l] + base[l].y;
         const float pz = -base[l].z;
 
-        // Foot position in the rotated body frame = R^T * offset.
-        const float fx = R00 * px + R10 * py + R20 * pz;
-        const float fy = R01 * px + R11 * py + R21 * pz;
-        const float fz = R02 * px + R12 * py + R22 * pz;
+        // Rotated foot = R * offset.
+        const float fx = R00 * px + R01 * py + R02 * pz;
+        const float fy = R10 * px + R11 * py + R12 * pz;
+        const float fz = R20 * px + R21 * py + R22 * pz;
 
         feet[l].x = fx - ox[l];       // per-hip forward offset
         feet[l].y = fy - oy[l];       // per-hip lateral offset (+ left)
@@ -511,6 +693,11 @@ static void import_legacy_offsets()
 
 }  // anonymous namespace
 
+// minipupperesp moves: helpers, tables and players (see the file's header).
+#include "robot/moves_mpe.inc"
+
+static_assert(TJ_NTABLES <= GAIT_TJ_MAX, "raise GAIT_TJ_MAX in robot.h");
+
 // Forward declaration of gait task (defined at end of file)
 void gait_task();
 
@@ -530,20 +717,26 @@ bool init()
         s_nvs = 0;
     }
 
+    // ── Boot timing: noted silently, printed once the legs move ──
+    // Every INFO line costs ~5-6 ms at 115200 baud and the caller waits for
+    // it, so each step only records a timestamp here; boot_timing_print()
+    // shows the table after the first position command has gone out.
+    boot_timing_start();
+
     // ── Servo rail ──────────────────────────────────────────────
     // CN3..CN6 are wired straight to Vbat+, so SERVO_POWER_PIN is GPIO_NUM_NC
-    // and there is nothing to raise. The delay is kept either way: on a cold
-    // boot the AT32 driver boards need a moment on their own rail before they
-    // will answer, whether that rail was just switched on or was live before
-    // the ESP32 was.
+    // and there is nothing to raise. There used to be a fixed 1 s wait here
+    // for the AT32 boards to come up on their rail; it is now a poll right
+    // after the SPI bus is up (below), which returns as soon as they answer.
+    // By the time app_main gets here the rail has normally been live for
+    // ~1.7 s already, so on most boots the boards answer on the first pass.
 #if SERVO_HAS_POWER_EN
     gpio_set_direction(static_cast<gpio_num_t>(SERVO_POWER_PIN), GPIO_MODE_OUTPUT);
     gpio_set_level(static_cast<gpio_num_t>(SERVO_POWER_PIN), 1);
-    ESP_LOGI(TAG, "Servo power enabled (GPIO%d)", SERVO_POWER_PIN);
+    ESP_LOGD(TAG, "Servo power enabled (GPIO%d)", SERVO_POWER_PIN);
 #else
-    ESP_LOGI(TAG, "Servo rail is always on (no power-enable GPIO)");
+    ESP_LOGD(TAG, "Servo rail is always on (no power-enable GPIO)");
 #endif
-    vTaskDelay(pdMS_TO_TICKS(1000));
 
     // The UART servo bus this firmware used to bring up (SCSCL on UART1,
     // TX=IO4 / RX=IO5, 500 kbaud) is gone: on this board both of those pins
@@ -557,11 +750,31 @@ bool init()
     // CLK=IO16, chip selects from robot/board_config.h). This replaces the
     // Feetech SCSCL serial bus, which used UART1 on IO4/IO5 - and on this
     // board both of those pins are servo chip selects.
-    ESP_LOGI(TAG, "Initialising SPI servo driver boards...");
+    // One INFO line for the whole bring-up (below): at 115200 baud every log
+    // line costs ~5-6 ms and the caller waits for it, so five lines here
+    // were ~20 ms of a ~1 ms job. The step-by-step lines are at DEBUG.
+    ESP_LOGD(TAG, "Initialising SPI servo driver boards...");
     if (!driver_board_init()) {
         ESP_LOGE(TAG, "Driver board init FAILED - no servo control");
     } else {
-        ESP_LOGI(TAG, "Driver board init done");
+        ESP_LOGD(TAG, "Driver board init done");
+        s_bt.spi_up = bt_now();
+
+        // Wait for the boards to answer, but only as long as they need: an
+        // all-idle pass every 20 ms (harmless -- nothing is holding yet) until
+        // all four reply, giving up after 1 s. Replies arrive one transfer
+        // late, so the first pass of a ready robot can still read 0.
+        {
+            const int64_t t0 = esp_timer_get_time();
+            int answered = 0;
+            for (;;) {
+                answered = driver_board_sync_idle();
+                if (answered >= 4 || esp_timer_get_time() - t0 > 1000000) break;
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+            s_bt.boards = answered;
+            s_bt.boards_at = bt_now();
+        }
 
         // Adopt the boards' own range_position_deg rather than assuming one.
         // A robot that was range-trimmed on the reference firmware keeps that
@@ -570,8 +783,9 @@ bool init()
         // the ratio. Done here, before the gait task exists, because the
         // config path needs the SPI bus to itself.
         const float scale_dd = driver_board_probe_scale();
+        s_bt.range_at = bt_now();
         if (driver_board_probe_answered()) {
-            ESP_LOGI(TAG, "Driver board range: %.1f deg (%.3f ticks/deg)",
+            ESP_LOGD(TAG, "Driver board range: %.1f deg (%.3f ticks/deg)",
                      scale_dd / 10.0f, servo_ticks_per_deg());
         } else {
             ESP_LOGW(TAG, "No board reported its range - assuming %.1f deg. "
@@ -585,7 +799,6 @@ bool init()
     // which answers "is anything there"; this answers WHICH channels are
     // alive, and a whole silent board of three points at that board's chip
     // select or its power rather than at the servos.
-    vTaskDelay(pdMS_TO_TICKS(100));
     {
         int  alive = 0;
         int  n     = 0;
@@ -598,8 +811,10 @@ bool init()
                 n += std::snprintf(list + n, sizeof(list) - n, "%s%d", n ? "," : "", i);
             }
         }
+        s_bt.alive = alive;
+        s_bt.check_at = bt_now();
         if (alive == 12) {
-            ESP_LOGI(TAG, "Servo probe OK - all 12 channels responded");
+            ESP_LOGD(TAG, "Servo probe OK - all 12 channels responded");
         } else if (alive > 0) {
             ESP_LOGW(TAG, "Servo probe - %d/12 responded: [%s]", alive, list);
             ESP_LOGW(TAG, "Silent channels: check board power and chip select "
@@ -621,6 +836,7 @@ bool init()
         if (nvs_get_i32(s_nvs, "stride", &v) == ESP_OK)   s_cfg.stride    = static_cast<int>(v);
         if (nvs_get_i32(s_nvs, "tilt", &v) == ESP_OK)     s_cfg.tilt      = static_cast<int>(v);
         if (nvs_get_i32(s_nvs, "sgspeed", &v) == ESP_OK)  s_cfg.sg_speed  = static_cast<int>(v);
+        if (nvs_get_i32(s_nvs, "ljspeed", &v) == ESP_OK && v >= 25 && v <= 200) s_lj_speed = static_cast<int>(v);
 
         /* Seed the calibration from kFactoryOffset the first time this firmware
          * boots, then leave it alone. The marker is what makes it once-only:
@@ -653,6 +869,51 @@ bool init()
         import_legacy_offsets();
     }
 
+    // ── Initialise goal buffers to centre ───────────────────────
+    for (int i = 1; i <= 12; ++i) {
+        s_goal_pos[i]   = 511;
+        s_goal_speed[i] = 0;
+
+        // Current cap: the persisted value if there is one, else the compiled
+        // default. Never 0 - a robot that boots with no torque on its joints
+        // simply collapses, and 0 is also what an unread NVS key returns.
+        char ckey[16];
+        std::snprintf(ckey, sizeof(ckey), "cur%d", i);
+        int32_t cm = 0;
+        if (s_nvs && nvs_get_i32(s_nvs, ckey, &cm) == ESP_OK &&
+            cm > 0 && cm <= static_cast<int32_t>(SERVO_CURRENT_MAX_MA)) {
+            s_current_ma[i] = static_cast<uint16_t>(cm);
+        } else {
+            s_current_ma[i] = SERVO_CURRENT_MAX_MA;
+        }
+    }
+
+    // ── Spawn gait task on core 1 ───────────────────────────────
+    // Before the IMU, so the soft start begins now rather than after the
+    // ~0.6 s the BMI270 takes to load its config blob. Nothing in the gait
+    // path reads the IMU, and imu_read() returns an empty sample until it is
+    // up, so the order is safe.
+    BaseType_t rv = xTaskCreatePinnedToCore(
+        [](void *) { gait_task(); },
+        "gait", 8192, nullptr, 22, &s_gait_task_handle, 1);
+
+    if (rv != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create gait task");
+        return false;
+    }
+    s_bt.task_at = bt_now();
+
+    // ── Initialise IMU (BMI270 + BMM150 over I2C) ──────────────────
+    if (!imu_init()) {
+        ESP_LOGW(TAG, "IMU init failed — continuing without IMU");
+    } else {
+        ESP_LOGI(TAG, "IMU initialised");
+    }
+
+    boot_timing_print();
+
+    // Printed here, after the legs are already moving, not before the first
+    // command: these 14 lines are ~70 ms of serial output at 115200 baud.
     ESP_LOGI(TAG, "Config restored: period=%d height=%d upHeight=%d stride=%d tilt=%d sgspeed=%d",
              s_cfg.period, s_cfg.height, s_cfg.up_height, s_cfg.stride, s_cfg.tilt,
              s_cfg.sg_speed);
@@ -685,42 +946,6 @@ bool init()
         }
     }
 
-    // ── Initialise goal buffers to centre ───────────────────────
-    for (int i = 1; i <= 12; ++i) {
-        s_goal_pos[i]   = 511;
-        s_goal_speed[i] = 0;
-
-        // Current cap: the persisted value if there is one, else the compiled
-        // default. Never 0 - a robot that boots with no torque on its joints
-        // simply collapses, and 0 is also what an unread NVS key returns.
-        char ckey[16];
-        std::snprintf(ckey, sizeof(ckey), "cur%d", i);
-        int32_t cm = 0;
-        if (s_nvs && nvs_get_i32(s_nvs, ckey, &cm) == ESP_OK &&
-            cm > 0 && cm <= static_cast<int32_t>(SERVO_CURRENT_MAX_MA)) {
-            s_current_ma[i] = static_cast<uint16_t>(cm);
-        } else {
-            s_current_ma[i] = SERVO_CURRENT_MAX_MA;
-        }
-    }
-
-    // ── Initialise IMU (BMI270 + BMM150 over I2C) ──────────────────
-    if (!imu_init()) {
-        ESP_LOGW(TAG, "IMU init failed — continuing without IMU");
-    } else {
-        ESP_LOGI(TAG, "IMU initialised");
-    }
-
-    // ── Spawn gait task on core 1 ───────────────────────────────
-    BaseType_t rv = xTaskCreatePinnedToCore(
-        [](void *) { gait_task(); },
-        "gait", 8192, nullptr, 22, &s_gait_task_handle, 1);
-
-    if (rv != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create gait task");
-        return false;
-    }
-
     ESP_LOGI(TAG, "Robot HAL initialised");
     return true;
 }
@@ -729,6 +954,7 @@ bool init()
 
 void send_gait_cmd(GaitCmd cmd)
 {
+    if (master_blocks("send_gait_cmd")) return;
     s_gait_cmd = cmd;
 }
 
@@ -748,6 +974,18 @@ bool gait_from_name(const char *name, GaitCmd &out)
             return true;
         }
     }
+    for (int k = 0; k < BF_NPRESETS; ++k) {
+        if (std::strcmp(name, BF_PRESETS[k].name) == 0) {
+            out = static_cast<GaitCmd>(GAIT_BF_BASE + k);
+            return true;
+        }
+    }
+    for (int k = 0; k < TJ_NTABLES; ++k) {
+        if (std::strcmp(name, TJ_TABLES[k].name) == 0) {
+            out = static_cast<GaitCmd>(GAIT_TJ_BASE + k);
+            return true;
+        }
+    }
     return false;
 }
 
@@ -756,18 +994,119 @@ const char *gait_to_name(GaitCmd cmd)
     for (int i = 0; i < GAIT_NAME_COUNT; ++i) {
         if (GAIT_NAMES[i].cmd == cmd) return GAIT_NAMES[i].name;
     }
+    const int v = static_cast<int>(cmd);
+    if (v >= GAIT_BF_BASE && v < GAIT_BF_BASE + BF_NPRESETS) return BF_PRESETS[v - GAIT_BF_BASE].name;
+    if (v >= GAIT_TJ_BASE && v < GAIT_TJ_BASE + TJ_NTABLES)  return TJ_TABLES[v - GAIT_TJ_BASE].name;
+    if (cmd == GaitCmd::BodyAttitude) return "attitude";
+    if (cmd == GaitCmd::FootTargets)  return "feet";
+    if (cmd == GaitCmd::LookPad)      return "lookpad";
     return "none";
 }
 
 int gait_name_count()
 {
-    return GAIT_NAME_COUNT;
+    return GAIT_NAME_COUNT + BF_NPRESETS + TJ_NTABLES;
 }
 
 const char *gait_name_at(int index)
 {
-    if (index < 0 || index >= GAIT_NAME_COUNT) return nullptr;
-    return GAIT_NAMES[index].name;
+    if (index < 0) return nullptr;
+    if (index < GAIT_NAME_COUNT) return GAIT_NAMES[index].name;
+    index -= GAIT_NAME_COUNT;
+    if (index < BF_NPRESETS) return BF_PRESETS[index].name;
+    index -= BF_NPRESETS;
+    if (index < TJ_NTABLES) return TJ_TABLES[index].name;
+    return nullptr;
+}
+
+const char *gait_note(const char *name)
+{
+    GaitCmd cmd;
+    if (!gait_from_name(name, cmd)) return "";
+    const int v = static_cast<int>(cmd);
+    if (v >= GAIT_BF_BASE && v < GAIT_BF_BASE + BF_NPRESETS) return BF_PRESETS[v - GAIT_BF_BASE].note;
+    if (v >= GAIT_TJ_BASE && v < GAIT_TJ_BASE + TJ_NTABLES)  return TJ_TABLES[v - GAIT_TJ_BASE].note;
+    return mpe_note(cmd);
+}
+
+bool gait_is_continuous(GaitCmd cmd)
+{
+    switch (cmd) {
+        case GaitCmd::None: case GaitCmd::Init:
+        case GaitCmd::Roll: case GaitCmd::Pitch: case GaitCmd::Stretch:
+        case GaitCmd::Jump: case GaitCmd::JumpFwd: case GaitCmd::TestSpeed:
+        case GaitCmd::BowBack: case GaitCmd::BodyCycle: case GaitCmd::HeadEllipse:
+        case GaitCmd::FrontKick:
+        case GaitCmd::LongJump: case GaitCmd::FarJump: case GaitCmd::CharShow:
+        case GaitCmd::HipTest:
+            return false;
+        default:
+            break;
+    }
+    const int v = static_cast<int>(cmd);
+    if (v >= GAIT_BF_BASE) return false;     // presets and trajopt tables end by themselves
+    return true;
+}
+
+void look_input(float yaw_deg, float pitch_deg)
+{
+    yaw_deg   = clampf(yaw_deg,   -LOOK_YAW_MAX_DEG,   LOOK_YAW_MAX_DEG);
+    pitch_deg = clampf(pitch_deg, -LOOK_PITCH_MAX_DEG, LOOK_PITCH_MAX_DEG);
+    if (std::fabs(yaw_deg)   < 0.5f) yaw_deg   = 0.0f;
+    if (std::fabs(pitch_deg) < 0.5f) pitch_deg = 0.0f;
+    if (yaw_deg == 0.0f && pitch_deg == 0.0f) {
+        s_look_cmd_yaw = 0.0f;               // the look glides back and ends
+        s_look_cmd_pitch = 0.0f;
+        return;
+    }
+    if (master_blocks("look")) return;
+    s_look_cmd_yaw = yaw_deg;
+    s_look_cmd_pitch = pitch_deg;
+    if (s_gait_cmd != GaitCmd::LookPad) {
+        s_gait_cmd = GaitCmd::LookPad;
+        wake_gait();
+    }
+}
+
+void hiptest_start(int deg)
+{
+    if (master_blocks("hiptest")) return;
+    if (deg < 3)  deg = 3;
+    if (deg > 20) deg = 20;
+    s_hiptest_deg = static_cast<float>(deg);
+    std::snprintf(s_hiptest_msg, sizeof(s_hiptest_msg), "starting...");
+    s_gait_cmd = GaitCmd::HipTest;
+    wake_gait();
+}
+
+int hiptest_status_json(char *buf, int n)
+{
+    return std::snprintf(buf, n, R"({"on":%s,"step":%d,"msg":"%s"})",
+                         s_gait_cmd == GaitCmd::HipTest ? "true" : "false",
+                         static_cast<int>(s_hiptest_step), s_hiptest_msg);
+}
+
+void set_lj_speed(int pct)
+{
+    if (pct < 25 || pct > 200) return;
+    s_lj_speed = pct;
+    nvs_put_i32("ljspeed", pct);
+}
+
+int get_lj_speed()
+{
+    return s_lj_speed;
+}
+
+int servo_gains_active()
+{
+    return s_tune_active;
+}
+
+const char *servo_gains_name(int k)
+{
+    if (k < 0 || k >= TUNE_NPRESETS) return "Default (power-on)";
+    return TUNE_PRESETS[k].name;
 }
 
 // ── Servo overlay ────────────────────────────────────────────
@@ -775,6 +1114,7 @@ const char *gait_name_at(int index)
 void set_overlay(int servo_id, float deg)
 {
     if (servo_id < 1 || servo_id > 12) return;
+    if (master_blocks("set_overlay")) return;
 
     // Clamp rather than reject. A skill trimming a gait wants a bounded nudge,
     // and silently ignoring the request is a worse answer than giving it the
@@ -798,7 +1138,7 @@ void clear_overlay()
     wake_gait();
 }
 
-void set_body_attitude(float roll_deg, float pitch_deg, float yaw_deg)
+static void apply_body_attitude(float roll_deg, float pitch_deg, float yaw_deg)
 {
     // Match MovementGroups.py safety caps from the reference implementation.
     if (roll_deg > 25.0f) roll_deg = 25.0f;
@@ -812,6 +1152,12 @@ void set_body_attitude(float roll_deg, float pitch_deg, float yaw_deg)
     s_body_pitch_deg = pitch_deg;
     s_body_yaw_deg   = yaw_deg;
     s_gait_cmd       = GaitCmd::BodyAttitude;
+}
+
+void set_body_attitude(float roll_deg, float pitch_deg, float yaw_deg)
+{
+    if (master_blocks("set_body_attitude")) return;
+    apply_body_attitude(roll_deg, pitch_deg, yaw_deg);
 }
 
 void set_attitude_speed(float dps)
@@ -838,6 +1184,7 @@ void set_attitude_speed_xyz(float roll_dps, float pitch_dps, float yaw_dps)
 // consumes the values each 15 ms tick, scaled by s_cfg.sg_speed.
 void joy_input(float f, float s, float t)
 {
+    if (master_blocks("joystick")) return;
     if (f >  1.0f) f =  1.0f;
     if (f < -1.0f) f = -1.0f;
     if (s >  1.0f) s =  1.0f;
@@ -895,6 +1242,7 @@ float get_offset(int servo_id)
 void set_offset(int servo_id, float deg)
 {
     if (servo_id < 1 || servo_id > 12) return;
+    if (master_blocks("set_offset")) return;
     s_offset[servo_id] = deg;
     char key[16];
     std::snprintf(key, sizeof(key), "offset%d", servo_id);
@@ -903,6 +1251,7 @@ void set_offset(int servo_id, float deg)
 
 void reset_offsets()
 {
+    if (master_blocks("reset_offsets")) return;
     for (int i = 1; i <= 12; ++i) {
         s_offset[i] = 0.0f;
         char key[16];
@@ -1029,6 +1378,7 @@ int ping_servo(int servo_id)
 
 void set_studio_mode(bool on)
 {
+    if (on && master_blocks("Servo Studio")) return;
     if (on) {
         if (s_bus_owner == BUS_STUDIO) return;
         // The console outranks a skill: a human at the keyboard takes the bus.
@@ -1054,6 +1404,7 @@ bool studio_mode()
 
 bool servo_lock()
 {
+    if (master_blocks("servo_lock")) return false;
     if (s_bus_owner == BUS_SKILL) return true;      // already ours
     if (s_bus_owner == BUS_STUDIO) {
         ESP_LOGW(TAG, "servo_lock refused - Servo Studio holds the bus");
@@ -1105,6 +1456,9 @@ void release_skill_bus_lock()
 
 void set_servo_angle(int servo_id, float deg)
 {
+    // While the Pi is in control only the gait task (which is executing the
+    // Pi's commands) may touch the goal buffer.
+    if (s_master && !in_gait_task()) { master_blocks("set_servo_angle"); return; }
     // Convert degrees to a raw setpoint in the GAIT frame: 0..1023 across the
     // boards' full mechanical range, centre -> 511. `deg` is RELATIVE to
     // centre, and one degree is servo_ticks_per_deg() raw steps - read from
@@ -1150,8 +1504,165 @@ uint16_t get_servo_current(int servo_id)
     return s_current_ma[servo_id];
 }
 
+// ── Servo power: soft start, and rest when nobody uses the robot ─────────
+//
+// SOFT START. The legs are wherever they were when the power went off --
+// folded, splayed, lying on a side. The first frame used to command the
+// stand at full current, and every joint slammed there at once: a jolt for
+// the mechanics and the biggest current spike the battery ever sees. Now the
+// first flush reads where each joint actually is (one IDLE pass: the servos
+// stay limp but report their positions) and the outgoing frames glide from
+// there to the goals over SOFT_START_MS. The gait/IK keep producing goals as
+// usual; only the frame on its way out is blended.
+//
+// REST. After s_rest_after_s seconds in which the goals have not moved and no
+// movement was asked for (default 5 min, `servo rest <s|off>`, saved), the
+// body is lowered over LOWER_MS to a crouch (feet under the hips at REST_Z,
+// so it sinks rather than drops) and then every servo goes IDLE: the motors
+// stop holding, which is where the power goes -- twelve servos holding a
+// stance draw current all the time. The feedback keeps flowing (temperatures
+// still read). The moment anything asks for motion -- a new gait, a pose, a
+// changed goal -- it wakes the same way it boots: from where the legs are,
+// gliding over WAKE_MS.
+//
+// Never while the Pi drives the robot (ROS owns the stance), a skill runs, or
+// Servo Studio holds the bus.
+
+namespace {
+enum PowerState { PS_BOOT = 0, PS_GLIDE, PS_ON, PS_LOWER, PS_OFF };
+
+constexpr uint32_t SOFT_START_MS = 2500;
+constexpr uint32_t WAKE_MS       = 1200;
+constexpr uint32_t LOWER_MS      = 2000;
+constexpr float    REST_Z        = 40.0f;       // mm; the stand is ~70
+constexpr uint32_t REST_DEFAULT_S = 300;
+
+volatile int s_ps = PS_BOOT;
+float     s_glide_from[12];
+uint16_t  s_glide_to[12];       // PS_LOWER: the crouch
+int64_t   s_glide_t0;
+uint32_t  s_glide_ms;
+uint16_t  s_last_goal[12];
+int64_t   s_last_activity_us;
+GaitCmd   s_last_cmd = GaitCmd::None;
+uint32_t  s_rest_after_s = REST_DEFAULT_S;
+bool      s_rest_loaded;
+volatile bool s_rest_now;       // `servo sleep`
+volatile bool s_wake_now;       // `servo wake`, or any motion request
+
+float ease_in_out(float u)
+{
+    if (u <= 0.0f) return 0.0f;
+    if (u >= 1.0f) return 1.0f;
+    return u * u * (3.0f - 2.0f * u);
+}
+
+// Present positions, in the frame flush() sends, for each joint whose board
+// answered; the others start at their goal (nothing to glide from).
+//
+// Several IDLE passes, not one: SPI is full duplex, so what a board clocks
+// back during a transfer is its answer to the PREVIOUS one. At boot the
+// previous one was a config query (the range probe), whose reply the
+// feedback check rightly rejects -- so a single pass read nothing, every
+// joint "started at its goal", and the legs snapped to the stand at full
+// current exactly as before. That was the soft start that did not soften.
+int read_present(float out[12], const uint16_t fallback[12])
+{
+    bool got[12] = {};
+    int n = 0;
+    for (int pass = 0; pass < 4 && n < 12; ++pass) {
+        driver_board_sync_idle();
+        for (int i = 0; i < 12; ++i) {
+            if (!got[i] && driver_board_present_fresh(i + 1)) {
+                out[i] = static_cast<float>(at32_raw_to_gait_raw(
+                             static_cast<int>(driver_board_present_position(i + 1))));
+                got[i] = true;
+                ++n;
+            }
+        }
+        if (n < 12) vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    for (int i = 0; i < 12; ++i) {
+        if (!got[i]) out[i] = fallback[i];
+    }
+    return n;
+}
+
+void start_glide(const uint16_t to_now[12], uint32_t ms)
+{
+    const int n = read_present(s_glide_from, to_now);
+    float far = 0.0f;
+    for (int i = 0; i < 12; ++i) {
+        const float d = std::fabs(s_glide_from[i] - static_cast<float>(to_now[i]));
+        if (d > far) far = d;
+    }
+    if (s_ps == PS_BOOT) {
+        // Boot: no printing before the first command (it would hold it up);
+        // boot_timing_print() reports this with the rest.
+        s_bt.joints = n;
+        s_bt.far_deg = far / servo_ticks_per_deg();
+    } else {
+        ESP_LOGI(TAG, "servos: %d/12 joints read; furthest %.0f deg from its goal; gliding %u ms",
+                 n, far / servo_ticks_per_deg(), static_cast<unsigned>(ms));
+    }
+    s_glide_t0 = esp_timer_get_time();
+    s_glide_ms = ms;
+    s_ps = PS_GLIDE;
+}
+}  // namespace
+
+static void rest_load()
+{
+    if (s_rest_loaded) return;
+    s_rest_loaded = true;
+    int32_t v = 0;
+    if (s_nvs && nvs_get_i32(s_nvs, "rest_s", &v) == ESP_OK && v >= 0 && v <= 24 * 3600) {
+        s_rest_after_s = static_cast<uint32_t>(v);
+    }
+}
+
+void set_rest_after(uint32_t seconds)
+{
+    rest_load();
+    s_rest_after_s = seconds;
+    nvs_put_i32("rest_s", static_cast<int32_t>(seconds));
+    s_last_activity_us = esp_timer_get_time();
+}
+
+uint32_t rest_after() { rest_load(); return s_rest_after_s; }
+
+const char *power_state_name()
+{
+    switch (s_ps) {
+        case PS_BOOT:  return "starting";
+        case PS_GLIDE: return "moving into place";
+        case PS_ON:    return "holding";
+        case PS_LOWER: return "lying down";
+        default:       return "resting (servos off)";
+    }
+}
+
+bool servos_resting() { return s_ps == PS_OFF || s_ps == PS_LOWER; }
+void rest_now()       { s_rest_now = true; }
+void wake_servos()    { s_wake_now = true; s_last_activity_us = esp_timer_get_time(); }
+
+// Lower the body to the crouch: the plain IK at REST_Z, computed into the
+// goal buffer and copied out, the buffer then put back as it was.
+static void crouch_targets(uint16_t out[12])
+{
+    uint16_t saved[13];
+    std::memcpy(saved, s_goal_pos, sizeof(saved));
+    front_right_ik(0, 0, REST_Z);
+    front_left_ik(0, 0, REST_Z);
+    rear_right_ik(0, 0, REST_Z);
+    rear_left_ik(0, 0, REST_Z);
+    for (int i = 0; i < 12; ++i) out[i] = s_goal_pos[i + 1];
+    std::memcpy(s_goal_pos, saved, sizeof(saved));
+}
+
 void flush()
 {
+    if (s_master && !in_gait_task()) { master_blocks("flush"); return; }
     // Studio or a skill owns the bus - hold the last pose rather than fight it.
     if (s_bus_owner != BUS_FREE) return;
     // Ensure at least 5 ms between bus accesses
@@ -1189,7 +1700,78 @@ void flush()
         pos[i] = static_cast<uint16_t>(raw);
         cur[i] = s_current_ma[i + 1];
     }
+
+    // ── power state: soft start, rest, wake ──────────────────────────────
+    rest_load();
+    const int64_t now = esp_timer_get_time();
+    bool moved = false;
+    for (int i = 0; i < 12; ++i) {
+        if (std::abs(static_cast<int>(pos[i]) - static_cast<int>(s_last_goal[i])) > 2) moved = true;
+        s_last_goal[i] = pos[i];
+    }
+    const GaitCmd cmd_now = s_gait_cmd;
+    if (cmd_now != s_last_cmd) {
+        s_last_cmd = cmd_now;
+        if (cmd_now != GaitCmd::None) moved = true;
+    }
+    const bool busy = s_master || ::skill_is_running();
+    if (moved || busy || s_wake_now || s_last_activity_us == 0) s_last_activity_us = now;
+
+    switch (s_ps) {
+    case PS_BOOT:
+        start_glide(pos, SOFT_START_MS);
+        break;
+    case PS_ON:
+        if (s_rest_now ||
+            (s_rest_after_s > 0 && !busy &&
+             now - s_last_activity_us > static_cast<int64_t>(s_rest_after_s) * 1000000)) {
+            ESP_LOGI(TAG, "servos: %s -- lying down, then servos off",
+                     s_rest_now ? "asked to rest" : "unused for a while");
+            for (int i = 0; i < 12; ++i) s_glide_from[i] = pos[i];
+            crouch_targets(s_glide_to);
+            s_glide_t0 = now;
+            s_glide_ms = LOWER_MS;
+            s_ps = PS_LOWER;
+        }
+        break;
+    case PS_LOWER:
+    case PS_OFF:
+        if (moved || busy || s_wake_now) {
+            ESP_LOGI(TAG, "servos: waking -- gliding into place (%u ms)",
+                     static_cast<unsigned>(WAKE_MS));
+            start_glide(pos, WAKE_MS);
+        }
+        break;
+    default:
+        break;
+    }
+    s_rest_now = false;
+    s_wake_now = false;
+
+    if (s_ps == PS_OFF) {
+        driver_board_sync_idle();          // limp, but still reporting
+        return;
+    }
+    if (s_ps == PS_GLIDE || s_ps == PS_LOWER) {
+        const float u = ease_in_out(static_cast<float>(now - s_glide_t0) /
+                                    (static_cast<float>(s_glide_ms) * 1000.0f));
+        for (int i = 0; i < 12; ++i) {
+            const float to = (s_ps == PS_LOWER) ? s_glide_to[i] : pos[i];
+            pos[i] = static_cast<uint16_t>(std::lround(s_glide_from[i] + (to - s_glide_from[i]) * u));
+        }
+        if (u >= 1.0f) {
+            if (s_ps == PS_LOWER) {
+                ESP_LOGI(TAG, "servos: off (resting) -- any movement wakes them");
+                s_ps = PS_OFF;
+                driver_board_sync_write(pos, cur);   // settle on the crouch
+                driver_board_sync_idle();
+                return;
+            }
+            s_ps = PS_ON;
+        }
+    }
     driver_board_sync_write(pos, cur);
+    if (!s_bt.first_cmd_at) s_bt.first_cmd_at = bt_now();
     ESP_LOGD(TAG, "flush: sync_write sent to the four driver boards");
 }
 
@@ -1236,6 +1818,182 @@ void rear_left_ik(float x, float th0, float z)
     set_servo_angle(12, -(th2 - s_th2_neutral_deg)   + s_offset[12]);
 }
 
+// ── Telemetry for an external host ──────────────────────────
+
+static inline int16_t to_cdeg(float deg)
+{
+    float c = deg * 100.0f;
+    if (!std::isfinite(c)) return INT16_MIN;
+    if (c >  32767.0f) c =  32767.0f;
+    if (c < -32767.0f) c = -32767.0f;
+    return static_cast<int16_t>(std::lrintf(c));
+}
+
+void servo_snapshot(int16_t cmd_cdeg[12], int16_t meas_cdeg[12])
+{
+    const float tpd = servo_ticks_per_deg();
+    for (int i = 1; i <= 12; ++i) {
+        // Commanded: what flush() puts on the wire (goal + overlay), minus the
+        // calibration offset the IK added - i.e. the IK's own angle.
+        const float goal_deg = (static_cast<int>(s_goal_pos[i]) - 511) / tpd;
+        cmd_cdeg[i - 1] = to_cdeg(goal_deg + s_overlay[i] - s_offset[i]);
+
+        // Measured: only once that servo's board has answered at least once
+        // (a never-answered channel reads as position 0, which is a lie).
+        if (std::isnan(read_temperature_c(i))) {
+            meas_cdeg[i - 1] = INT16_MIN;
+        } else {
+            const int a = read_angle_cdeg(i);
+            meas_cdeg[i - 1] = (a == INT32_MIN)
+                ? INT16_MIN
+                : to_cdeg(static_cast<float>(a) * 0.01f - s_offset[i]);
+        }
+    }
+}
+
+void executed_velocity(float &vx_m_s, float &vy_m_s, float &wz_rad_s)
+{
+    vx_m_s   = s_exec_vx;
+    vy_m_s   = s_exec_vy;
+    wz_rad_s = s_exec_wz;
+}
+
+// ── External master ──────────────────────────────────────────
+
+bool master_active()
+{
+    return s_master;
+}
+
+static void (*s_master_observer)(bool) = nullptr;
+
+void set_master_observer(void (*cb)(bool active))
+{
+    s_master_observer = cb;
+}
+
+namespace master {
+
+void begin()
+{
+    // Fence first: from this instruction on, nothing local can start a move.
+    s_master = true;
+
+    // Take the bus back from Servo Studio or a skill. Their own writes are
+    // already refused by the fence above; this just lets flush() run again.
+    if (s_bus_owner != BUS_FREE) {
+        ESP_LOGW(TAG, "Pi taking control - releasing the servo bus from %s",
+                 s_bus_owner == BUS_STUDIO ? "Servo Studio" : "a skill");
+        s_bus_owner = BUS_FREE;
+    }
+    if (::skill_is_running()) {
+        ESP_LOGW(TAG, "Pi taking control - stopping the running skill");
+        ::skill_request_stop();
+    }
+    for (int i = 1; i <= 12; ++i) s_overlay[i] = 0.0f;
+
+    s_js_active  = false;
+    s_js_f = 0.0f;
+    s_js_s = 0.0f;
+    s_js_t = 0.0f;
+    s_js_last_ms = 0;
+
+    s_pi_vx = 0.0f;
+    s_pi_vy = 0.0f;
+    s_pi_wz = 0.0f;
+    s_pi_vel_ms = 0;
+    portENTER_CRITICAL(&s_pi_feet_mux);
+    s_pi_feet_valid = false;
+    portEXIT_CRITICAL(&s_pi_feet_mux);
+
+    s_gait_cmd = GaitCmd::None;     // start from the stand
+    wake_gait();
+    if (s_master_observer) s_master_observer(true);
+}
+
+void end()
+{
+    s_pi_vx = 0.0f;
+    s_pi_vy = 0.0f;
+    s_pi_wz = 0.0f;
+    s_pi_vel_ms = 0;
+    s_gait_cmd = GaitCmd::None;     // the running branch parks in the stand
+    s_master = false;
+    wake_gait();
+    if (s_master_observer) s_master_observer(false);
+}
+
+void send_gait_cmd(GaitCmd cmd)
+{
+    s_gait_cmd = cmd;
+    wake_gait();
+}
+
+void set_velocity(float vx_m_s, float vy_m_s, float wz_rad_s)
+{
+    const float vx = clampf(vx_m_s * 1000.0f, -SG_SPEED_MAX_MM_S, SG_SPEED_MAX_MM_S);
+    const float vy = clampf(vy_m_s * 1000.0f, -JOY_VY_MAX, JOY_VY_MAX);
+    const float wz = clampf(wz_rad_s, -JOY_WZ_MAX, JOY_WZ_MAX);
+    s_pi_vx = vx;
+    s_pi_vy = vy;
+    s_pi_wz = wz;
+    s_pi_vel_ms = millis();
+
+    // Like the PWA pads: a real velocity starts the walk. Zero does NOT stop
+    // it (that is SET_MODE stand) - it steps in place, which is what a
+    // navigation stack pausing between goals wants.
+    const bool moving = std::fabs(vx) > 2.0f || std::fabs(vy) > 2.0f ||
+                        std::fabs(wz) > 0.02f;
+    if (moving && s_gait_cmd != GaitCmd::StanfordWalk) {
+        s_gait_cmd = GaitCmd::StanfordWalk;
+        wake_gait();
+    }
+}
+
+void set_body_attitude(float roll_rad, float pitch_rad, float yaw_rad)
+{
+    // REP-103 -> this firmware's attitude convention (see sg_attitude_feet):
+    // roll + = right side down in both; pitch + is nose DOWN in REP-103 but
+    // nose UP here; yaw + is head LEFT in REP-103 but head RIGHT here.
+    constexpr float R2D = 180.0f / PI;
+    apply_body_attitude(roll_rad * R2D, -pitch_rad * R2D, -yaw_rad * R2D);
+}
+
+void set_height_mm(float h_mm)
+{
+    const int h = static_cast<int>(std::lrintf(clampf(h_mm, 45.0f, 95.0f)));
+    if (h == s_cfg.height) return;          // NVS write only on a real change
+    Config c = s_cfg;
+    c.height = h;
+    set_config(c);
+}
+
+void set_foot_targets(const float xyz_m[4][3])
+{
+    // Body frame (Stanford axes, metres, z down negative) -> per-hip sg_foot_t
+    // (mm, z downward-positive): the inverse of foot_to_legorigin_frame()'s
+    // "body = gait origin + local".
+    sg_foot_t f[4];
+    for (int l = 0; l < 4; ++l) {
+        const float sx = (l == 0 || l == 1) ? +1.0f : -1.0f;   // front +
+        const float sy = (l == 1 || l == 3) ? +1.0f : -1.0f;   // left  +
+        f[l].x = clampf(xyz_m[l][0] * 1000.0f - sx * SG_ORIGIN_X, -70.0f, 70.0f);
+        f[l].y = clampf(xyz_m[l][1] * 1000.0f - sy * SG_ORIGIN_Y, -45.0f, 45.0f);
+        f[l].z = clampf(-xyz_m[l][2] * 1000.0f, 35.0f, 100.0f);
+    }
+    portENTER_CRITICAL(&s_pi_feet_mux);
+    for (int l = 0; l < 4; ++l) s_pi_feet[l] = f[l];
+    s_pi_feet_valid = true;
+    portEXIT_CRITICAL(&s_pi_feet_mux);
+
+    if (s_gait_cmd != GaitCmd::FootTargets) {
+        s_gait_cmd = GaitCmd::FootTargets;
+        wake_gait();
+    }
+}
+
+}  // namespace master
+
 // ═══════════════════════════════════════════════════════════════
 //  Gait task (runs on core 1)
 // ═══════════════════════════════════════════════════════════════
@@ -1251,9 +2009,16 @@ void gait_task()
     set_all_servo_speed(0);
 
     GaitCmd last_logged = GaitCmd::None;
+    GaitCmd last_played = GaitCmd::None;
 
     for (;;) {
         const GaitCmd cmd = s_gait_cmd;
+
+        // Tell the face what is playing (it has a face track per move).
+        if (cmd != last_played) {
+            last_played = cmd;
+            play_mark(cmd == GaitCmd::None ? nullptr : gait_to_name(cmd));
+        }
 
         // Log gait transitions (avoid spam on continuous gaits)
         if (cmd != last_logged) {
@@ -1307,6 +2072,8 @@ void gait_task()
                 case GaitCmd::ButtShrugLeft:  name = "buttshrugL";    break;
                 case GaitCmd::ButtShrugRight: name = "buttshrugR";    break;
                 case GaitCmd::BodyAttitude:   name = "attitude";      break;
+                case GaitCmd::FootTargets:    name = "feet";          break;
+                default:                      name = gait_to_name(cmd); break;
             }
             ESP_LOGI(TAG, "Gait: %s", name);
         }
@@ -1321,7 +2088,7 @@ void gait_task()
             // nothing else - while the buffer it had just claimed was rewritten
             // underneath it every tick. Only one skill runs at a time, so the
             // claim protected the skill from itself and from nobody.
-            if (!::sdk::control_owner_is_pose()) {
+            if (!::skill_owns_pose()) {
                 front_right_ik(0, 0, static_cast<float>(s_cfg.height));
                 rear_right_ik(0, 0, static_cast<float>(s_cfg.height));
                 front_left_ik(0, 0, static_cast<float>(s_cfg.height));
@@ -1332,7 +2099,7 @@ void gait_task()
             // host functions) are not immediately overwritten with
             // neutral positions.  The goal buffer is still updated
             // so positions are correct when WASM ends.
-            if (!wasm::is_running()) {
+            if (!::skill_is_running()) {
                 flush();
             }
             vTaskDelay(1);
@@ -1743,114 +2510,17 @@ void gait_task()
             continue;
         }
 
-        // ── Twerk ────────────────────────────────────────────────
+        // ── Twerk (minipupperesp): fast up/down shake, repeats while held ─
         if (cmd == GaitCmd::Twerk) {
-            const float h  = static_cast<float>(s_cfg.height);
-            const float uh = static_cast<float>(s_cfg.up_height);
-            const float p  = static_cast<float>(s_cfg.period);
-
-            // Phase 1: crouch front
-            time_mSt = millis(); tim = 0;
-            while (tim < p * 4.0f) { tim = millis() - time_mSt; tt = tim * PI / 2.0f / (p * 4.0f);
-                front_right_ik(0, 0, h - uh * std::sin(tt));
-                front_left_ik(0,  0, h - uh * std::sin(tt));
-                rear_right_ik(0, 0, h + uh * std::sin(tt));
-                rear_left_ik(0,  0, h + uh * std::sin(tt));
-                flush();
-                if (s_gait_cmd != cmd) break;
-            }
-            if (s_gait_cmd != cmd) continue;
-
-            // Phase 2: wiggle
-            time_mSt = millis(); tim = 0;
-            while (tim < p * 6.0f) { tim = millis() - time_mSt; tt = tim * 2.0f * PI / p;
-                front_right_ik(0, 0, h - uh);
-                front_left_ik(0,  0, h - uh);
-                rear_right_ik(0, 0, h + uh * (1.0f + 0.5f * std::sin(tt)));
-                rear_left_ik(0,  0, h + uh * (1.0f + 0.5f * std::sin(tt)));
-                flush();
-                if (s_gait_cmd != cmd) break;
-            }
-            if (s_gait_cmd != cmd) continue;
-
-            // Phase 3: return
-            time_mSt = millis(); tim = 0;
-            while (tim < p * 4.0f) { tim = millis() - time_mSt; tt = tim * PI / 2.0f / (p * 4.0f);
-                front_right_ik(0, 0, h - uh * std::cos(tt));
-                front_left_ik(0,  0, h - uh * std::cos(tt));
-                rear_right_ik(0, 0, h + uh * std::cos(tt));
-                rear_left_ik(0,  0, h + uh * std::cos(tt));
-                flush();
-                if (s_gait_cmd != cmd) break;
-            }
-            s_gait_cmd = GaitCmd::None;
+            twerk_cycle(cmd);
             continue;
         }
 
-        // ── Jump (vertical) ──────────────────────────────────────
+        // ── Jump (minipupperesp): crouch, push to full extension, snap
+        //    back to the crouch at lift-off, land in it, stand up ────────
         if (cmd == GaitCmd::Jump) {
-            const float h       = static_cast<float>(s_cfg.height);
-            const float p       = static_cast<float>(s_cfg.period);
-            const float crouchZ = 40.0f;
-            const float pushZ   = 105.0f;
-            const float tuckZ   = 45.0f;
-
-            // Crouch
-            time_mSt = millis(); tim = 0;
-            while (tim < p * 2.0f) { tim = millis() - time_mSt;
-                tt = tim * PI / 2.0f / (p * 2.0f);
-                float z = h - (h - crouchZ) * std::sin(tt);
-                front_right_ik(0, 0, z); front_left_ik(0, 0, z);
-                rear_right_ik(0, 0, z);  rear_left_ik(0, 0, z);
-                flush();
-                if (s_gait_cmd != cmd) break;
-            }
-            if (s_gait_cmd != cmd) continue;
-
-            // Hold crouch
-            time_mSt = millis(); tim = 0;
-            while (tim < 20.0f) { tim = millis() - time_mSt;
-                front_right_ik(0, 0, crouchZ); front_left_ik(0, 0, crouchZ);
-                rear_right_ik(0, 0, crouchZ);  rear_left_ik(0, 0, crouchZ);
-                flush();
-                if (s_gait_cmd != cmd) break;
-            }
-            if (s_gait_cmd != cmd) continue;
-
-            // Explosive extension
-            set_all_servo_speed(0);
-            front_right_ik(0, 0, pushZ); front_left_ik(0, 0, pushZ);
-            rear_right_ik(0, 0, pushZ);  rear_left_ik(0, 0, pushZ);
-            flush();
-            flush();
-
-            int air_ms = static_cast<int>(160.0f + (70.0f - crouchZ) * 1.0f);
-            vTaskDelay(pdMS_TO_TICKS(air_ms));
-
-            // Tuck in air
-            time_mSt = millis(); tim = 0;
-            const float tuck_ms = 50.0f;
-            while (tim < tuck_ms) { tim = millis() - time_mSt;
-                float frac = std::sin(tim * PI / 2.0f / tuck_ms);
-                float z = pushZ - (pushZ - tuckZ) * frac;
-                front_right_ik(0, 0, z); front_left_ik(0, 0, z);
-                rear_right_ik(0, 0, z);  rear_left_ik(0, 0, z);
-                flush();
-                if (s_gait_cmd != cmd) break;
-            }
-            if (s_gait_cmd != cmd) continue;
-
-            // Soft landing
-            time_mSt = millis(); tim = 0;
-            while (tim < p * 3.0f) { tim = millis() - time_mSt;
-                tt = tim * PI / 2.0f / (p * 3.0f);
-                float z = tuckZ + (h - tuckZ) * std::sin(tt);
-                front_right_ik(0, 0, z); front_left_ik(0, 0, z);
-                rear_right_ik(0, 0, z);  rear_left_ik(0, 0, z);
-                flush();
-                if (s_gait_cmd != cmd) break;
-            }
-            s_gait_cmd = GaitCmd::None;
+            jump_once(cmd);
+            finish(cmd);
             continue;
         }
 
@@ -2250,8 +2920,7 @@ void gait_task()
             // (web "Walk speed" slider, Config::sg_speed, mm/s).
             const float v  = static_cast<float>(s_cfg.sg_speed) * 0.7071f;
             const float vx = xf * v;
-            float       vy = yf * v;
-            if (SG_MIRROR_LR) vy = -vy;    // reference L/R mirror (see robot.h)
+            const float vy = yf * v;       // + = left (see robot.h)
 
             set_all_servo_speed(0);
             stanford_gait_reset(h);
@@ -2301,15 +2970,26 @@ void gait_task()
             while (s_gait_cmd == cmd) {
                 const float sg = static_cast<float>(s_cfg.sg_speed);
                 float vx, vy, wz;
-                if (millis() - s_js_last_ms < JOY_TIMEOUT_MS) {
-                    // Fresh joystick: full stick == sg_speed; strafe and
-                    // yaw scaled proportionally so turning matches.
+                if (s_master) {
+                    // Raspberry Pi: absolute velocities (REP-103: +y left,
+                    // +wz turn left), already clamped by master::set_velocity().
+                    // The gait takes exactly that convention, so they go in
+                    // as they are.
+                    if (millis() - s_pi_vel_ms < PI_VEL_TIMEOUT_MS) {
+                        vx = s_pi_vx;
+                        vy = s_pi_vy;
+                        wz = s_pi_wz;
+                    } else {
+                        vx = vy = wz = 0.0f;   // command expired: step in place
+                    }
+                } else if (millis() - s_js_last_ms < JOY_TIMEOUT_MS) {
+                    // Fresh joystick: exactly minipupperesp's /js. Full
+                    // stick == sg_speed; strafe and yaw scaled
+                    // proportionally so turning matches. s + = left,
+                    // t + = turn left.
                     const float k = sg / SG_SPEED_MAX_MM_S;
                     vx = s_js_f * sg;
-                    // Invert lateral (strafe) joystick for Stanford walk —
-                    // user reported left/right reversed when using the
-                    // Stanford gait via the joystick pads.
-                    vy = -s_js_s * JOY_VY_MAX * k;
+                    vy = s_js_s * JOY_VY_MAX * k;
                     wz = s_js_t * JOY_WZ_MAX * k;
                 } else if (s_js_active) {
                     // Joystick-started walk, input gone stale: step in
@@ -2319,7 +2999,10 @@ void gait_task()
                     // Button-started walk: steady forward trot.
                     vx = sg; vy = 0.0f; wz = 0.0f;
                 }
-                if (SG_MIRROR_LR) { vy = -vy; wz = -wz; }   // see robot.h
+                // The command in REP-103 units, for odometry on the Pi.
+                s_exec_vx = vx * 0.001f;
+                s_exec_vy = vy * 0.001f;
+                s_exec_wz = wz;
 
                 sg_foot_t feet[4];
                 stanford_gait_step(vx, vy, wz, h, SG_NATIVE_CLEARANCE_MM, feet);
@@ -2335,6 +3018,9 @@ void gait_task()
                 }
             }
             s_js_active = false;
+            s_exec_vx = 0.0f;
+            s_exec_vy = 0.0f;
+            s_exec_wz = 0.0f;
             sg_park(h);    // park mid-stride feet back in the stand
             continue;
         }
@@ -2465,6 +3151,84 @@ void gait_task()
             }
             sg_park(h);
             continue;
+        }
+
+        // ── Foot targets from the Raspberry Pi ───────────────────
+        // The Pi streams four body-frame foot positions (dance moves, its own
+        // gaits); the ESP keeps the IK. Ease into the first target, then
+        // follow the stream at 100 Hz until the command changes.
+        if (cmd == GaitCmd::FootTargets) {
+            const float h = static_cast<float>(s_cfg.height);
+            set_all_servo_speed(0);
+
+            auto read_feet = [h](sg_foot_t out[4]) {
+                portENTER_CRITICAL(&s_pi_feet_mux);
+                const bool ok = s_pi_feet_valid;
+                if (ok) for (int l = 0; l < 4; ++l) out[l] = s_pi_feet[l];
+                portEXIT_CRITICAL(&s_pi_feet_mux);
+                if (!ok) sg_rest(h, out);
+            };
+
+            sg_foot_t pose[4];
+            read_feet(pose);
+            sg_ramp_to(pose, sg_ramp_ms() / 2);
+            while (s_gait_cmd == cmd) {
+                read_feet(pose);
+                sg_write(pose);
+                flush();
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            sg_park(h);
+            continue;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  minipupperesp moves (robot/moves_mpe.inc)
+        // ═══════════════════════════════════════════════════════════
+        if (cmd == GaitCmd::Mate) {               // continuous, like Twerk
+            mate_cycle(cmd);
+            continue;
+        }
+        if (cmd == GaitCmd::LongJump || cmd == GaitCmd::FarJump) {
+            lj_play(cmd == GaitCmd::LongJump ? &LITE3_JUMP : &FAR_JUMP, cmd);
+            finish(cmd);
+            continue;
+        }
+        if (cmd == GaitCmd::CharShow) {
+            char_show(cmd);
+            if (still(cmd)) ramp_to_stand(300);
+            finish(cmd);
+            continue;
+        }
+        if (cmd == GaitCmd::Alive) {
+            alive_run(cmd);
+            sg_park(static_cast<float>(s_cfg.height));
+            continue;
+        }
+        if (cmd == GaitCmd::HipTest) {
+            hiptest_run(cmd);
+            finish(cmd);
+            continue;
+        }
+        if (cmd == GaitCmd::LookPad) {
+            lookpad_run(cmd);
+            finish(cmd);
+            continue;
+        }
+        {
+            const int v = static_cast<int>(cmd);
+            if (v >= GAIT_BF_BASE && v < GAIT_BF_BASE + BF_NPRESETS) {
+                bf_play(v - GAIT_BF_BASE, cmd);
+                if (still(cmd)) ramp_to_stand(400);
+                finish(cmd);
+                continue;
+            }
+            if (v >= GAIT_TJ_BASE && v < GAIT_TJ_BASE + TJ_NTABLES) {
+                tj_play(v - GAIT_TJ_BASE, cmd);
+                if (still(cmd)) ramp_to_stand(300);
+                finish(cmd);
+                continue;
+            }
         }
 
         // ── Unknown / fallback ───────────────────────────────────

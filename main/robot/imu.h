@@ -22,6 +22,8 @@ struct ImuData {
     float my = 0.0f;  ///< Mag Y (uT), valid only if mag_valid
     float mz = 0.0f;  ///< Mag Z (uT), valid only if mag_valid
     bool  mag_valid = false;  ///< True once the BMM150 has been read at least once
+    uint32_t seq  = 0;        ///< +1 per new sample (0 = never sampled): "is this one fresh?"
+    int64_t  t_us = 0;        ///< esp_timer time of the sample
 };
 
 /**
@@ -52,6 +54,9 @@ bool imu_init();
  * @brief Return a copy of the latest IMU sample (thread-safe).
  */
 ImuData imu_read();
+
+/** BMM150 found behind the BMI270 and sampled. */
+bool imu_mag_ready();
 
 /**
  * @brief Print the latest IMU data via ESP_LOGI.

@@ -36,6 +36,7 @@
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -63,6 +64,10 @@ static const char *TAG = "IMU";
  * transaction. Bosch's own examples use 128 for I2C; larger is not better
  * because every chunk still has to fit the I2C driver's transfer buffer. */
 #define BMI2_READ_WRITE_LEN 128
+
+/* Poll period of the sampling task. Matches the 100 Hz ODR the BMI270 is
+ * configured for, so the gait loop's reflexes (alive.c) see every sample. */
+#define IMU_POLL_MS 10
 
 namespace {
 
@@ -313,8 +318,12 @@ void imu_task(void *arg) {
                 }
             }
 
+            /* Freshness for the gait loop's reflexes (alive.c): seq bumps once
+             * per sample, t_us is the esp_timer time it was taken. */
+            sample.t_us = esp_timer_get_time();
             if (s_mutex) {
                 xSemaphoreTake(s_mutex, portMAX_DELAY);
+                sample.seq = s_data.seq + 1;
                 s_data = sample;
                 xSemaphoreGive(s_mutex);
             }
@@ -326,7 +335,9 @@ void imu_task(void *arg) {
             robot::imu_print();
         }
 #endif
-        vTaskDelay(pdMS_TO_TICKS(50));   /* 20 Hz */
+        /* 100 Hz: the picked-up / push reflexes integrate the IMU every
+         * control tick, and the BMI270 is configured for a 100 Hz ODR. */
+        vTaskDelay(pdMS_TO_TICKS(IMU_POLL_MS));
     }
 }
 
@@ -412,7 +423,7 @@ bool imu_init() {
         return false;
     }
 
-    ESP_LOGI(TAG, "IMU ready (accel+gyro @100Hz, poll 20Hz)");
+    ESP_LOGI(TAG, "IMU ready (accel+gyro @100Hz, poll %d ms)", (int)IMU_POLL_MS);
     return true;
 }
 
@@ -424,6 +435,10 @@ ImuData imu_read() {
         xSemaphoreGive(s_mutex);
     }
     return copy;
+}
+
+bool imu_mag_ready() {
+    return s_mag_ready;
 }
 
 void imu_print() {

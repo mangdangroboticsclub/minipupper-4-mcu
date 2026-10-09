@@ -1,6 +1,21 @@
 # ESP32-S3 Partition Table for 16MB flash (ESP32-S3-WROOM-1-N16R8)
-# Name,   Type, SubType, Offset,   Size,     Flags
+#
+# nvs + phy_init sit exactly where they always did (table at 0x8000, nvs at
+# 0x9000), so a robot flashed from an older build keeps its Wi-Fi, servo
+# calibration and every other NVS setting across the upgrade.
+#
+# local-claw branch: the factory slot grew from 2.5 MB to 6 MB and a `model`
+# partition appeared. The mpv2 movement tables (trajopt_jump.h, ~600 KB), the
+# LCD face (LVGL + GIF decoder), the speaker/mic path and the wake word
+# (esp-sr: ~1 MB of code plus the 580 KB WakeNet model in `model`) do not fit
+# the old slot. The storage partition MOVED (0x290000 -> 0x700000), so an
+# `idf.py flash` over an older build loses the LittleFS contents (installed
+# skills, uploaded Lua, cached PWA). The PWA is re-deployed from the firmware
+# at boot; skills have to be re-installed.
+#
+# Name,   Type, SubType,  Offset,   Size,     Flags
 nvs,      data, nvs,      0x9000,   0x6000,
 phy_init, data, phy,      0xF000,   0x1000,
-factory,  app,  factory,  0x10000,  0x280000,
-storage,  data, littlefs, 0x290000, 0xD70000,
+factory,  app,  factory,  0x10000,  0x5F0000,
+model,    data, spiffs,   0x600000, 0x100000,
+storage,  data, littlefs, 0x700000, 0x900000,

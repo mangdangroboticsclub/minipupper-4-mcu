@@ -12,11 +12,16 @@ set(sources
     "network/crypto.cc"
     "network/chat_ws.cc"
     "network/marketplace_proxy.cc"
+    # The robot: mpv2's gait, kinematics, moves and servo driver (local-claw
+    # branch: these are mpv2-claw's components/mpx_robot/src/robot files, see
+    # .cursor/PORT_NOTES.md). imu.cc stays this firmware's (shared I2C bus).
     "robot/robot.cc"
     "robot/driver_board.c"
     "robot/stanford_gait.cc"
     "robot/stanford_kinematics.cc"
+    "robot/alive.c"
     "robot/imu.cc"
+    "robot/mpx_robot_c_api.cc"
     "platform/shared_i2c.cc"
     "util/trace_ring.cc"
     "lua/lua_vm.cc"
@@ -74,6 +79,7 @@ idf_component_register(
         esp_driver_spi
         esp_driver_i2c
         esp_driver_gpio
+        esp_timer
         esp_http_server
         esp_wifi
         esp_netif

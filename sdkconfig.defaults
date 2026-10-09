@@ -27,3 +27,14 @@ CONFIG_SPIRAM_BOOT_INIT=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# local-claw: the mpv2 movement players (robot/moves_mpe.inc) pace their 5 ms
+# frames with vTaskDelay(1) against esp_timer. At the IDF default of 100 Hz a
+# tick is 10 ms, so every table move would play at half speed and the jumps
+# would not leave the ground. mpv2 / mpv2-claw run at 1000 Hz; so does this.
+CONFIG_FREERTOS_HZ=1000
+
+# local-claw: 6 MB app + a 1 MB esp-sr model partition (see partitions.csv).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

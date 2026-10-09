@@ -136,62 +136,13 @@ static int l_robot_gait(lua_State *L)
  */
 static int l_robot_get_mode(lua_State *L)
 {
-    robot::GaitCmd cmd = robot::current_gait_cmd();
-    const char *name = "none";
-
-    switch (cmd) {
-        case robot::GaitCmd::None:           name = "none";        break;
-        case robot::GaitCmd::Init:           name = "init";        break;
-        case robot::GaitCmd::Step:           name = "step";        break;
-        case robot::GaitCmd::Advance:        name = "advance";     break;
-        case robot::GaitCmd::Back:           name = "back";        break;
-        case robot::GaitCmd::Left:           name = "left";        break;
-        case robot::GaitCmd::Right:          name = "right";       break;
-        case robot::GaitCmd::TurnL:          name = "turnL";       break;
-        case robot::GaitCmd::TurnR:          name = "turnR";       break;
-        case robot::GaitCmd::Jump:           name = "jump";        break;
-        case robot::GaitCmd::JumpFwd:        name = "jumpfwd";     break;
-        case robot::GaitCmd::Roll:           name = "roll";        break;
-        case robot::GaitCmd::Pitch:          name = "pitch";       break;
-        case robot::GaitCmd::Stretch:        name = "stretch";     break;
-        case robot::GaitCmd::Twerk:          name = "twerk";       break;
-        case robot::GaitCmd::LookUp:         name = "lookup";      break;
-        case robot::GaitCmd::LookDown:       name = "lookdown";    break;
-        case robot::GaitCmd::LookLeft:       name = "lookleft";    break;
-        case robot::GaitCmd::LookRight:      name = "lookright";   break;
-        case robot::GaitCmd::TestSpeed:      name = "testspeed";   break;
-        case robot::GaitCmd::LookUpperLeft:  name = "lookul";      break;
-        case robot::GaitCmd::LookUpperRight: name = "lookur";      break;
-        case robot::GaitCmd::LookLowerLeft:  name = "lookll";      break;
-        case robot::GaitCmd::LookLowerRight: name = "looklr";      break;
-        case robot::GaitCmd::ForelegLiftL:   name = "flegL";       break;
-        case robot::GaitCmd::ForelegLiftR:   name = "flegR";       break;
-        case robot::GaitCmd::BacklegLiftL:   name = "blegL";       break;
-        case robot::GaitCmd::BacklegLiftR:   name = "blegR";       break;
-        case robot::GaitCmd::HeightUp:       name = "heightup";    break;
-        case robot::GaitCmd::HeightDown:     name = "heightdown";  break;
-        case robot::GaitCmd::Balance:        name = "balance";     break;
-        case robot::GaitCmd::BowBack:        name = "bowback";     break;
-        case robot::GaitCmd::BodyCycle:      name = "bodycycle";   break;
-        case robot::GaitCmd::HeadEllipse:    name = "headellipse"; break;
-        case robot::GaitCmd::MoveLeftFront:  name = "moveLF";      break;
-        case robot::GaitCmd::MoveRightFront: name = "moveRF";      break;
-        case robot::GaitCmd::MoveLeftBack:   name = "moveLB";      break;
-        case robot::GaitCmd::MoveRightBack:  name = "moveRB";      break;
-        case robot::GaitCmd::StanfordWalk:   name = "stanford";    break;
-        case robot::GaitCmd::FrontKick:      name = "frontkick";   break;
-        case robot::GaitCmd::Wiggle:         name = "wiggle";      break;
-        case robot::GaitCmd::ButtShrug:      name = "buttshrug";   break;
-        case robot::GaitCmd::WiggleLeft:     name = "wiggleL";     break;
-        case robot::GaitCmd::WiggleRight:    name = "wiggleR";     break;
-        case robot::GaitCmd::ButtShrugLeft:  name = "buttshrugL";  break;
-        case robot::GaitCmd::ButtShrugRight: name = "buttshrugR";  break;
-        case robot::GaitCmd::BodyAttitude:   name = "attitude";    break;
-    }
-
-    lua_pushstring(L, name);
+    /* One table, in robot.cc (gait_to_name): this used to be a 46-case
+     * switch that had to be edited every time a move was added. */
+    const char *name = robot::gait_to_name(robot::current_gait_cmd());
+    lua_pushstring(L, name ? name : "none");
     return 1;
 }
+
 
 /* ── Configuration ────────────────────────────────────────────────────── */
 
