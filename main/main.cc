@@ -13,6 +13,7 @@
 #include "robot/mpx_robot.h"
 #include "robot/robot.h"
 #include "sdk/wasm_host_functions.h"
+#include "wasm/registry.h"
 #include "wasm/wasm_sandbox.h"
 
 static const char *TAG = "main";
@@ -70,6 +71,11 @@ extern "C" void app_main(void)
 		ESP_LOGE(TAG, "PWA asset deployment failed");
 		return;
 	}
+
+	// ── Skill registry: what the installed .wasm files declare ─
+	// Before the HTTP server, so /v1/robot/moves and /v1/skills/registry
+	// are complete from the first request. Rescanned on upload and delete.
+	skills::rescan();
 
 	// ── Start HTTP + WebSocket server (Core 0, Priority 6) ───
 	if (!network::start_http_server()) {
