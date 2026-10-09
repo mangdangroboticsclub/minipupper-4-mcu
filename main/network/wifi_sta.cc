@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "esp_event.h"
 #include "esp_log.h"
@@ -323,6 +324,67 @@ std::string wifi_sta_get_ip()
 std::string wifi_sta_get_ssid()
 {
     return s_current_ssid;
+}
+
+/* ── Scan (ported from mpv2-claw http_server_mpx_wifi_api.c) ── */
+
+namespace {
+constexpr uint16_t SCAN_MAX = 24;
+
+int scan_bars(int rssi)
+{
+    return rssi >= -60 ? 3 : rssi >= -72 ? 2 : 1;
+}
+}  // namespace
+
+esp_err_t wifi_sta_scan(std::vector<ScanResult> &out)
+{
+    out.clear();
+
+    // An AP-only robot has no station interface to scan with. Switching the
+    // mode on a running driver brings STA up without dropping the AP.
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_AP) {
+        esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "scan: APSTA switch failed: %s", esp_err_to_name(err));
+            return err;
+        }
+    }
+
+    wifi_scan_config_t scan = {};
+    scan.show_hidden = false;
+    scan.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    scan.scan_time.active.min = 30;
+    scan.scan_time.active.max = 80;
+    scan.home_chan_dwell_time = 60;
+
+    esp_err_t err = esp_wifi_scan_start(&scan, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "scan refused: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    std::vector<wifi_ap_record_t> recs(SCAN_MAX);
+    uint16_t n = SCAN_MAX;
+    if (esp_wifi_scan_get_ap_records(&n, recs.data()) != ESP_OK) {
+        n = 0;
+    }
+
+    // The driver hands records back strongest first, so the first time a
+    // name appears is its best access point; later repeats are skipped.
+    for (uint16_t i = 0; i < n; ++i) {
+        const char *ssid = reinterpret_cast<const char *>(recs[i].ssid);
+        if (!ssid[0]) continue;
+        bool seen = false;
+        for (const auto &r : out) {
+            if (r.ssid == ssid) { seen = true; break; }
+        }
+        if (seen) continue;
+        out.push_back(ScanResult{ ssid, recs[i].rssi, scan_bars(recs[i].rssi),
+                                  recs[i].authmode != WIFI_AUTH_OPEN });
+    }
+    return ESP_OK;
 }
 
 }  // namespace network
