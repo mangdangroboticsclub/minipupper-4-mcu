@@ -23,6 +23,10 @@ set(sources
     "robot/alive.c"
     "robot/imu.cc"
     "robot/mpx_robot_c_api.cc"
+    # The Raspberry Pi (ROS 2) link on J-PI, mpv2's protocol.
+    "pi/pi_link.cc"
+    "pi/pi_audio.cc"
+    "pi/pi_video.cc"
     # Microphone + speaker (mpv2-claw's mpx_audio, direct I2S/codec init).
     "audio/mpx_audio.c"
     "audio/mpx_audio_tune.c"
@@ -93,7 +97,7 @@ endif()
 # ── Register component ───────────────────────────────────────
 idf_component_register(
     SRCS        ${sources}
-    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "audio"
+    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "pi" "audio"
     EMBED_FILES
         ${common_assets}
         ${design_assets}
@@ -107,6 +111,7 @@ idf_component_register(
         esp_driver_spi
         esp_driver_i2c
         esp_driver_gpio
+        esp_driver_uart
         esp_driver_i2s
         esp_timer
         esp_http_server

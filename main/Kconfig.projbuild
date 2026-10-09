@@ -281,4 +281,52 @@ config APP_AUDIO_ENABLE
         the wake word and voice. Off: every audio call answers
         ESP_ERR_NOT_SUPPORTED and the voice features are unavailable.
 
+# ── Raspberry Pi (ROS 2) link on J-PI ────────────────────────────────
+# mpv2's protocol (main/pi/pi_protocol.h), ported from mpv2-claw.
+
+config APP_PI_LINK_ENABLE
+    bool "Raspberry Pi (ROS) link on the J-PI header"
+    default y
+    help
+        Start the UART1 link to a Raspberry Pi running the ROS 2 bridge
+        (ros2jazzympv2/mini_pupper_esp_bridge). With nothing on J-PI the
+        robot behaves exactly as before. A Pi that holds HOST_PRESENT
+        (IO3) high and heartbeats with WANT_CONTROL takes the robot into
+        slave mode: only the Pi moves it until it lets go or times out.
+
+if APP_PI_LINK_ENABLE
+
+config APP_PI_LINK_UART_BAUD
+    int "Pi link UART baud rate"
+    default 921600
+    help
+        Must match the bridge's `baud` parameter. 921600 carries the 50 Hz
+        STATE stream, the Pi's music and its camera picture.
+
+config APP_PI_LINK_TIMEOUT_MS
+    int "Heartbeat timeout (ms)"
+    range 100 5000
+    default 300
+    help
+        Without a heartbeat for this long the robot leaves slave mode,
+        stops and stands.
+
+config APP_PI_LINK_STATE_HZ
+    int "Default STATE telemetry rate (Hz)"
+    range 5 100
+    default 50
+    help
+        How often the robot streams servo angles, IMU and velocity to the
+        Pi when the heartbeat does not ask for a rate.
+
+config APP_PI_LINK_REQUIRE_HOST_PIN
+    bool "Require HOST_PRESENT (IO3) high for slave mode"
+    default y
+    help
+        Slave mode needs both a fresh WANT_CONTROL heartbeat and the
+        yellow HOST_PRESENT wire high. Turn off only for bench tests with
+        a bare UART and no IO3 wire.
+
+endif  # APP_PI_LINK_ENABLE
+
 endmenu

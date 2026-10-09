@@ -24,6 +24,7 @@
 
 #include "fs/littlefs_manager.h"
 #include "lua/lua_vm.h"
+#include "pi/pi_link.h"
 #include "sdkconfig.h"
 #include "robot/robot.h"
 #include "robot/driver_board.h"
@@ -853,6 +854,17 @@ static const char *gait_cmd_to_name(robot::GaitCmd cmd)
     return robot::gait_to_name(cmd);
 }
 
+/* 423 while the Raspberry Pi (ROS) drives the robot. robot.cc fences local
+ * motion off anyway (robot::master_active()); a clear answer beats a move that
+ * never happens. Same body as mpv2-claw, which the PWA already understands. */
+static esp_err_t send_pi_in_control(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "423 Locked");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, R"({"ok":false,"error":"pi_in_control","detail":"The Raspberry Pi (ROS) is controlling the robot"})", -1);
+    return ESP_OK;
+}
+
 /* POST /v1/robot/gait — set gait mode */
 static esp_err_t api_robot_gait(httpd_req_t *req)
 {
@@ -873,6 +885,7 @@ static esp_err_t api_robot_gait(httpd_req_t *req)
     }
 
     ESP_LOGI(TAG, "POST /v1/robot/gait  mode=%s", mode.c_str());
+    if (robot::master_active()) return send_pi_in_control(req);
 
     robot::GaitCmd cmd = robot::GaitCmd::None;
     if (!robot::gait_from_name(mode.c_str(), cmd)) {
@@ -958,6 +971,7 @@ static esp_err_t api_robot_look(httpd_req_t *req)
             pitch = std::strtof(val, nullptr);
         }
     }
+    if (robot::master_active()) return send_pi_in_control(req);
     robot::look_input(yaw, pitch);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, R"({"ok":true})", -1);
@@ -1039,6 +1053,7 @@ static esp_err_t api_robot_joy(httpd_req_t *req)
     const float s = json_get_float(buf, "s", 0.0f);
     const float t = json_get_float(buf, "t", 0.0f);
 
+    if (robot::master_active()) return send_pi_in_control(req);
     robot::joy_input(f, s, t);
 
     httpd_resp_set_type(req, "application/json");
@@ -1066,10 +1081,28 @@ static esp_err_t api_robot_status(httpd_req_t *req)
         n += std::snprintf(resp + n, sizeof(resp) - n, "%.1f%s",
                            robot::get_offset(i), (i < 12) ? "," : "");
     }
-    n += std::snprintf(resp + n, sizeof(resp) - n, "]}");
+    /* mpv2's field: "standalone", "monitor" or "slave" (the Raspberry Pi link). */
+    n += std::snprintf(resp + n, sizeof(resp) - n, R"(],"pi_link":"%s"})",
+                       pi_link::state_str());
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, -1);
+    return ESP_OK;
+}
+
+/* GET /v1/pi/status — the Raspberry Pi link, for the app and for debugging
+ * the wiring: host_pin shows the yellow wire (IO3), heartbeat the UART. Same
+ * fields as mpv2 / mpv2-claw. */
+static esp_err_t api_pi_status(httpd_req_t *req)
+{
+    char buf[768];
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (pi_link::status_json(buf, sizeof(buf)) < 0) {
+        httpd_resp_send(req, R"({"state":"standalone","in_control":false,"error":"pi link unavailable"})", -1);
+        return ESP_OK;
+    }
+    httpd_resp_send(req, buf, -1);
     return ESP_OK;
 }
 
@@ -1636,12 +1669,18 @@ static esp_err_t api_wifi_status(httpd_req_t *req)
         case StaState::Failed:       sta_state_str = "failed";       break;
     }
 
+    /* "pi": {"ip": "..."} -- empty when no Pi has reported in the last 6 s.
+     * The PWA shows a Pi section in Settings when this object is present. */
+    char pi_ip[16] = "";
+    (void)pi_link::ip(pi_ip, sizeof(pi_ip));
+
     char resp[512];
     std::snprintf(resp, sizeof(resp),
         R"({"ap":{"ssid":"%s","ip":"%s"})"
-        R"(,"sta":{"state":"%s","ssid":"%s","ip":"%s"}})",
+        R"(,"sta":{"state":"%s","ssid":"%s","ip":"%s"})"
+        R"(,"pi":{"ip":"%s"}})",
         wifi_ap_get_ssid(), AP_IP_ADDR,
-        sta_state_str, sta_ssid.c_str(), sta_ip.c_str());
+        sta_state_str, sta_ssid.c_str(), sta_ip.c_str(), pi_ip);
 
     ESP_LOGI(TAG, "GET  /v1/wifi/status  ap_ssid=%s sta=%s ssid=%s ip=%s",
              wifi_ap_get_ssid(), sta_state_str, sta_ssid.c_str(), sta_ip.c_str());
@@ -2350,8 +2389,8 @@ bool start_http_server()
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    // 49 register_api() + up to 12 register_static() + 2 websockets + 4
-    // marketplace wildcard methods = 67.
+    // 50 register_api() + up to 12 register_static() + 2 websockets + 4
+    // marketplace wildcard methods = 68.
     // See the note on register_uri() - this number is load-bearing, and being
     // one short deletes a route without saying so. Each slot is a pointer, so
     // the headroom is cheap.
@@ -2495,6 +2534,7 @@ bool start_http_server()
 
     // ── Register WiFi config API endpoints ──
     register_api(s_server, "GET",  "/v1/wifi/status",          HTTP_GET,  api_wifi_status);
+    register_api(s_server, "GET",  "/v1/pi/status",            HTTP_GET,  api_pi_status);
     register_api(s_server, "GET",  "/v1/wifi/scan",            HTTP_GET,  api_wifi_scan);
     register_api(s_server, "POST", "/v1/wifi/connect",         HTTP_POST, api_wifi_connect);
     register_api(s_server, "POST", "/v1/wifi/disconnect",      HTTP_POST, api_wifi_disconnect);

@@ -11,6 +11,7 @@
 #include "network/wifi_ap.h"
 #include "network/wifi_sta.h"
 #include "network/www_assets.h"
+#include "pi/pi_link.h"
 #include "robot/mpx_robot.h"
 #include "robot/robot.h"
 #include "sdk/wasm_host_functions.h"
@@ -30,6 +31,14 @@ static const mpx_robot_skill_hooks_t s_skill_hooks = {
 	.request_stop     = [] { wasm::request_stop(); },
 };
 
+/* The Raspberry Pi took (true) or released (false) the robot. Runs on the
+ * Pi link task: nothing here may block. */
+static void on_master_changed(bool active)
+{
+	ESP_LOGW(TAG, "Raspberry Pi %s control of the robot",
+	         active ? "took" : "released");
+}
+
 static void init_nvs()
 {
 	esp_err_t ret = nvs_flash_init();
@@ -46,6 +55,7 @@ extern "C" void app_main(void)
 
 	// ── Robot HAL (servo bus, gait task on Core 1) ─────────────
 	mpx_robot_set_skill_hooks(&s_skill_hooks);
+	robot::set_master_observer(on_master_changed);
 	if (!robot::init()) {
 		ESP_LOGE(TAG, "Robot HAL init failed — continuing without servo control");
 	}
@@ -56,6 +66,15 @@ extern "C" void app_main(void)
 	if (mpx_audio_init() != ESP_OK) {
 		ESP_LOGW(TAG, "Audio init failed — no microphone, no speaker");
 	}
+
+	// ── Raspberry Pi (ROS 2) link on J-PI ─────────────────────
+	// Straight after the robot: a Pi that takes control must always be
+	// able to lose it, so the link must not wait on the network.
+#if CONFIG_APP_PI_LINK_ENABLE
+	if (pi_link::init() != ESP_OK) {
+		ESP_LOGW(TAG, "Pi link init failed — continuing standalone");
+	}
+#endif
 
 	// Mount LittleFS (for .wasm storage and PWA assets)
 	if (!fs::init_littlefs()) {
