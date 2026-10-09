@@ -270,4 +270,15 @@ config APP_LUA_TASK_STACK_SIZE
 
 endif  # APP_LUA_ENABLE
 
+# ── Audio: ES7210 microphones + MAX98357A speaker on I2S0 ───────────
+
+config APP_AUDIO_ENABLE
+    bool "Microphone and speaker (ES7210 + MAX98357A on I2S0)"
+    default y
+    help
+        Bring up the board's audio path (main/audio/mpx_audio.c): the
+        speaker for voice replies and the Pi's music, the microphones for
+        the wake word and voice. Off: every audio call answers
+        ESP_ERR_NOT_SUPPORTED and the voice features are unavailable.
+
 endmenu

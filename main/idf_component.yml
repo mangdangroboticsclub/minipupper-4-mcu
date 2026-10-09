@@ -11,6 +11,12 @@ dependencies:
   joltwallet/littlefs: ^1.22.1
   espressif/lua: ^5.5.0
 
+  ## ── Audio (local-claw): ES7210 microphone ADC driver + the esp_codec_dev
+  ## framework around it. The MAX98357A needs no codec at all; audio/
+  ## mpx_audio.c writes to the I2S TX channel directly. Same version line
+  ## mpv2-claw builds with (1.6.x).
+  espressif/esp_codec_dev: ^1.6.2
+
   ## ── IMU: BMI270 + BMM150 ─────────────────────────────────
   ##
   ## The BMI270 will not produce a sample until an 8 KB Bosch configuration

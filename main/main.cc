@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 
+#include "audio/mpx_audio.h"
 #include "fs/littlefs_manager.h"
 #include "lua/lua_vm.h"
 #include "network/chat_ws.h"
@@ -47,6 +48,13 @@ extern "C" void app_main(void)
 	mpx_robot_set_skill_hooks(&s_skill_hooks);
 	if (!robot::init()) {
 		ESP_LOGE(TAG, "Robot HAL init failed — continuing without servo control");
+	}
+
+	// ── Audio: microphones + speaker ──────────────────────────
+	// After the robot (the IMU and the ES7210 share the I2C bus; the IMU
+	// claims it first) and before the Pi link, which plays the Pi's music.
+	if (mpx_audio_init() != ESP_OK) {
+		ESP_LOGW(TAG, "Audio init failed — no microphone, no speaker");
 	}
 
 	// Mount LittleFS (for .wasm storage and PWA assets)

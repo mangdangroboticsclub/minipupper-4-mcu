@@ -23,6 +23,9 @@ set(sources
     "robot/alive.c"
     "robot/imu.cc"
     "robot/mpx_robot_c_api.cc"
+    # Microphone + speaker (mpv2-claw's mpx_audio, direct I2S/codec init).
+    "audio/mpx_audio.c"
+    "audio/mpx_audio_tune.c"
     "platform/shared_i2c.cc"
     "util/trace_ring.cc"
     "lua/lua_vm.cc"
@@ -90,7 +93,7 @@ endif()
 # ── Register component ───────────────────────────────────────
 idf_component_register(
     SRCS        ${sources}
-    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util"
+    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "audio"
     EMBED_FILES
         ${common_assets}
         ${design_assets}
@@ -99,10 +102,12 @@ idf_component_register(
         wasm-micro-runtime
         lua
         littlefs
+        esp_codec_dev
         driver
         esp_driver_spi
         esp_driver_i2c
         esp_driver_gpio
+        esp_driver_i2s
         esp_timer
         esp_http_server
         esp_wifi
