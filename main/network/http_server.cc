@@ -97,7 +97,7 @@ std::string uri_to_path(const char *uri)
 
     // Map favicon.ico to the design-appropriate SVG icon
     if (std::strcmp(uri, "/favicon.ico") == 0) {
-#ifdef CONFIG_PWA_DESIGN_REDESIGN
+#if defined(CONFIG_PWA_DESIGN_REDESIGN) || defined(CONFIG_PWA_DESIGN_CLAW)
         return std::string(WWW_ROOT) + "/md.svg";
 #else
         return std::string(WWW_ROOT) + "/icon.svg";
@@ -214,9 +214,14 @@ esp_err_t static_handler(httpd_req_t *req)
     const std::string mime = get_mime_type(fs_path.c_str());
     const bool gzip = accepts_gzip(req);
 
-    // Try gzipped first, then uncompressed
+    // Try gzipped first, then uncompressed. The claw design ships its large
+    // files as .gz only (see main/CMakeLists.txt), so as a last resort the
+    // .gz goes out even to a client that did not advertise gzip: every
+    // browser decodes it anyway, and the alternative is the SPA fallback
+    // handing index.html to a request for m.js.
     if ((gzip && try_serve(req, fs_path + ".gz", mime.c_str(), true)) ||
-        try_serve(req, fs_path, mime.c_str(), false)) {
+        try_serve(req, fs_path, mime.c_str(), false) ||
+        (!gzip && try_serve(req, fs_path + ".gz", mime.c_str(), true))) {
         return ESP_OK;
     }
 
@@ -2405,7 +2410,13 @@ bool start_http_server()
     register_static("/manifest.json");
     register_static("/sw.js");
     register_static("/favicon.ico");
-#ifdef CONFIG_PWA_DESIGN_REDESIGN
+#if defined(CONFIG_PWA_DESIGN_CLAW)
+    register_static("/md.svg");
+    register_static("/eye-open.svg");
+    register_static("/eye-close.svg");
+    register_static("/m-pupper3d.js");         // lazily loaded three.js viewer
+    register_static("/pupper_model.json");     // three.js calibration model
+#elif defined(CONFIG_PWA_DESIGN_REDESIGN)
     register_static("/md.svg");
     register_static("/eye-open.svg");
     register_static("/eye-close.svg");

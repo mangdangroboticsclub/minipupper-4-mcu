@@ -30,7 +30,26 @@ set(sources
 )
 
 # ── Design-specific assets ───────────────────────────────────
-if(CONFIG_PWA_DESIGN_REDESIGN)
+if(CONFIG_PWA_DESIGN_CLAW)
+    # The mpv2-claw phone app (pwa-claw/, ported). It is about twice the size
+    # of the redesign (three.js model viewer + its 157 KB model), so the big
+    # files are embedded as .gz ONLY: every browser that can run this app
+    # accepts gzip, and static_handler() falls back to the .gz even for one
+    # that does not. Raw+gz of everything would not fit the 2.5 MB app slot.
+    message(STATUS "PWA design: claw (mpv2 app)")
+    set(pwa_www_dir "../pwa-claw/www")
+    set(design_assets
+        "../pwa-claw/www/md.svg"
+        "../pwa-claw/www/md.svg.gz"
+        "../pwa-claw/www/eye-open.svg"
+        "../pwa-claw/www/eye-open.svg.gz"
+        "../pwa-claw/www/eye-close.svg"
+        "../pwa-claw/www/eye-close.svg.gz"
+        "../pwa-claw/www/m-pupper3d.js.gz"
+        "../pwa-claw/www/pupper_model.json.gz"
+    )
+    set(big_assets_gz_only TRUE)
+elseif(CONFIG_PWA_DESIGN_REDESIGN)
     message(STATUS "PWA design: redesign (light theme)")
     set(pwa_www_dir "../pwa-redesign/www")
     set(design_assets
@@ -50,19 +69,23 @@ else()
     )
 endif()
 
-# ── Assets shared by both designs (same names, different content) ──
+# ── Assets shared by all designs (same names, different content) ──
 set(common_assets
     "${pwa_www_dir}/index.html"
     "${pwa_www_dir}/index.html.gz"
-    "${pwa_www_dir}/index.css"
     "${pwa_www_dir}/index.css.gz"
-    "${pwa_www_dir}/m.js"
     "${pwa_www_dir}/m.js.gz"
     "${pwa_www_dir}/manifest.json"
     "${pwa_www_dir}/manifest.json.gz"
     "${pwa_www_dir}/sw.js"
     "${pwa_www_dir}/sw.js.gz"
 )
+if(NOT big_assets_gz_only)
+    list(APPEND common_assets
+        "${pwa_www_dir}/index.css"
+        "${pwa_www_dir}/m.js"
+    )
+endif()
 
 # ── Register component ───────────────────────────────────────
 idf_component_register(

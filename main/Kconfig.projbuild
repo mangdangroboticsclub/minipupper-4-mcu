@@ -2,10 +2,19 @@ menu "MPX Dog App Configuration"
 
 choice PWA_DESIGN
     prompt "PWA UI Design"
-    default PWA_DESIGN_REDESIGN
+    default PWA_DESIGN_CLAW
     help
         Select which PWA (Progressive Web App) UI design to embed
         in the firmware and serve from the robot's web server.
+
+config PWA_DESIGN_CLAW
+    bool "Claw (mpv2-claw app: look pad, rest, Wi-Fi picker, skill registry)"
+    help
+        The phone app ported from mpv2-claw. Adds the analog look pad,
+        rest-when-idle setting, Wi-Fi network picker, skill registry
+        view, 3D calibration model and the redesigned Settings hub.
+        Sections that need firmware this build does not have (AI,
+        Display, Raspberry Pi) hide themselves.  Source: pwa-claw/
 
 config PWA_DESIGN_ORIGINAL
     bool "Original (dark theme)"
