@@ -329,4 +329,39 @@ config APP_PI_LINK_REQUIRE_HOST_PIN
 
 endif  # APP_PI_LINK_ENABLE
 
+# ── Display: ST7789 on SPI3, the face and the Display page ─────────
+# mpv2-claw's cap_display (main/display/), ported.
+
+config APP_DISPLAY_ENABLE
+    bool "Screen: the robot's face and GIF animations (ST7789 on SPI3)"
+    default y
+    help
+        Bring up the 320x240 panel with LVGL and draw the robot's face on
+        it; the app's Display page (/v1/display) plays GIFs from
+        <fs>/display. Off: the /v1/display routes answer 404 and the app
+        hides the Display row, as on a board without a screen.
+
+if APP_DISPLAY_ENABLE
+
+config APP_DISPLAY_FLIP180_DEFAULT
+    bool "Turn the screen picture 180 degrees by default"
+    default y
+    help
+        display_hw programs the ST7789 the way the panel is wired; on the
+        assembled robot that reads upside down. With this on, the picture
+        is turned 180 degrees at every boot. The app's Display page
+        changes it at run time (saved in NVS).
+
+config APP_DISPLAY_BUFFER_LINES
+    int "LVGL draw buffer height, in scan lines"
+    range 4 240
+    default 8
+    help
+        How many scan lines LVGL renders before handing them to the panel.
+        Two buffers of this height live in internal DMA RAM for good
+        (320 x lines x 2 bytes each): 8 lines is 2 x 5 KB. Raise it if the
+        panel feels slow and internal RAM is to spare.
+
+endif  # APP_DISPLAY_ENABLE
+
 endmenu

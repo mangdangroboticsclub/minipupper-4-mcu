@@ -38,3 +38,30 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# local-claw: LVGL for the ST7789 face (main/display). Same choices as
+# mpv2-claw's build: RGB565, the C library allocator (so a 150 KB GIF frame
+# buffer lands in PSRAM through the normal malloc policy instead of LVGL's
+# fixed pool), the stdio file driver on drive letter 'S' (83) so the GIF
+# decoder streams "S:/fs/display/x.gif", and LVGL's bundled GIF decoder,
+# which cap_display_face.c drives directly. Widgets the face does not use
+# are left at LVGL's defaults; they cost flash only when referenced.
+CONFIG_LV_CONF_SKIP=y
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_DEF_REFR_PERIOD=33
+CONFIG_LV_USE_FS_STDIO=y
+CONFIG_LV_FS_STDIO_LETTER=83
+CONFIG_LV_FS_STDIO_PATH=""
+CONFIG_LV_FS_STDIO_CACHE_SIZE=4096
+CONFIG_LV_USE_GIF=y
+CONFIG_LV_USE_CANVAS=y
+CONFIG_LV_USE_LINE=y
+CONFIG_LV_USE_IMAGE=y
+CONFIG_LV_USE_LABEL=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+CONFIG_LV_BUILD_EXAMPLES=n
+CONFIG_LV_BUILD_DEMOS=n

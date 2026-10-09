@@ -132,6 +132,23 @@
     }
     busy = false;
   }
+  // ── Screen settings (mpx-dog: the firmware has no console, so the knobs
+  // mpv2-claw keeps on `display flip|mirror|eyes` ride on POST /v1/display;
+  // the section only shows when GET reports them) ──
+  const hasScreenKnobs = $derived(st && typeof st.flip180 === "boolean");
+  let brightnessDraft = $state(null);   // slider value while dragging
+  const brightness = $derived(brightnessDraft ?? st?.brightness ?? 80);
+  function setScreen(body) {
+    if (busy) return;
+    post(body);
+  }
+  function commitBrightness() {
+    if (brightnessDraft == null) return;
+    const v = brightnessDraft;
+    brightnessDraft = null;
+    if (v !== st?.brightness) post({ brightness: v });
+  }
+
   async function remove(id) {
     if (confirmDel !== id) { confirmDel = id; return; }
     confirmDel = "";
@@ -236,6 +253,51 @@
       </div>
     </section>
 
+    {#if hasScreenKnobs}
+      <section>
+        <h2>Screen</h2>
+        <div class="group">
+          <div class="row">
+            <span class="txt">
+              <span class="t">Brightness</span>
+              <span class="d">{brightness}%</span>
+            </span>
+            <input class="slider" type="range" min="5" max="100" step="5" value={brightness} disabled={busy}
+                   aria-label="Screen brightness"
+                   oninput={(e) => (brightnessDraft = Number(e.currentTarget.value))}
+                   onchange={commitBrightness} />
+          </div>
+          <div class="row">
+            <span class="txt">
+              <span class="t">Turned 180°</span>
+              <span class="d">If the eyes are upside down</span>
+            </span>
+            <button type="button" class="switch" class:on={st.flip180} role="switch" aria-checked={st.flip180} aria-label="Turn the picture 180 degrees" disabled={busy} onclick={() => setScreen({ flip180: !st.flip180 })}>
+              <span class="knob"></span>
+            </button>
+          </div>
+          <div class="row">
+            <span class="txt">
+              <span class="t">Mirrored</span>
+              <span class="d">Left and right swapped</span>
+            </span>
+            <button type="button" class="switch" class:on={st.mirror} role="switch" aria-checked={st.mirror} aria-label="Mirror the picture" disabled={busy} onclick={() => setScreen({ mirror: !st.mirror })}>
+              <span class="knob"></span>
+            </button>
+          </div>
+          <div class="row">
+            <span class="txt">
+              <span class="t">Alive eyes</span>
+              <span class="d">{st.eyes_alive ? "Follow the head, react to being picked up" : "Classic: blinks and expressions only"}</span>
+            </span>
+            <button type="button" class="switch" class:on={st.eyes_alive} role="switch" aria-checked={st.eyes_alive} aria-label="Alive eyes" disabled={busy} onclick={() => setScreen({ eyes_alive: !st.eyes_alive })}>
+              <span class="knob"></span>
+            </button>
+          </div>
+        </div>
+      </section>
+    {/if}
+
     {#if msg}<p class="msg" class:bad={msgBad} role="status">{msg}</p>{/if}
 
     {#if st?.storage}
@@ -282,6 +344,7 @@
   .knob { width: 26px; height: 26px; border-radius: 13px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
   .switch.on .knob { background: var(--mpx-yellow); }
   .switch:disabled { opacity: 0.6; }
+  .slider { width: 46%; accent-color: var(--ink); flex-shrink: 0; }
 
   .pickrow { display: flex; align-items: center; }
   .pickrow.sel { background: #FFFBDA; }

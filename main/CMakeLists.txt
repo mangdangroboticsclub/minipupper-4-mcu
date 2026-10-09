@@ -30,6 +30,17 @@ set(sources
     # Microphone + speaker (mpv2-claw's mpx_audio, direct I2S/codec init).
     "audio/mpx_audio.c"
     "audio/mpx_audio_tune.c"
+    # The screen: mpv2-claw's cap_display (face, GIFs, orientation, the Pi's
+    # camera picture) on a small display_hw service (ST7789 + esp_lvgl_port)
+    # in place of ESP-Claw's display_service. Compiled with the display off
+    # too (CONFIG_APP_DISPLAY_ENABLE=n): every entry point then says "no panel".
+    "display/display_hw.c"
+    "display/cap_display.c"
+    "display/cap_display_face.c"
+    "display/cap_display_orient.c"
+    "display/display_assets.cc"
+    "display/display_glue.cc"
+    "network/http_display.cc"
     "platform/shared_i2c.cc"
     "util/trace_ring.cc"
     "lua/lua_vm.cc"
@@ -97,22 +108,31 @@ endif()
 # ── Register component ───────────────────────────────────────
 idf_component_register(
     SRCS        ${sources}
-    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "pi" "audio"
+    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "pi" "audio" "display"
     EMBED_FILES
         ${common_assets}
         ${design_assets}
+        # The Display page's built-in animations, copied to <fs>/display at boot.
+        "display/assets/blink.gif"
+        "display/assets/smile.gif"
+        "display/assets/sleepy.gif"
     REQUIRES
         nvs_flash
         wasm-micro-runtime
         lua
         littlefs
         esp_codec_dev
+        esp_lvgl_port
+        lvgl
+        esp_new_jpeg
         driver
         esp_driver_spi
         esp_driver_i2c
         esp_driver_gpio
         esp_driver_uart
         esp_driver_i2s
+        esp_driver_ledc
+        esp_lcd
         esp_timer
         esp_http_server
         esp_wifi

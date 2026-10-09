@@ -1,5 +1,6 @@
 #include "network/http_server.h"
 #include "network/chat_ws.h"
+#include "network/http_display.h"
 #include "network/marketplace_proxy.h"
 #include "network/wifi_ap.h"
 #include "network/wifi_sta.h"
@@ -2540,6 +2541,9 @@ bool start_http_server()
     register_api(s_server, "POST", "/v1/wifi/disconnect",      HTTP_POST, api_wifi_disconnect);
     register_api(s_server, "POST", "/v1/wifi/forget",          HTTP_POST, api_wifi_forget);
     register_api(s_server, "POST", "/v1/wifi/ap-config",       HTTP_POST, api_wifi_ap_config);
+
+    // ── The screen (ported from mpv2-claw): 5 routes, in http_display.cc ──
+    network::register_display_routes(s_server, register_uri);
 
     // ── Register Lua async enqueue endpoint (non-blocking) ──
     register_api(s_server, "POST", "/v1/lua/enqueue",          HTTP_POST, api_lua_enqueue);

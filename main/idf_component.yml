@@ -17,6 +17,17 @@ dependencies:
   ## mpv2-claw builds with (1.6.x).
   espressif/esp_codec_dev: ^1.6.2
 
+  ## ── Display (local-claw): ST7789 face + GIFs ────────────────
+  ## LVGL pinned to the 9.5 line mpv2-claw's face code was written against
+  ## (it uses LVGL's bundled AnimatedGIF decoder directly, whose header path
+  ## and API moved between minor versions). esp_lvgl_port does the LVGL
+  ## task, tick and esp_lcd flush; the ST7789 driver itself is in ESP-IDF.
+  ## esp_new_jpeg decodes the Raspberry Pi's camera frames (pi_video ->
+  ## cap_display_show_jpeg); without it that call answers NOT_SUPPORTED.
+  lvgl/lvgl: ">=9.5.0,<9.6.0"
+  espressif/esp_lvgl_port: ^2.6.0
+  espressif/esp_new_jpeg: ^1.0.2
+
   ## ── IMU: BMI270 + BMM150 ─────────────────────────────────
   ##
   ## The BMI270 will not produce a sample until an 8 KB Bosch configuration

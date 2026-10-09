@@ -4,6 +4,7 @@
 #include "nvs_flash.h"
 
 #include "audio/mpx_audio.h"
+#include "display/display_glue.h"
 #include "fs/littlefs_manager.h"
 #include "lua/lua_vm.h"
 #include "network/chat_ws.h"
@@ -32,11 +33,13 @@ static const mpx_robot_skill_hooks_t s_skill_hooks = {
 };
 
 /* The Raspberry Pi took (true) or released (false) the robot. Runs on the
- * Pi link task: nothing here may block. */
+ * Pi link task: nothing here may block. The screen's "ROS" badge goes
+ * through display_glue's queue. */
 static void on_master_changed(bool active)
 {
 	ESP_LOGW(TAG, "Raspberry Pi %s control of the robot",
 	         active ? "took" : "released");
+	display_glue::on_master_changed(active);
 }
 
 static void init_nvs()
@@ -60,6 +63,12 @@ extern "C" void app_main(void)
 		ESP_LOGE(TAG, "Robot HAL init failed — continuing without servo control");
 	}
 
+	// ── Screen: ST7789 + LVGL, the face ───────────────────────
+	// Straight after the robot (the eyes follow the IMU) and before
+	// anything slow: the face is the first thing on the panel, and the
+	// backlight only comes on once it is drawn (no white flash).
+	display_glue::start_face();
+
 	// ── Audio: microphones + speaker ──────────────────────────
 	// After the robot (the IMU and the ES7210 share the I2C bus; the IMU
 	// claims it first) and before the Pi link, which plays the Pi's music.
@@ -82,6 +91,9 @@ extern "C" void app_main(void)
 		return;
 	}
 
+	// ── Screen: the Display page's GIFs live on LittleFS ──────
+	display_glue::start_animations();
+
 	// ── Network: start Wi-Fi AP (Core 0, Priority 6) ──────────
 	if (!network::init_wifi_ap()) {
 		ESP_LOGE(TAG, "Wi-Fi AP init failed");
@@ -92,6 +104,9 @@ extern "C" void app_main(void)
 	if (!network::init_wifi_sta()) {
 		ESP_LOGW(TAG, "Wi-Fi STA init failed — continuing in AP-only mode");
 	}
+
+	// ── Screen: network line under the eyes, Pi address, ROS badge ─
+	display_glue::start_events();
 
 	// ── Deploy embedded PWA assets to LittleFS ────────────────
 	if (!network::deploy_www_assets()) {
