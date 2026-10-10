@@ -14,6 +14,7 @@
 #include "network/wifi_sta.h"
 #include "network/www_assets.h"
 #include "pi/pi_link.h"
+#include "agent/agent_runtime.h"
 #include "robot/mpx_robot.h"
 #include "robot/robot.h"
 #include "sdk/wasm_host_functions.h"
@@ -160,6 +161,17 @@ extern "C" void app_main(void)
 		ESP_LOGI(TAG, "Lua VM ready — robot bindings registered");
 	}
 	log_internal_heap("HTTP + chat + WASM + Lua");
+
+	// ── The on-device agent (ESP-Claw) ────────────────────────
+	// After the HTTP server and the sandbox (its tools start skills through
+	// them) and the chat pipeline (which bound the agent's outbound before
+	// this), before voice. Its own storage is the "system" partition plus
+	// CONFIG_APP_AGENT_DATA_DIR on the storage LittleFS. Never fatal: with
+	// the agent down the PWA's "cloud" brain still works.
+	if (agent::start() != ESP_OK) {
+		ESP_LOGW(TAG, "on-device agent not running — chat uses the cloud only");
+	}
+	log_internal_heap("agent");
 
 	// ── Voice: wake word, the MangDang voice gateway, music ───
 	// Last, as in mpv2-claw: esp-sr's front end is the biggest consumer of
