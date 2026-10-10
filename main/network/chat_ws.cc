@@ -15,6 +15,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
@@ -469,7 +470,7 @@ static void lua_worker_task(void *arg)
         std::free(step_json);
         std::free(lua_output);
         std::free(done_json);
-        vTaskDelete(nullptr);
+        vTaskSuspend(nullptr);   // created WithCaps: never vTaskDelete
         return;
     }
 
@@ -1160,14 +1161,14 @@ static void upstream_task(void *arg)
     auto *recv_buf = static_cast<uint8_t *>(std::malloc(4096));
     if (!recv_buf) {
         ESP_LOGE(TAG, "OOM for recv buffer");
-        vTaskDelete(nullptr);
+        vTaskSuspend(nullptr);   // created WithCaps: never vTaskDelete
         return;
     }
 
     if (IS_ECHO_MODE()) {
         ESP_LOGI(TAG, "Upstream task: echo mode — no cloud connection needed");
         std::free(recv_buf);
-        vTaskDelete(nullptr);
+        vTaskSuspend(nullptr);   // created WithCaps: never vTaskDelete
         return;
     }
 
@@ -1440,16 +1441,22 @@ bool init_chat_pipeline()
     }
 
     // ── Spawn Lua worker task ──────────────────────────────────
-    BaseType_t rv = xTaskCreatePinnedToCore(
-        lua_worker_task, "chat_lua", 8192, nullptr, 8, nullptr, 0);
+    // Both chat tasks on PSRAM stacks (XIP is on, and the agent already does
+    // TLS from PSRAM stacks): 16 KB of internal RAM back for the microphone.
+    // They never vTaskDelete() themselves (a WithCaps task must not): the
+    // early exits suspend instead.
+    BaseType_t rv = xTaskCreatePinnedToCoreWithCaps(
+        lua_worker_task, "chat_lua", 8192, nullptr, 8, nullptr, 0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (rv != pdPASS) {
         ESP_LOGE(TAG, "Failed to create Lua worker task");
         return false;
     }
 
     // ── Spawn upstream connection task ─────────────────────────
-    rv = xTaskCreatePinnedToCore(
-        upstream_task, "chat_upstream", 8192, nullptr, 8, nullptr, 0);
+    rv = xTaskCreatePinnedToCoreWithCaps(
+        upstream_task, "chat_upstream", 8192, nullptr, 8, nullptr, 0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (rv != pdPASS) {
         ESP_LOGE(TAG, "Failed to create upstream task");
         return false;

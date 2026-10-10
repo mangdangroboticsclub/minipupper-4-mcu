@@ -27,7 +27,10 @@ const BRAIN_KEY = "mpx_chat_brain";
  * lives on one side only.
  */
 export const BRAINS = Object.freeze({ CLOUD: "cloud", LOCAL: "local" });
-export const DEFAULT_BRAIN = BRAINS.CLOUD;
+// New conversations go to the robot's own agent unless the user picks
+// Cloud: that is what mpv2-claw's chat does (it has no cloud brain).
+// Stored conversations without a brain are still cloud (normalizeBrain).
+export const DEFAULT_BRAIN = BRAINS.LOCAL;
 
 export function normalizeBrain(brain) {
   return brain === BRAINS.LOCAL ? BRAINS.LOCAL : BRAINS.CLOUD;
@@ -36,7 +39,8 @@ export function normalizeBrain(brain) {
 /** The brain the next new conversation will use (remembered on this device). */
 export function getPreferredBrain() {
   try {
-    return normalizeBrain(localStorage.getItem(BRAIN_KEY));
+    const stored = localStorage.getItem(BRAIN_KEY);
+    return stored ? normalizeBrain(stored) : DEFAULT_BRAIN;
   } catch {
     return DEFAULT_BRAIN;
   }

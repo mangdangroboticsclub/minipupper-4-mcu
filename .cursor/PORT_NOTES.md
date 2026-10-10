@@ -771,6 +771,26 @@ Service-worker cache `v13-claw`. `npm run build` is clean.
   PWA from a FAT image; here it is embedded in the app.
 - `pi_ros_src.tgz` / `pi_ros_hashes.txt` (a 119 MB Pi-side source dump).
 
+### Internal RAM (first boot: reboot at the wake word)
+
+First bench boot rebooted in `i2s_tx_channel_start`: the wake word opened
+the microphone, the I2S driver could not get its DMA buffers, and
+esp_codec_dev enabled the half-configured channel anyway. Internal RAM after
+the agent was 35 KB (14 KB DMA-capable); after the AFE, 0.4 KB.
+
+- `sdkconfig(.defaults)`: mpv2-claw's internal-RAM budget, which never came
+  over: Wi-Fi static RX/dynamic RX/static TX 3/6/8 (was 10/32/16), BA
+  window 3, Wi-Fi IRAM opts off, `-Os`, FreeRTOS and ringbuf code in flash,
+  system event task 4 KB.
+- Task stacks moved to PSRAM (safe with XIP, see the PSRAM-stack rule):
+  LVGL (10 KB, `task_stack_caps`), `chat_lua` and `chat_upstream` (8 KB
+  each; their early exits now `vTaskSuspend`, a WithCaps task must not
+  `vTaskDelete` itself), `voice_tools` (8 KB), `disp_events`, `voice_ev`
+  (4 KB each), `sock_reaper` (3 KB). The HTTP server and the Wi-Fi/robot/Pi
+  tasks stay internal.
+- `mpx_audio_capture_start()` refuses with `ESP_ERR_NO_MEM` and logs the
+  numbers when internal DMA RAM is under 20 KB, instead of rebooting.
+
 ### Cleanup
 
 - **One phone app.** `pwa/` (original, dark) and `pwa-redesign/` are gone,

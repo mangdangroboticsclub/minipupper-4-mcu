@@ -22,6 +22,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "sdkconfig.h"
 
 #include "display/cap_display.h"
@@ -161,7 +162,9 @@ void display_glue::start_events()
     if (!cap_display_available() || !s_events) {
         return;
     }
-    if (xTaskCreate(events_task, "disp_events", 4096, nullptr, 3, nullptr) != pdPASS) {
+    // PSRAM stack: it only reads cached network state and takes the LVGL lock.
+    if (xTaskCreateWithCaps(events_task, "disp_events", 4096, nullptr, 3, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "display event task did not start");
     }
 }

@@ -11,8 +11,6 @@ CONFIG_APP_AP_SSID="MPX-Dog 01"
 CONFIG_APP_CHAT_SERVER_IP="35.220.215.160"
 CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
-CONFIG_ESP_WIFI_RX_BA_WIN=6
 CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
 
 # The HTTP server (network/http_server.cc) sets max_open_sockets = 12, which
@@ -229,3 +227,34 @@ CONFIG_ESP_AUDIO_SIMPLE_PLAYER_CH_CVT_EN=y
 CONFIG_AUDIO_SIMPLE_PLAYER_CH_CVT_DEST=1
 CONFIG_ESP_AUDIO_SIMPLE_PLAYER_BIT_CVT_EN=y
 CONFIG_AUDIO_SIMPLE_PLAYER_BIT_CVT_DEST_16BIT=y
+# ---- Internal RAM: mpv2-claw's budget (Phase 6) ---------------------------
+#
+# With the agent, Wi-Fi, LVGL and esp-sr all in one image, internal RAM runs
+# out before voice starts: the I2S driver could not allocate its DMA buffers
+# when the wake word opened the microphone ("i2s_alloc_dma_desc: allocate DMA
+# buffer failed"), and esp_codec_dev then enabled the half-configured channel
+# and the robot rebooted in i2s_tx_channel_start. These are mpv2-claw's
+# settings for the same board and the same feature set (its
+# sdkconfig.defaults has the full reasoning for each).
+#
+# Wi-Fi buffers. With SPIRAM_TRY_ALLOCATE_WIFI_LWIP the static RX and TX
+# buffers are ~1.6 KB of internal DMA memory each, held forever: 3 + 8
+# instead of 10 + 16 is ~24 KB back. Traffic is an Opus stream and a few
+# PWA sockets, not bulk transfers.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=3
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_RX_BA_WIN=3
+# Wi-Fi code out of IRAM: on the S3, IRAM and DRAM share the same SRAM, so
+# every KB of IRAM is a KB the heap does not get.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+# Same idea: -Os (smaller IRAM footprint and image, faster than -Og for
+# esp-sr's inference) and FreeRTOS / ringbuffer code in flash (which runs
+# from PSRAM with SPIRAM_XIP_FROM_PSRAM).
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+# The system event task runs every Wi-Fi/IP handler; 2304 is sized for
+# IDF's own handlers only.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096

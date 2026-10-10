@@ -22,6 +22,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 
 #include "fs/littlefs_manager.h"
@@ -2459,7 +2460,8 @@ bool start_http_server()
 
     // Start the dead-connection reaper so leaked port-80 sockets can't
     // accumulate and exhaust the pool.
-    xTaskCreate(socket_reaper_task, "sock_reaper", 3072, nullptr, 3, nullptr);
+    xTaskCreateWithCaps(socket_reaper_task, "sock_reaper", 3072, nullptr, 3, nullptr,
+                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);   // internal RAM is for DMA
 
     // ── Helper to register a static file handler ──
     auto register_static = [&](const char *uri) {

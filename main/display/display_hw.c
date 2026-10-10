@@ -149,8 +149,12 @@ static esp_err_t lvgl_init(void)
     lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     port_cfg.task_stack    = LVGL_TASK_STACK;
     port_cfg.task_priority = LVGL_TASK_PRIORITY;
-    /* Internal stack on purpose: this task reads GIFs off LittleFS (flash),
-     * and a flash read from a PSRAM stack asserts in cache_utils.c. */
+    /* PSRAM stack, as mpv2-claw (ESP_LVGL_ADAPTER_LVGL_THREAD_STACK_IN_PSRAM).
+     * This task reads GIFs off LittleFS; that used to need an internal stack
+     * (a flash read from a PSRAM stack asserted in cache_utils.c), but since
+     * Phase 5 the firmware runs with CONFIG_SPIRAM_XIP_FROM_PSRAM, where it
+     * no longer does. 10 KB of internal RAM back for the microphone's DMA. */
+    port_cfg.task_stack_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     ESP_RETURN_ON_ERROR(lvgl_port_init(&port_cfg), TAG, "lvgl_port_init");
 
     const lvgl_port_display_cfg_t disp_cfg = {

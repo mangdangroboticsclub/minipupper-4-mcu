@@ -31,6 +31,7 @@ bool voice_wanted()
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 
 #include "cJSON.h"
 #include "cap_music.h"
@@ -141,7 +142,9 @@ void start()
     /* The Pi events queue first: a Pi taking control during boot must be
      * seen even before the front end is up. */
     s_events = xQueueCreate(4, sizeof(uint8_t));
-    if (!s_events || xTaskCreate(events_task, "voice_ev", 4096, nullptr, 3, nullptr) != pdPASS) {
+    // PSRAM stack (XIP is on, see PORT_NOTES "The PSRAM-stack rule").
+    if (!s_events || xTaskCreateWithCaps(events_task, "voice_ev", 4096, nullptr, 3, nullptr,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGW(TAG, "voice events task did not start");
     }
 

@@ -20,6 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "sdkconfig.h"
 
 #include "agent/robot_tools.h"
@@ -36,7 +37,7 @@ using robot_tools::Tool;
  * the largest message this device sends, on a freshly opened TLS socket. */
 constexpr size_t kListPageBytes = 4000;
 constexpr int    kInboxDepth    = 8;
-constexpr int    kTaskStack     = 8192;    /* internal RAM, see the header */
+constexpr int    kTaskStack     = 8192;    /* PSRAM: NVS writes are safe from it with XIP on */
 constexpr int    kTaskPrio      = 4;
 constexpr const char *kProtocolVersion = "2024-11-05";
 
@@ -248,7 +249,8 @@ esp_err_t start()
     if (s_inbox) return ESP_OK;
     s_inbox = xQueueCreate(kInboxDepth, sizeof(char *));
     if (!s_inbox) return ESP_ERR_NO_MEM;
-    if (xTaskCreate(tools_task, "voice_tools", kTaskStack, nullptr, kTaskPrio, nullptr) != pdPASS) {
+    if (xTaskCreateWithCaps(tools_task, "voice_tools", kTaskStack, nullptr, kTaskPrio, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         vQueueDelete(s_inbox);
         s_inbox = nullptr;
         return ESP_ERR_NO_MEM;

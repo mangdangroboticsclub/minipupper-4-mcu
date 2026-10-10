@@ -568,6 +568,13 @@ void mpx_audio_set_volume_transient(int percent)
  * so a caller can push frames through Opus and a socket without paying an
  * open/close per block. */
 
+/* What reopening both I2S channels needs in internal DMA RAM: 6 descriptors
+ * x 240 frames x 8 bytes (32-bit stereo slots) for RX and again for TX, less
+ * the TX buffers the reconfigure frees, plus margin. Below this,
+ * capture_start refuses (see there). */
+#define MPX_AUDIO_MIN_DMA_FREE   (20 * 1024)
+#define MPX_AUDIO_MIN_DMA_BLOCK  (4 * 1024)
+
 static uint8_t  s_cap_channels = 1;
 static uint8_t  s_cap_pick;
 static int16_t *s_cap_scratch;      /* interleaved, straight off the codec */
@@ -583,6 +590,23 @@ esp_err_t mpx_audio_capture_start(uint32_t sample_rate, uint8_t channels, uint8_
                         ESP_ERR_INVALID_ARG, TAG, "bad channel selection");
     if (s_cap_open) {
         return ESP_OK;
+    }
+
+    /* Opening the codec reconfigures both I2S channels, and the driver
+     * reallocates their DMA buffers (internal RAM, ~12 KB each at 32-bit
+     * slots). If that allocation fails, esp_codec_dev still enables the
+     * half-configured channel and the chip faults in i2s_tx_channel_start.
+     * So refuse here, with the numbers, instead of rebooting. */
+    {
+        const size_t dma_free    = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        const size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        if (dma_free < MPX_AUDIO_MIN_DMA_FREE || dma_largest < MPX_AUDIO_MIN_DMA_BLOCK) {
+            ESP_LOGE(TAG, "not opening the microphone: internal DMA RAM %u free, %u largest "
+                          "(needs %u / %u) -- see the internal RAM notes in sdkconfig.defaults",
+                     (unsigned)dma_free, (unsigned)dma_largest,
+                     (unsigned)MPX_AUDIO_MIN_DMA_FREE, (unsigned)MPX_AUDIO_MIN_DMA_BLOCK);
+            return ESP_ERR_NO_MEM;
+        }
     }
 
     /* Non-zero mask, for the reason spelled out in mpx_audio_record_wav. */
