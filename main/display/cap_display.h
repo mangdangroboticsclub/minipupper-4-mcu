@@ -70,6 +70,40 @@ void cap_display_set_ros_mode(bool on);
  *  the build. */
 esp_err_t cap_display_show_jpeg(const uint8_t *jpeg, size_t len);
 
+/* ── Free drawing (the agent's display_draw tool) ────────────────────────
+ * mpv2-claw lets its agent draw anything ("draw a crab") by writing a Lua
+ * script against lua_module_lvgl. This firmware has no agent-side Lua, so
+ * the same job is one call with a list of primitives, rendered onto a
+ * 320x240 canvas (PSRAM) that replaces the face until hold_ms runs out
+ * (0 = until display_clear / an emotion / text). Coordinates are panel
+ * pixels, (0,0) top left. */
+typedef enum {
+    CAP_DRAW_RECT,      /*!< x,y,w,h box; r corner radius */
+    CAP_DRAW_CIRCLE,    /*!< centre x,y; w,h = 2*radii (equal for a circle) */
+    CAP_DRAW_LINE,      /*!< p[0] -> p[1], width thick */
+    CAP_DRAW_TRIANGLE,  /*!< p[0..2], filled */
+    CAP_DRAW_ARC,       /*!< centre x,y; r radius; start..end degrees, 0 = 3 o'clock, clockwise */
+    CAP_DRAW_TEXT,      /*!< centred on x,y; size 0 small, 1 medium, 2 large */
+} cap_draw_kind_t;
+
+typedef struct {
+    cap_draw_kind_t kind;
+    uint32_t color;           /*!< 0xRRGGBB: fill, stroke or text colour */
+    int32_t  border_color;    /*!< rect/circle outline 0xRRGGBB, -1 none */
+    int16_t  width;           /*!< line/arc thickness, outline width */
+    bool     filled;          /*!< rect/circle: false = outline only */
+    int16_t  x, y, w, h, r;
+    int16_t  p[3][2];
+    int16_t  start, end;
+    uint8_t  size;
+    char     text[64];
+} cap_draw_shape_t;
+
+#define CAP_DRAW_MAX_SHAPES 200
+
+esp_err_t cap_display_draw(const cap_draw_shape_t *shapes, size_t count,
+                           uint32_t background_rgb, uint32_t hold_ms);
+
 /** @brief The conversation on the face -- targets for mpx_voice_set_ui_hooks().
  *
  *  heard/saying put a one-line subtitle under the eyes (the network line

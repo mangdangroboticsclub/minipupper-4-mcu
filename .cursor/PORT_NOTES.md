@@ -653,7 +653,7 @@ Pupper/Cloud badge per conversation. Service-worker cache `v12-claw`,
 ### Deferred
 
 - Voice -> local agent handoff (and the broader cloud <-> local handoff).
-- `mpx_display_draw` (needs `cap_lua`).
+- ~~`mpx_display_draw` (needs `cap_lua`)~~ -- done natively in Phase 6 (`display_draw`).
 - The ESP-Claw skills that mention Lua scripts (`skills_lab_downloader`,
   `skill_creator`) are in the system image because `cap_skill_mgr` ships
   them; without `cap_lua` their scripts cannot run. Harmless, but the agent
@@ -790,6 +790,28 @@ the agent was 35 KB (14 KB DMA-capable); after the AFE, 0.4 KB.
   tasks stay internal.
 - `mpx_audio_capture_start()` refuses with `ESP_ERR_NO_MEM` and logs the
   numbers when internal DMA RAM is under 20 KB, instead of rebooting.
+
+### Drawing on the screen (`display_draw`)
+
+mpv2-claw's agent draws anything ("draw a crab") by writing Lua for
+`lua_module_lvgl` (skill `mpx_display_draw`), which needs ESP-Claw's
+`cap_lua`, its Lua and `display_service` -- none of which this firmware has
+(Phase 5 left them out; its own Lua VM would clash with ESP-Claw's). The same
+job is now a native tool:
+
+- `cap_display_draw()` (`display/cap_display.c`): a 320x240 RGB565 canvas
+  (150 KB PSRAM, allocated on first use) painted with LVGL's draw API (rect,
+  rounded rect, circle/oval, line, triangle, arc, label), shown instead of
+  the face for `seconds`, then the face comes back (as `display_show_text`).
+- `display_draw` in `agent/robot_tools.cc` (so the agent and the voice
+  gateway both get it): `{background, seconds, shapes:[{type, color, ...}]}`;
+  polylines become lines, polygons are fanned into triangles.
+- `main/skills/mpx_display_draw/SKILL.md` (same skill name as mpv2-claw,
+  group `cap_display`) with the coordinate system and a crab example;
+  `mpx_display/SKILL.md` points at it.
+- Fonts Montserrat 28 and 48 enabled for `medium` / `large` text.
+
+What it cannot do that Lua could: animate (one call is one still picture).
 
 ### Cleanup
 

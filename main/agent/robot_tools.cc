@@ -9,7 +9,9 @@
 #include "agent/robot_tools.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "esp_log.h"
 #include "sdkconfig.h"
@@ -279,6 +281,125 @@ Reply display_show_emotion(const cJSON *args)
 
 Reply display_clear(const cJSON *) { return display_result(cap_display_clear(), nullptr); }
 
+/* display_draw: mpv2-claw's "draw a crab" without agent-side Lua. The model
+ * sends primitives; polylines and polygons are expanded here into lines and
+ * triangles (a polygon is fanned from its first point, so convex shapes are
+ * exact and the model is told to split concave ones). */
+int16_t clamp16(float v) { return (int16_t)clampf(v, -2000.0f, 2000.0f); }
+
+bool point_at(const cJSON *pts, int i, int16_t out[2])
+{
+    const cJSON *pt = cJSON_GetArrayItem(pts, i);
+    if (!cJSON_IsArray(pt) || cJSON_GetArraySize(pt) < 2) return false;
+    const cJSON *x = cJSON_GetArrayItem(pt, 0), *y = cJSON_GetArrayItem(pt, 1);
+    if (!cJSON_IsNumber(x) || !cJSON_IsNumber(y)) return false;
+    out[0] = clamp16((float)x->valuedouble);
+    out[1] = clamp16((float)y->valuedouble);
+    return true;
+}
+
+Reply display_draw(const cJSON *args)
+{
+    const cJSON *shapes = args ? cJSON_GetObjectItem(args, "shapes") : nullptr;
+    if (!cJSON_IsArray(shapes)) return { "Error: 'shapes' (an array) is required", true };
+
+    uint32_t bg = 0x000000;
+    if (const char *b = str(args, "background")) {
+        const int32_t v = cap_display_parse_color(b);
+        if (v < 0) return { fail("unreadable background colour"), false };
+        bg = (uint32_t)v;
+    }
+    const float secs = clampf(num(args, "seconds", 20.0f), 0.0f, 600.0f);
+
+    std::vector<cap_draw_shape_t> out;
+    out.reserve(32);
+    int index = -1;
+    const cJSON *it = nullptr;
+    cJSON_ArrayForEach(it, shapes) {
+        index++;
+        const char *type = str(it, "type");
+        if (!type) return { "Error: shape " + std::to_string(index) + " has no 'type'", true };
+
+        cap_draw_shape_t sh = {};
+        int32_t col = 0xFFFFFF;
+        if (const char *cs = str(it, "color")) {
+            col = cap_display_parse_color(cs);
+            if (col < 0) return { "Error: shape " + std::to_string(index) + ": unreadable color", true };
+        }
+        sh.color = (uint32_t)col;
+        sh.border_color = -1;
+        if (const char *bs = str(it, "border")) sh.border_color = cap_display_parse_color(bs);
+        const cJSON *fill = cJSON_GetObjectItem(it, "fill");
+        sh.filled = !cJSON_IsBool(fill) || cJSON_IsTrue(fill);
+        sh.width = clamp16(num(it, "width", 0.0f));
+        sh.x = clamp16(num(it, "x", 0.0f));
+        sh.y = clamp16(num(it, "y", 0.0f));
+        const cJSON *pts = cJSON_GetObjectItem(it, "points");
+        const int npts = cJSON_IsArray(pts) ? cJSON_GetArraySize(pts) : 0;
+
+        if (!strcmp(type, "rect")) {
+            sh.kind = CAP_DRAW_RECT;
+            sh.w = clamp16(num(it, "w", 10.0f));
+            sh.h = clamp16(num(it, "h", 10.0f));
+            sh.r = clamp16(num(it, "radius", 0.0f));
+            out.push_back(sh);
+        } else if (!strcmp(type, "circle") || !strcmp(type, "oval")) {
+            sh.kind = CAP_DRAW_CIRCLE;
+            const float r = num(it, "r", 10.0f);
+            sh.w = clamp16(2.0f * num(it, "rx", r));
+            sh.h = clamp16(2.0f * num(it, "ry", r));
+            out.push_back(sh);
+        } else if (!strcmp(type, "arc")) {
+            sh.kind = CAP_DRAW_ARC;
+            sh.r = clamp16(num(it, "r", 20.0f));
+            sh.start = clamp16(num(it, "start", 0.0f));
+            sh.end = clamp16(num(it, "end", 180.0f));
+            out.push_back(sh);
+        } else if (!strcmp(type, "text")) {
+            sh.kind = CAP_DRAW_TEXT;
+            const char *t = str(it, "text");
+            if (!t) return { "Error: shape " + std::to_string(index) + ": text needs 'text'", true };
+            snprintf(sh.text, sizeof(sh.text), "%s", t);
+            const char *size = str(it, "size");
+            sh.size = (size && !strcmp(size, "large")) ? 2 : (size && !strcmp(size, "medium")) ? 1 : 0;
+            out.push_back(sh);
+        } else if (!strcmp(type, "line") || !strcmp(type, "polyline")) {
+            if (npts < 2) return { "Error: shape " + std::to_string(index) + ": a line needs 2+ points", true };
+            sh.kind = CAP_DRAW_LINE;
+            for (int i = 0; i + 1 < npts; i++) {
+                if (!point_at(pts, i, sh.p[0]) || !point_at(pts, i + 1, sh.p[1]))
+                    return { "Error: shape " + std::to_string(index) + ": points are [x,y] pairs", true };
+                out.push_back(sh);
+            }
+        } else if (!strcmp(type, "triangle") || !strcmp(type, "polygon")) {
+            if (npts < 3) return { "Error: shape " + std::to_string(index) + ": needs 3+ points", true };
+            sh.kind = CAP_DRAW_TRIANGLE;
+            if (!point_at(pts, 0, sh.p[0])) return { "Error: points are [x,y] pairs", true };
+            for (int i = 1; i + 1 < npts; i++) {
+                if (!point_at(pts, i, sh.p[1]) || !point_at(pts, i + 1, sh.p[2]))
+                    return { "Error: shape " + std::to_string(index) + ": points are [x,y] pairs", true };
+                out.push_back(sh);
+            }
+        } else {
+            return { "Error: shape " + std::to_string(index) + ": unknown type '" + type +
+                     "' (rect, circle, oval, line, polyline, triangle, polygon, arc, text)", true };
+        }
+        if (out.size() > CAP_DRAW_MAX_SHAPES) {
+            return { fail("too many shapes (max 200 after expanding lines and polygons)"), false };
+        }
+    }
+
+    const esp_err_t err = cap_display_draw(out.data(), out.size(), bg, (uint32_t)(secs * 1000.0f));
+    if (err == ESP_OK) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddBoolToObject(o, "ok", true);
+        cJSON_AddNumberToObject(o, "primitives", (double)out.size());
+        cJSON_AddNumberToObject(o, "seconds", secs);
+        return { print_and_free(o), false };
+    }
+    return display_result(err, nullptr);
+}
+
 Reply display_set_colors(const cJSON *args)
 {
     const char *bg = str(args, "background");
@@ -481,6 +602,32 @@ const Tool kTools[] = {
       nullptr,
       "{\"type\":\"object\",\"properties\":{}}",
       display_clear },
+    { "display_draw", kGroupDisplay,
+      "Draw a picture on the robot's 320x240 screen (0,0 = top left) from shapes: "
+      "rect, circle, oval, line, polyline, triangle, polygon (convex), arc, text. "
+      "Use it for anything that is not one of the faces: an animal, an object, a "
+      "symbol, a number. It replaces the face for 'seconds' (default 20, 0 = until "
+      "display_clear). Read the mpx_display_draw skill first.",
+      "Draw a picture on the 320x240 screen ((0,0) top left) from shapes: rect, "
+      "circle, oval, line, polyline, triangle, polygon, arc, text. For anything that "
+      "is not a face. Read skill mpx_display_draw first.",
+      "{\"type\":\"object\",\"properties\":{"
+      "\"background\":{\"type\":\"string\",\"description\":\"colour name or #rrggbb, default black\"},"
+      "\"seconds\":{\"type\":\"number\",\"minimum\":0,\"maximum\":600},"
+      "\"shapes\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{"
+      "\"type\":{\"type\":\"string\",\"enum\":[\"rect\",\"circle\",\"oval\",\"line\","
+      "\"polyline\",\"triangle\",\"polygon\",\"arc\",\"text\"]},"
+      "\"color\":{\"type\":\"string\"},\"border\":{\"type\":\"string\"},"
+      "\"fill\":{\"type\":\"boolean\"},\"width\":{\"type\":\"number\"},"
+      "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},"
+      "\"w\":{\"type\":\"number\"},\"h\":{\"type\":\"number\"},\"radius\":{\"type\":\"number\"},"
+      "\"r\":{\"type\":\"number\"},\"rx\":{\"type\":\"number\"},\"ry\":{\"type\":\"number\"},"
+      "\"start\":{\"type\":\"number\"},\"end\":{\"type\":\"number\"},"
+      "\"points\":{\"type\":\"array\",\"items\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}},"
+      "\"text\":{\"type\":\"string\"},"
+      "\"size\":{\"type\":\"string\",\"enum\":[\"small\",\"medium\",\"large\"]}},"
+      "\"required\":[\"type\"]}}},\"required\":[\"shapes\"]}",
+      display_draw },
     { "display_set_colors", kGroupDisplay,
       "Change the colours of the robot's face: the screen background and/or the "
       "eyes. Use this when someone asks to make the screen or background a "

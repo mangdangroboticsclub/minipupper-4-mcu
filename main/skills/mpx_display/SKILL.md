@@ -52,6 +52,13 @@ is centred and scaled to fill the panel, so a paragraph becomes unreadable —
 a few words at most. It borrows the screen for about eight seconds and then
 the face comes back on its own, so you never need to clear it afterwards.
 
+## Pictures
+
+For anything that is not a face or a few words -- "draw a crab", a heart, a
+sun, a clock -- use `display_draw` (skill `mpx_display_draw`): a list of
+shapes painted on the 320x240 panel, shown for a while, then the face comes
+back by itself.
+
 ## Brightness
 
 `display_set_brightness` takes 0–100. Turning it to 0 is the right response to

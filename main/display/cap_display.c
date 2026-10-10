@@ -58,6 +58,8 @@ static lv_obj_t   *s_text_screen;
 static lv_obj_t   *s_label;
 static lv_timer_t *s_text_timer;
 
+static void cancel_text_locked(void);
+
 /* The network line normally shown under the eyes; the conversation
  * subtitles (further down) borrow the line and hand it back to this. */
 static char s_network_line[96] = "";
@@ -519,6 +521,200 @@ esp_err_t cap_display_show_jpeg(const uint8_t *jpeg, size_t len)
 #endif
 }
 
+/* ── Free drawing (see cap_display.h) ──────────────────────────────────────
+ *
+ * One screen with one canvas whose 150 KB RGB565 buffer is taken from PSRAM
+ * the first time something is drawn and kept. Every call repaints the whole
+ * canvas: the agent describes a picture, not edits to the last one. */
+
+#define CAP_DRAW_W 320
+#define CAP_DRAW_H 240
+
+static lv_obj_t   *s_draw_screen;
+static lv_obj_t   *s_draw_canvas;
+static uint16_t   *s_draw_buf;
+static lv_timer_t *s_draw_timer;
+
+static void draw_expired_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    /* Inside LVGL: the lock is held. A one-shot timer deletes itself. */
+    s_draw_timer = NULL;
+    if (lv_screen_active() == s_draw_screen) {
+        (void)show_face_locked();
+    }
+}
+
+static const lv_font_t *draw_font(uint8_t size)
+{
+#if LV_FONT_MONTSERRAT_48
+    if (size >= 2) return &lv_font_montserrat_48;
+#endif
+#if LV_FONT_MONTSERRAT_28
+    if (size >= 1) return &lv_font_montserrat_28;
+#endif
+    (void)size;
+    return LV_FONT_DEFAULT;
+}
+
+static void draw_shape_locked(lv_layer_t *layer, const cap_draw_shape_t *sh)
+{
+    const lv_color_t c = lv_color_hex(sh->color);
+
+    switch (sh->kind) {
+    case CAP_DRAW_RECT:
+    case CAP_DRAW_CIRCLE: {
+        lv_draw_rect_dsc_t d;
+        lv_area_t a;
+        lv_draw_rect_dsc_init(&d);
+        if (sh->kind == CAP_DRAW_RECT) {
+            a.x1 = sh->x;
+            a.y1 = sh->y;
+            a.x2 = sh->x + (sh->w > 0 ? sh->w : 1) - 1;
+            a.y2 = sh->y + (sh->h > 0 ? sh->h : 1) - 1;
+            d.radius = sh->r > 0 ? sh->r : 0;
+        } else {
+            const int rx = sh->w > 1 ? sh->w / 2 : 1, ry = sh->h > 1 ? sh->h / 2 : 1;
+            a.x1 = sh->x - rx;
+            a.y1 = sh->y - ry;
+            a.x2 = sh->x + rx;
+            a.y2 = sh->y + ry;
+            d.radius = LV_RADIUS_CIRCLE;
+        }
+        d.bg_color = c;
+        d.bg_opa = sh->filled ? LV_OPA_COVER : LV_OPA_TRANSP;
+        if (sh->border_color >= 0 || !sh->filled) {
+            d.border_color = sh->border_color >= 0 ? lv_color_hex((uint32_t)sh->border_color) : c;
+            d.border_width = sh->width > 0 ? sh->width : 2;
+            d.border_opa = LV_OPA_COVER;
+        } else {
+            d.border_width = 0;
+        }
+        lv_draw_rect(layer, &d, &a);
+        break;
+    }
+    case CAP_DRAW_LINE: {
+        lv_draw_line_dsc_t d;
+        lv_draw_line_dsc_init(&d);
+        d.p1.x = sh->p[0][0];
+        d.p1.y = sh->p[0][1];
+        d.p2.x = sh->p[1][0];
+        d.p2.y = sh->p[1][1];
+        d.color = c;
+        d.width = sh->width > 0 ? sh->width : 3;
+        d.opa = LV_OPA_COVER;
+        d.round_start = 1;
+        d.round_end = 1;
+        lv_draw_line(layer, &d);
+        break;
+    }
+    case CAP_DRAW_TRIANGLE: {
+        lv_draw_triangle_dsc_t d;
+        lv_draw_triangle_dsc_init(&d);
+        for (int i = 0; i < 3; i++) {
+            d.p[i].x = sh->p[i][0];
+            d.p[i].y = sh->p[i][1];
+        }
+        d.color = c;
+        d.opa = LV_OPA_COVER;
+        lv_draw_triangle(layer, &d);
+        break;
+    }
+    case CAP_DRAW_ARC: {
+        lv_draw_arc_dsc_t d;
+        lv_draw_arc_dsc_init(&d);
+        d.center.x = sh->x;
+        d.center.y = sh->y;
+        d.radius = (uint16_t)(sh->r > 0 ? sh->r : 1);
+        d.start_angle = sh->start;
+        d.end_angle = sh->end;
+        d.width = sh->width > 0 ? sh->width : 3;
+        d.color = c;
+        d.opa = LV_OPA_COVER;
+        d.rounded = 1;
+        lv_draw_arc(layer, &d);
+        break;
+    }
+    case CAP_DRAW_TEXT: {
+        lv_draw_label_dsc_t d;
+        lv_area_t a;
+        lv_draw_label_dsc_init(&d);
+        d.font = draw_font(sh->size);
+        d.color = c;
+        d.opa = LV_OPA_COVER;
+        d.text = sh->text;
+        d.text_local = 1;
+        d.align = LV_TEXT_ALIGN_CENTER;
+        const int32_t lh = lv_font_get_line_height(d.font);
+        a.x1 = sh->x - CAP_DRAW_W / 2;
+        a.x2 = sh->x + CAP_DRAW_W / 2 - 1;
+        a.y1 = sh->y - lh / 2;
+        a.y2 = sh->y + lh;
+        lv_draw_label(layer, &d, &a);
+        break;
+    }
+    }
+}
+
+esp_err_t cap_display_draw(const cap_draw_shape_t *shapes, size_t count,
+                           uint32_t background_rgb, uint32_t hold_ms)
+{
+    if (ensure_session() != ESP_OK) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (count > CAP_DRAW_MAX_SHAPES || (count && !shapes)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_draw_buf) {
+        s_draw_buf = heap_caps_malloc(CAP_DRAW_W * CAP_DRAW_H * sizeof(uint16_t),
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_draw_buf) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (display_hw_lock() != ESP_OK) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (!s_draw_screen) {
+        s_draw_screen = lv_obj_create(NULL);
+        if (!s_draw_screen) {
+            display_hw_unlock();
+            return ESP_ERR_NO_MEM;
+        }
+        lv_obj_set_style_bg_color(s_draw_screen, lv_color_black(), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(s_draw_screen, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(s_draw_screen, 0, LV_PART_MAIN);
+        lv_obj_remove_flag(s_draw_screen, LV_OBJ_FLAG_SCROLLABLE);
+        s_draw_canvas = lv_canvas_create(s_draw_screen);
+        lv_canvas_set_buffer(s_draw_canvas, s_draw_buf, CAP_DRAW_W, CAP_DRAW_H,
+                             LV_COLOR_FORMAT_RGB565);
+        lv_obj_set_pos(s_draw_canvas, 0, 0);
+    }
+
+    lv_canvas_fill_bg(s_draw_canvas, lv_color_hex(background_rgb), LV_OPA_COVER);
+    lv_layer_t layer;
+    lv_canvas_init_layer(s_draw_canvas, &layer);
+    for (size_t i = 0; i < count; i++) {
+        draw_shape_locked(&layer, &shapes[i]);
+    }
+    lv_canvas_finish_layer(s_draw_canvas, &layer);
+
+    cancel_text_locked();
+    if (s_draw_timer) {
+        lv_timer_delete(s_draw_timer);
+        s_draw_timer = NULL;
+    }
+    const esp_err_t err = load_screen_locked(s_draw_screen);
+    if (err == ESP_OK && hold_ms) {
+        s_draw_timer = lv_timer_create(draw_expired_cb, hold_ms, NULL);
+        if (s_draw_timer) {
+            lv_timer_set_repeat_count(s_draw_timer, 1);
+        }
+    }
+    display_hw_unlock();
+    return err;
+}
+
 void cap_display_set_ros_mode(bool on)
 {
     s_ros = on;
@@ -877,6 +1073,9 @@ int32_t cap_display_parse_color(const char *text)
         { "green",  0x00C000 }, { "blue",   0x0040FF }, { "yellow", 0xFFE631 },
         { "orange", 0xFF8000 }, { "purple", 0x8000FF }, { "pink",   0xFF4D8D },
         { "cyan",   0x00E0E0 }, { "grey",   0x808080 }, { "gray",   0x808080 },
+        { "brown",  0x8B4513 }, { "navy",   0x000080 }, { "lime",   0x80FF00 },
+        { "magenta",0xFF00FF }, { "gold",   0xFFC000 }, { "silver", 0xC0C0C0 },
+        { "darkred",0x8B0000 }, { "skyblue",0x87CEEB }, { "beige",  0xF5DEB3 },
     };
     if (!text || !text[0]) {
         return -1;
