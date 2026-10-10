@@ -9,6 +9,10 @@
     saveConversation,
     getConversation,
     generateUUID,
+    BRAINS,
+    normalizeBrain,
+    getPreferredBrain,
+    setPreferredBrain,
   } from "../conversationStore.js";
 
   /**
@@ -52,6 +56,75 @@
   let scrollAnchor = $state(null);
   let inputEl = $state(null);
   let pendingActions = $state([]);
+
+  // ── Brain: who answers this conversation ───
+  // "cloud" (OpenClaw, relayed by the robot) or "local" (ESP-Claw's agent
+  // on the robot). Chosen before the first message and fixed from then on:
+  // the robot keeps the two histories apart by conversation id, so a
+  // conversation switching sides would lose its own past. The toggle in
+  // the action bar is therefore live only while the conversation is empty;
+  // a new conversation starts with the last choice made on this device.
+  let brain = $state(getPreferredBrain());
+  let brainLocked = $derived(messages.length > 0);
+  // What the robot offers: fetched from /v1/ai. Until it answers, both are
+  // shown; a robot without the agent greys out "Local".
+  let localBrainAvailable = $state(true);
+  let localBrainReason = $state("");
+
+  function setBrain(next) {
+    if (brainLocked) return;
+    const b = normalizeBrain(next);
+    if (b === BRAINS.LOCAL && !localBrainAvailable) return;
+    brain = b;
+    setPreferredBrain(b);
+    // The robot starts a session on the chosen side for the empty
+    // conversation, so the first message lands where expected.
+    sendSessionReset(sessionId);
+  }
+
+  function brainLabel(b) {
+    return b === BRAINS.LOCAL ? "Pupper" : "Cloud";
+  }
+
+  async function probeLocalBrain() {
+    try {
+      const res = await fetch("/v1/ai", { cache: "no-store" });
+      if (!res.ok) return;
+      const d = await res.json();
+      const agent = d.agent || {};
+      if (agent.available === false) {
+        localBrainAvailable = false;
+        localBrainReason = "This robot's firmware has no on-device agent.";
+      } else if (agent.running === false) {
+        localBrainAvailable = false;
+        localBrainReason = "The robot's agent did not start — see its log.";
+      } else if (d.mode === "off") {
+        localBrainAvailable = false;
+        localBrainReason = "AI is off on this robot (Settings › AI & Voice).";
+      } else {
+        localBrainAvailable = true;
+        localBrainReason = "";
+      }
+      if (!localBrainAvailable && brain === BRAINS.LOCAL && !brainLocked) {
+        brain = BRAINS.CLOUD;
+      }
+    } catch {
+      // Offline or an older firmware without /v1/ai: leave both offered;
+      // the robot answers a local message it cannot take with an error.
+    }
+  }
+
+  /** Tell the robot which conversation (and brain) this socket is on. */
+  function sendSessionReset(id, extra = {}) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+      type: "session_reset",
+      session_id: id,
+      brain,
+      ts: Math.floor(Date.now() / 1000),
+      ...extra,
+    }));
+  }
 
   // ── Render model: group consecutive `step` messages into one activity block ──
   let renderItems = $derived.by(() => {
@@ -152,7 +225,7 @@
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       if (messages.length > 0) {
-        saveConversation(sessionId, { messages });
+        saveConversation(sessionId, { messages, brain });
         sidebarRefreshKey++;
       }
     }, 500);
@@ -171,52 +244,37 @@
   function selectConversation(id) {
     const convo = getConversation(id);
     if (!convo) return;
-    if (messages.length > 0) saveConversation(sessionId, { messages });
+    if (messages.length > 0) saveConversation(sessionId, { messages, brain });
     sidebarRefreshKey++;
     sessionId = convo.id;
     messages = convo.messages || [];
+    // The conversation's own brain, whatever the toggle said last.
+    brain = normalizeBrain(convo.brain);
     sending = false;
     if (window.innerWidth < 768) showSidebar = false;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "session_reset",
-        session_id: sessionId,
-        ts: Math.floor(Date.now() / 1000),
-      }));
-    }
+    sendSessionReset(sessionId);
   }
 
-  function newConversation() {
-    if (messages.length > 0) saveConversation(sessionId, { messages });
-    sidebarRefreshKey++;
+  /** An empty conversation on the brain the user last chose. */
+  function startFresh() {
     const newId = makeUUID();
     sessionId = newId;
     messages = [];
     sending = false;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "session_reset",
-        session_id: newId,
-        ts: Math.floor(Date.now() / 1000),
-      }));
-    }
+    brain = getPreferredBrain();
+    if (brain === BRAINS.LOCAL && !localBrainAvailable) brain = BRAINS.CLOUD;
+    sendSessionReset(newId);
+  }
+
+  function newConversation() {
+    if (messages.length > 0) saveConversation(sessionId, { messages, brain });
+    sidebarRefreshKey++;
+    startFresh();
     inputEl?.focus();
   }
 
   function handleDelete(id) {
-    if (id === sessionId) {
-      const newId = makeUUID();
-      sessionId = newId;
-      messages = [];
-      sending = false;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: "session_reset",
-          session_id: newId,
-          ts: Math.floor(Date.now() / 1000),
-        }));
-      }
-    }
+    if (id === sessionId) startFresh();
   }
 
   // ── Permission response ────────────────────
@@ -275,12 +333,8 @@
     socket.onopen = () => {
       if (socket !== ws) return;        // stale socket — ignore
       connected = true;
-      socket.send(JSON.stringify({
-        type: "session_reset",
-        session_id: sessionId,
-        ts: Math.floor(Date.now() / 1000),
-        pwa_build: "stormfix-v14",
-      }));
+      sendSessionReset(sessionId, { pwa_build: "brains-v15" });
+      probeLocalBrain();
     };
 
     socket.onclose = () => {
@@ -519,6 +573,7 @@
       type: "user_chat_input",
       text: text.trim(),
       session_id: sessionId,
+      brain,
       ts: Math.floor(nowTs / 1000),
     }));
   }
@@ -528,6 +583,7 @@
     const convo = getConversation(sessionId);
     if (convo && convo.messages.length > 0) {
       messages = convo.messages;
+      brain = normalizeBrain(convo.brain);
     }
     connect();
     // Dev-only: lets you replay server frames from the console, e.g.
@@ -599,6 +655,53 @@
         <span>New</span>
       </button>
 
+      <!-- Brain: fixed once the conversation has a message -->
+      <div
+        class="brain-toggle"
+        class:locked={brainLocked}
+        role="radiogroup"
+        aria-label="Who answers this conversation"
+        title={brainLocked
+          ? `This conversation is with ${brainLabel(brain)}. Start a new one to change.`
+          : "Who answers the next message: Pupper (the robot's own agent) or the Cloud"}
+      >
+        <button
+          class="brain-opt"
+          class:selected={brain === BRAINS.LOCAL}
+          role="radio"
+          aria-checked={brain === BRAINS.LOCAL}
+          disabled={brainLocked || !localBrainAvailable}
+          title={!localBrainAvailable ? localBrainReason : undefined}
+          onclick={() => setBrain(BRAINS.LOCAL)}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="7" width="16" height="12" rx="3"/>
+            <circle cx="9" cy="13" r="1.4" fill="currentColor" stroke="none"/>
+            <circle cx="15" cy="13" r="1.4" fill="currentColor" stroke="none"/>
+            <line x1="12" y1="3" x2="12" y2="7"/>
+          </svg>
+          <span>Pupper</span>
+        </button>
+        <button
+          class="brain-opt"
+          class:selected={brain === BRAINS.CLOUD}
+          role="radio"
+          aria-checked={brain === BRAINS.CLOUD}
+          disabled={brainLocked}
+          onclick={() => setBrain(BRAINS.CLOUD)}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 18a4 4 0 0 1-.6-7.95A6 6 0 0 1 18 9.5a3.5 3.5 0 0 1 .5 7H7z"/>
+          </svg>
+          <span>Cloud</span>
+        </button>
+        {#if brainLocked}
+          <svg class="brain-lock" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="5" y="11" width="14" height="10" rx="2"/>
+            <path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+          </svg>
+        {/if}
+      </div>
     </div>
 
     <!-- Messages or Empty state -->
@@ -747,6 +850,40 @@
   }
   .action-bar-btn:hover { border-color: var(--mpx-yellow); background: #fffef2; }
   .action-bar-btn.active { border-color: var(--mpx-yellow); background: var(--mpx-yellow-soft); }
+
+  /* ── Brain toggle (right end of the action bar) ── */
+  .brain-toggle {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 32px;
+    margin-left: auto;
+    padding: 2px;
+    border: 1px solid var(--mpx-line);
+    border-radius: var(--r-pill);
+    background: var(--mpx-surface-3);
+  }
+  .brain-opt {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    height: 26px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: var(--r-pill);
+    background: transparent;
+    color: var(--mpx-muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background var(--dur-fast), color var(--dur-fast);
+  }
+  .brain-opt:hover:not(:disabled) { color: var(--mpx-ink-soft); }
+  .brain-opt.selected { background: var(--mpx-surface); color: var(--mpx-ink); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
+  .brain-opt:disabled { cursor: default; }
+  .brain-opt:disabled:not(.selected) { opacity: 0.45; }
+  .brain-toggle.locked .brain-opt.selected { background: var(--mpx-yellow-soft); }
+  .brain-lock { color: var(--mpx-muted); margin: 0 6px 0 2px; flex-shrink: 0; }
 
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 

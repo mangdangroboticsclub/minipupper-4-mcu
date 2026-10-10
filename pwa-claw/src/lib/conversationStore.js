@@ -5,6 +5,8 @@
  * {
  *   id: string,          // UUID (same as sessionId)
  *   title: string,       // derived from first user message
+ *   brain: string,       // "cloud" | "local" -- who answers, fixed for the
+ *                        // conversation's life (see BRAINS below)
  *   createdAt: number,   // Date.now()
  *   updatedAt: number,   // Date.now()
  *   messages: [          // serialisable message objects
@@ -14,6 +16,39 @@
  */
 
 const STORAGE_KEY = "mpx_chat_conversations";
+const BRAIN_KEY = "mpx_chat_brain";
+
+/**
+ * The two brains a conversation can talk to. "cloud" is the OpenClaw
+ * ingress the robot relays to (the only brain before Phase 5); "local" is
+ * ESP-Claw's agent running on the robot itself. The choice is made when a
+ * conversation starts and the robot keeps the two sessions apart by the
+ * conversation id, so a conversation never changes brain -- its history
+ * lives on one side only.
+ */
+export const BRAINS = Object.freeze({ CLOUD: "cloud", LOCAL: "local" });
+export const DEFAULT_BRAIN = BRAINS.CLOUD;
+
+export function normalizeBrain(brain) {
+  return brain === BRAINS.LOCAL ? BRAINS.LOCAL : BRAINS.CLOUD;
+}
+
+/** The brain the next new conversation will use (remembered on this device). */
+export function getPreferredBrain() {
+  try {
+    return normalizeBrain(localStorage.getItem(BRAIN_KEY));
+  } catch {
+    return DEFAULT_BRAIN;
+  }
+}
+
+export function setPreferredBrain(brain) {
+  try {
+    localStorage.setItem(BRAIN_KEY, normalizeBrain(brain));
+  } catch (e) {
+    console.warn("conversationStore: unable to remember the brain", e);
+  }
+}
 
 // ── UUID (matches Chat.svelte) ─────────────────────────────────
 function generateUUID() {
@@ -78,7 +113,7 @@ export function getConversation(id) {
 /**
  * Persist (create or update) a conversation.
  */
-export function saveConversation(id, { messages, title }) {
+export function saveConversation(id, { messages, title, brain }) {
   const all = readAll();
   const existing = all[id];
   const now = Date.now();
@@ -86,6 +121,8 @@ export function saveConversation(id, { messages, title }) {
   all[id] = {
     id,
     title: title ?? (messages ? inferTitle(messages) : existing?.title ?? "New Conversation"),
+    // Conversations saved before the brain existed were all cloud ones.
+    brain: normalizeBrain(brain ?? existing?.brain),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
     messages: messages ?? existing?.messages ?? [],
@@ -146,6 +183,7 @@ export function importConversations(jsonStr, { onConflict = "overwrite" } = {}) 
     all[id] = {
       id,
       title: convo.title || inferTitle(convo.messages),
+      brain: normalizeBrain(convo.brain),
       createdAt: convo.createdAt ?? Date.now(),
       updatedAt: convo.updatedAt ?? Date.now(),
       messages: convo.messages,

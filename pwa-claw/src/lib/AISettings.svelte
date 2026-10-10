@@ -13,10 +13,15 @@
    *   mpv2-claw   offers all three modes and restarts after saving. Its GET
    *               reply has no "modes" key.
    *   mpx-dog     (local-claw) offers only what it has -- "modes" lists them
-   *               ("own" is still to come) -- and applies a change live, so
-   *               POST answers {"restarting":false} and we simply reload.
-   *               It also has GET/POST /v1/voice (status, volume, hands-free,
-   *               music), which this page shows when the robot has it.
+   *               ("own" once the on-device agent is in the build) -- and
+   *               applies a change live, so POST answers {"restarting":false}
+   *               and we simply reload. Its GET also carries "agent"
+   *               {available, running}; in "own" mode only the chat page's
+   *               "Pupper" brain uses the key -- voice turns are still
+   *               answered by MangDang's server for now, which the mode card
+   *               says when the robot reports an agent. It also has GET/POST
+   *               /v1/voice (status, volume, hands-free, music), which this
+   *               page shows when the robot has it.
    *
    * The robot never sends the key back — only whether one is saved and its
    * last four characters. Leaving the key field empty keeps the saved one.
@@ -81,7 +86,16 @@
   let volumeDraft = $state(null);          // slider value while dragging
   let voiceTimer = null;
 
-  let modes = $derived(offered ? ALL_MODES.filter((m) => offered.includes(m.id)) : ALL_MODES);
+  // mpx-dog's "own" is narrower than mpv2-claw's for now: the key serves the
+  // chat page's "Pupper" brain, voice still goes through MangDang.
+  const OWN_DESC_MPX =
+    "Chat with Pupper (the robot's own agent) uses your API key, which stays on the robot. Voice is still answered by MangDang's AI for now.";
+  let agentInfo = $state(null);            // GET /v1/ai "agent" (mpx-dog only)
+  let modes = $derived.by(() => {
+    const list = offered ? ALL_MODES.filter((m) => offered.includes(m.id)) : ALL_MODES;
+    if (!agentInfo) return list;
+    return list.map((m) => (m.id === "own" ? { ...m, desc: OWN_DESC_MPX } : m));
+  });
   let preset = $derived(PRESETS.find((p) => p.id === presetId) ?? PRESETS[0]);
   let canSave = $derived(
     !saving && !restarting &&
@@ -118,6 +132,7 @@
       if (!r.ok) throw new Error("HTTP " + r.status);
       const d = await r.json();
       offered = Array.isArray(d.modes) && d.modes.length ? d.modes : null;
+      agentInfo = d.agent && typeof d.agent === "object" ? d.agent : null;
       mode = savedMode = d.mode || "mangdang";
       runningMode = d.running_mode || savedMode;
       const own = d.own || {};

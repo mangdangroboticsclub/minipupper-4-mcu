@@ -102,7 +102,12 @@
               onclick={() => onSelect?.(convo.id)}
             >
               <div class="convo-content">
-                <p class="convo-title">{convo.title}</p>
+                <p class="convo-title">
+                  <span class="brain-badge" class:local={convo.brain === "local"} title={convo.brain === "local" ? "Answered by Pupper (on the robot)" : "Answered by the Cloud"}>
+                    {convo.brain === "local" ? "Pupper" : "Cloud"}
+                  </span>
+                  {convo.title}
+                </p>
                 {#if convo.messages?.length}
                   <p class="convo-preview">{convo.messages[convo.messages.length - 1]?.text?.slice(0, 80)}</p>
                 {/if}
@@ -278,6 +283,20 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+
+  .brain-badge {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 1px 6px;
+    border-radius: var(--r-pill);
+    background: var(--mpx-surface-3);
+    color: var(--mpx-muted);
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    vertical-align: 1px;
+  }
+  .brain-badge.local { background: var(--mpx-yellow-soft); color: var(--mpx-ink-soft); }
 
   .convo-meta {
     display: flex;
