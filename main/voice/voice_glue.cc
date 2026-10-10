@@ -10,25 +10,18 @@
 #include <cstdio>
 #include <cstring>
 
+#include "agent/agent_config.h"
 #include "esp_log.h"
-#include "nvs.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "voice_glue";
 
 namespace voice_glue {
 
-const char *mode_name(Mode m)
+bool voice_wanted()
 {
-    return m == Mode::MangDang ? "mangdang" : "off";
-}
-
-bool parse_mode(const char *name, Mode *out)
-{
-    if (!name || !out) return false;
-    if (std::strcmp(name, "mangdang") == 0) { *out = Mode::MangDang; return true; }
-    if (std::strcmp(name, "off") == 0)      { *out = Mode::Off;      return true; }
-    return false;
+    /* Voice is the gateway's in both AI modes; only "off" closes the mic. */
+    return agent_config::mode() != agent_config::Mode::Off;
 }
 
 }  // namespace voice_glue
@@ -54,45 +47,16 @@ bool parse_mode(const char *name, Mode *out)
 
 namespace {
 
-constexpr const char *kNvsNamespace = "voice";
-constexpr const char *kNvsModeKey   = "ai_mode";
-
-voice_glue::Mode load_mode()
-{
-    nvs_handle_t h;
-    char buf[16] = {0};
-    size_t len = sizeof(buf);
-    voice_glue::Mode m = voice_glue::Mode::MangDang;    /* zero setup is the default */
-    if (nvs_open(kNvsNamespace, NVS_READONLY, &h) == ESP_OK) {
-        if (nvs_get_str(h, kNvsModeKey, buf, &len) == ESP_OK) {
-            (void)voice_glue::parse_mode(buf, &m);
-        }
-        nvs_close(h);
-    }
-    return m;
-}
-
-void save_mode(voice_glue::Mode m)
-{
-    nvs_handle_t h;
-    if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_set_str(h, kNvsModeKey, voice_glue::mode_name(m));
-        nvs_commit(h);
-        nvs_close(h);
-    }
-}
-
 enum Event : uint8_t { EV_MASTER_ON = 1, EV_MASTER_OFF };
 
 QueueHandle_t s_events;
 bool          s_started;
 bool          s_wake_ready;        /* mpx_voice_wake_init() succeeded */
 volatile bool s_voice_resume;      /* hands-free was on when the Pi took over */
-voice_glue::Mode s_mode = voice_glue::Mode::MangDang;
 
 bool hands_free_wanted()
 {
-    return s_mode == voice_glue::Mode::MangDang && s_wake_ready;
+    return voice_glue::voice_wanted() && s_wake_ready;
 }
 
 esp_err_t hands_free_start_locked()
@@ -146,34 +110,27 @@ bool available()
     return mpx_audio_have_mic();
 }
 
-Mode mode()
+esp_err_t apply_mode()
 {
-    return s_started ? s_mode : load_mode();
-}
-
-esp_err_t set_mode(Mode m)
-{
-    if (m == Mode::MangDang && !available()) return ESP_ERR_NOT_SUPPORTED;
-    s_mode = m;
-    save_mode(m);
-    ESP_LOGW(TAG, "AI mode -> %s", mode_name(m));
+    ESP_LOGW(TAG, "AI mode -> %s", agent_config::mode_name(agent_config::mode()));
     if (!s_started) return ESP_OK;
-    if (m == Mode::Off) {
+    if (!voice_wanted()) {
         if (cap_music_active()) cap_music_stop();
         mpx_voice_wake_auto_stop();
         mpx_voice_disconnect();
         s_voice_resume = false;
         return ESP_OK;
     }
-    /* Off -> MangDang: the front end was never built if the robot booted
-     * with voice off, so this goes through the init-if-needed path. */
+    if (!available()) return ESP_ERR_NOT_SUPPORTED;
+    /* Off -> on: the front end was never built if the robot booted with
+     * voice off, so this goes through the init-if-needed path. */
+    if (mpx_voice_wake_auto_active()) return ESP_OK;
     return hands_free_start();
 }
 
 void start()
 {
     if (s_started) return;
-    s_mode = load_mode();
     s_started = true;
 
     if (!available()) {
@@ -211,7 +168,7 @@ void start()
         ESP_LOGW(TAG, "voice tools did not start -- the server cannot move the robot");
     }
 
-    if (s_mode == Mode::Off) {
+    if (!voice_wanted()) {
         ESP_LOGW(TAG, "AI is off: voice disabled, the microphone stays closed");
         return;
     }
@@ -246,7 +203,7 @@ void on_master_changed(bool active)
 esp_err_t hands_free_start()
 {
     if (!s_started || !available()) return ESP_ERR_NOT_SUPPORTED;
-    if (s_mode != Mode::MangDang) return ESP_ERR_INVALID_STATE;
+    if (!voice_wanted()) return ESP_ERR_INVALID_STATE;
     if (!s_wake_ready) {
         if (mpx_voice_wake_init() != ESP_OK) return ESP_FAIL;
         s_wake_ready = true;
@@ -270,7 +227,7 @@ std::string status_json()
 {
     cJSON *o = cJSON_CreateObject();
     cJSON_AddBoolToObject(o, "available", available());
-    cJSON_AddStringToObject(o, "mode", mode_name(mode()));
+    cJSON_AddStringToObject(o, "mode", agent_config::mode_name(agent_config::mode()));
     cJSON_AddBoolToObject(o, "mic", mpx_audio_have_mic());
     cJSON_AddBoolToObject(o, "speaker", mpx_audio_have_speaker());
     cJSON_AddNumberToObject(o, "volume", mpx_audio_get_volume());
@@ -315,8 +272,7 @@ std::string status_json()
 namespace voice_glue {
 
 bool available() { return false; }
-Mode mode() { return Mode::Off; }
-esp_err_t set_mode(Mode m) { return m == Mode::Off ? ESP_OK : ESP_ERR_NOT_SUPPORTED; }
+esp_err_t apply_mode() { return voice_wanted() ? ESP_ERR_NOT_SUPPORTED : ESP_OK; }
 void start() { ESP_LOGI(TAG, "voice not compiled in (CONFIG_APP_VOICE_ENABLE=n)"); }
 void on_master_changed(bool) {}
 esp_err_t hands_free_start() { return ESP_ERR_NOT_SUPPORTED; }

@@ -3,16 +3,24 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * /v1/ai -- where the robot's AI comes from, for the app's "AI & Voice"
- * screen (mpv2-claw's http_server_mpx_ai_api.c, two modes instead of three):
+ * screen (mpv2-claw's http_server_mpx_ai_api.c):
  *
- *   GET  /v1/ai   {"mode":"mangdang"|"off","running_mode":...,
- *                  "modes":["mangdang","off"],"available":bool}
- *   POST /v1/ai   {"mode":...}  ->  {"ok":true,"mode":...,"restarting":false}
+ *   GET  /v1/ai   {"mode":"mangdang"|"own"|"off","running_mode":...,
+ *                  "modes":[...],"available":bool,
+ *                  "voice":{"available":bool},
+ *                  "agent":{"available":bool,"running":bool},
+ *                  "own":{"backend","base_url","model","auth_type",
+ *                         "max_tokens_field","key_set":bool,"key_hint"}}
+ *   POST /v1/ai   {"mode":...} plus, for "own": {"backend","base_url",
+ *                  "model","auth_type","max_tokens_field","api_key"}
+ *                 ->  {"ok":true,"mode":...,"restarting":false[,"warning"]}
  *
- * "modes" is what this firmware offers; the app shows only those. mpv2-claw
- * has a third, "own" (the robot's own agent with the owner's LLM key); that
- * is phase 5 here, so a POST asking for it is a 400. Unlike mpv2-claw the
- * change applies live -- there is no agent to restart around.
+ * "modes" is what this firmware offers; the app shows only those. "own" is
+ * offered when the on-device agent is compiled in (CONFIG_APP_AGENT_ENABLE).
+ * The mode is agent_config's; a change is saved, then applied live to the
+ * voice stack (voice_glue::apply_mode) and the agent (agent::apply_config)
+ * -- there is no restart, unlike mpv2-claw. In "own" the agent uses the
+ * owner's LLM while voice still goes to the MangDang gateway.
  *
  * /v1/voice -- the voice link itself, for the app and for bench checks in
  * place of mpv2-claw's `voice`, `wake` and `music` console commands:
@@ -36,6 +44,8 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 
+#include "agent/agent_config.h"
+#include "agent/agent_runtime.h"
 #include "voice/voice_glue.h"
 #if CONFIG_APP_VOICE_ENABLE
 #include "audio/mpx_audio.h"
@@ -118,11 +128,17 @@ cJSON *parse_body(httpd_req_t *req, int max_len)
 
 /* ── /v1/ai ─────────────────────────────────────────────────────────── */
 
+/* "mangdang" needs either a microphone (voice) or the agent (chat) to mean
+ * anything; "own" needs the agent, since only the agent uses the owner's
+ * key. "off" is always there. */
 cJSON *modes_array()
 {
     cJSON *arr = cJSON_CreateArray();
-    if (voice_glue::available()) {
+    if (voice_glue::available() || agent::available()) {
         cJSON_AddItemToArray(arr, cJSON_CreateString("mangdang"));
+    }
+    if (agent::available()) {
+        cJSON_AddItemToArray(arr, cJSON_CreateString("own"));
     }
     cJSON_AddItemToArray(arr, cJSON_CreateString("off"));
     return arr;
@@ -134,12 +150,67 @@ esp_err_t ai_get_handler(httpd_req_t *req)
     if (!root) {
         return httpd_resp_send_500(req);
     }
-    const char *mode = voice_glue::mode_name(voice_glue::mode());
+    const char *mode = agent_config::mode_name(agent_config::mode());
     cJSON_AddStringToObject(root, "mode", mode);
     cJSON_AddStringToObject(root, "running_mode", mode);     /* applied live: the same */
     cJSON_AddItemToObject(root, "modes", modes_array());
     cJSON_AddBoolToObject(root, "available", voice_glue::available());
+
+    cJSON *voice = cJSON_AddObjectToObject(root, "voice");
+    cJSON_AddBoolToObject(voice, "available", voice_glue::available());
+
+    cJSON *agent = cJSON_AddObjectToObject(root, "agent");
+    cJSON_AddBoolToObject(agent, "available", agent::available());
+    cJSON_AddBoolToObject(agent, "running", agent::running());
+
+    const agent_config::OwnLlm o = agent_config::own();
+    cJSON *own = cJSON_AddObjectToObject(root, "own");
+    cJSON_AddStringToObject(own, "backend", o.backend.c_str());
+    cJSON_AddStringToObject(own, "base_url", o.base_url.c_str());
+    cJSON_AddStringToObject(own, "model", o.model.c_str());
+    cJSON_AddStringToObject(own, "auth_type", o.auth_type.c_str());
+    cJSON_AddStringToObject(own, "max_tokens_field", o.max_tokens_field.c_str());
+    cJSON_AddBoolToObject(own, "key_set", !o.api_key.empty());
+    cJSON_AddStringToObject(own, "key_hint", agent_config::own_key_hint().c_str());
     return send_json(req, root);
+}
+
+const char *body_string(const cJSON *body, const char *key)
+{
+    const cJSON *item = cJSON_GetObjectItem(body, key);
+    return cJSON_IsString(item) ? item->valuestring : "";
+}
+
+/* The owner's account, checked the way mpv2-claw's /v1/ai checks it.
+ * Returns nullptr when fine, else the complaint for the 400. */
+const char *read_own(const cJSON *body, agent_config::OwnLlm *out)
+{
+    const agent_config::OwnLlm stored = agent_config::own();
+    out->backend          = body_string(body, "backend");
+    out->base_url         = body_string(body, "base_url");
+    out->model            = body_string(body, "model");
+    out->auth_type        = body_string(body, "auth_type");
+    out->max_tokens_field = body_string(body, "max_tokens_field");
+    out->api_key          = body_string(body, "api_key");
+
+    if (out->backend != "openai_compatible" && out->backend != "anthropic_compatible") {
+        return "backend must be openai_compatible or anthropic_compatible";
+    }
+    if (out->base_url.rfind("http://", 0) != 0 && out->base_url.rfind("https://", 0) != 0) {
+        return "base_url must start with http:// or https://";
+    }
+    if (out->model.empty()) {
+        return "model is required";
+    }
+    if (out->auth_type.empty()) out->auth_type = "bearer";
+    if (out->auth_type != "bearer" && out->auth_type != "none") {
+        return "auth_type must be bearer or none";
+    }
+    if (out->max_tokens_field.empty()) out->max_tokens_field = "max_tokens";
+    if (out->api_key.empty() && stored.api_key.empty()) {
+        return "api_key is required the first time";
+    }
+    return nullptr;
 }
 
 esp_err_t ai_post_handler(httpd_req_t *req)
@@ -148,31 +219,60 @@ esp_err_t ai_post_handler(httpd_req_t *req)
     if (!body) {
         return send_error(req, "400 Bad Request", "invalid JSON body");
     }
-    const cJSON *mode_item = cJSON_GetObjectItem(body, "mode");
-    voice_glue::Mode mode;
-    if (!cJSON_IsString(mode_item) || !voice_glue::parse_mode(mode_item->valuestring, &mode)) {
-        const bool own = cJSON_IsString(mode_item) && strcmp(mode_item->valuestring, "own") == 0;
+    agent_config::Mode mode;
+    if (!agent_config::parse_mode(body_string(body, "mode"), &mode)) {
+        cJSON_Delete(body);
+        return send_error(req, "400 Bad Request", "mode must be mangdang, own or off");
+    }
+    if (mode == agent_config::Mode::Own && !agent::available()) {
         cJSON_Delete(body);
         return send_error(req, "400 Bad Request",
-                          own ? "own-AI mode is not in this firmware yet; choose mangdang or off"
-                              : "mode must be mangdang or off");
+                          "own-AI mode needs the on-device agent, which this firmware does not have");
+    }
+    if (mode == agent_config::Mode::MangDang && !voice_glue::available() && !agent::available()) {
+        cJSON_Delete(body);
+        return send_error(req, "409 Conflict",
+                          "this robot has no microphone and no agent, so AI cannot be on");
+    }
+
+    agent_config::OwnLlm own;
+    if (mode == agent_config::Mode::Own) {
+        if (const char *problem = read_own(body, &own)) {
+            cJSON_Delete(body);
+            return send_error(req, "400 Bad Request", problem);
+        }
     }
     cJSON_Delete(body);
 
-    const esp_err_t err = voice_glue::set_mode(mode);
-    if (err == ESP_ERR_NOT_SUPPORTED) {
-        return send_error(req, "409 Conflict", "this robot has no microphone, so voice cannot be on");
+    if (mode == agent_config::Mode::Own) {
+        const esp_err_t err = agent_config::save_own(own);
+        if (err != ESP_OK) {
+            return send_error(req, "500 Internal Server Error", "could not store the LLM account");
+        }
     }
+    if (agent_config::save_mode(mode) != ESP_OK) {
+        return send_error(req, "500 Internal Server Error", "could not store the mode");
+    }
+
+    /* Apply live: voice first (it may close the microphone), then the
+     * agent's model. */
+    const esp_err_t voice_err = voice_glue::apply_mode();
+    const esp_err_t agent_err = agent::apply_config();
+
     cJSON *root = cJSON_CreateObject();
     if (!root) {
         return httpd_resp_send_500(req);
     }
     cJSON_AddBoolToObject(root, "ok", true);
-    cJSON_AddStringToObject(root, "mode", voice_glue::mode_name(mode));
+    cJSON_AddStringToObject(root, "mode", agent_config::mode_name(mode));
     cJSON_AddBoolToObject(root, "restarting", false);
-    if (err != ESP_OK) {
+    if (voice_err == ESP_ERR_NOT_SUPPORTED) {
+        cJSON_AddStringToObject(root, "warning", "no microphone: chat only, no voice");
+    } else if (voice_err != ESP_OK) {
         /* Saved, but listening did not start (no front end, mic busy...). */
-        cJSON_AddStringToObject(root, "warning", esp_err_to_name(err));
+        cJSON_AddStringToObject(root, "warning", esp_err_to_name(voice_err));
+    } else if (agent::running() && agent_err != ESP_OK) {
+        cJSON_AddStringToObject(root, "warning", esp_err_to_name(agent_err));
     }
     return send_json(req, root);
 }
