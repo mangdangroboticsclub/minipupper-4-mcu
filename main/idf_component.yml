@@ -70,3 +70,36 @@ dependencies:
   ## wrapper only tunnels register reads and never sets up the BMI270's AUX
   ## interface, which is what the magnetometer actually needs.
   tangyumei3535/bmm150_sensorapi: ^1.0.0
+
+  ## ── The on-device agent (local-claw, Phase 5): ESP-Claw ──────
+  ## third-party/esp-claw is Espressif's agent framework, vendored the way
+  ## mpv2-claw carries it (its components/ tree only; see
+  ## .cursor/PORT_NOTES.md for what was left out and why). Never edit it.
+  ## app_claw is the application shell: it pulls in the agent core, the
+  ## capability registry, the event router, sessions, memory, skills and
+  ## every capability that is switched on in sdkconfig (its own
+  ## idf_component.yml gates each one on APP_CLAW_CAP_*). The rest are the
+  ## pieces main/ calls directly, declared so they are this component's
+  ## requirements rather than something app_claw happens to bring along:
+  ##   http_reuse    claw_core REQUIRES it by name and does not depend on
+  ##                 it in its manifest; the app has to supply it.
+  ##   claw_core     claw_paths_set(): where the agent's files live.
+  ##   claw_cap      the descriptor types main/agent/agent_caps.cc fills.
+  ##   cap_im_local  the "web" chat channel the PWA's chat is bridged to.
+  ##   claw_event_router  its header, for the stack-size override in
+  ##                 main/agent/claw_overrides.c.
+  ## Declared unconditionally, like the voice stack above: `rules:` are
+  ## evaluated from sdkconfig.json, which the first configure pass does not
+  ## have, and main's REQUIRES names them.
+  app_claw:
+    path: ../third-party/esp-claw/components/common/app_claw
+  http_reuse:
+    path: ../third-party/esp-claw/components/common/http_reuse
+  claw_core:
+    path: ../third-party/esp-claw/components/claw_modules/claw_core
+  claw_cap:
+    path: ../third-party/esp-claw/components/claw_modules/claw_cap
+  cap_im_local:
+    path: ../third-party/esp-claw/components/claw_capabilities/cap_im_local
+  claw_event_router:
+    path: ../third-party/esp-claw/components/claw_modules/claw_event_router

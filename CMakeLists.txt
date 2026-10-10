@@ -48,3 +48,46 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(errors='replace')]=]
     "esp_sr_movemodel_console_encoding"
 )
+
+# ── The agent's read-only `system` partition (local-claw, Phase 5) ──────────
+#
+# ESP-Claw keeps two filesystem roots: DATA (writable; here <fs>/agent on the
+# `storage` LittleFS) and SYSTEM (read-only; the `system` partition, mounted
+# at /system). SYSTEM carries what the agent needs at boot and must not be
+# able to lose or corrupt:
+#
+#   skills/<id>/SKILL.md   every skill shipped by a component in the build,
+#                          collected by ESP-Claw's skill_builder from each
+#                          component's skills/ directory (main/skills/ has
+#                          the robot's: mpx_robot, mpx_skills, mpx_display,
+#                          mpx_music; ESP-Claw's own ride along).
+#   .recovery/             seeds for memory/, router_rules/ and scheduler/,
+#                          copied into DATA at boot when a file is missing
+#                          (main/agent/agent_fs.cc). agent_fs/system/ is the
+#                          source.
+#
+# Staged into build/system_fs/ -- never into the source tree -- and packed by
+# joltwallet/littlefs's image tool, which `idf.py flash` writes along with
+# the app (FLASH_IN_PROJECT). The image is rebuilt on every build (the tool
+# cannot watch a directory), which costs a second.
+set(MPX_SYSTEM_FS_SOURCE "${CMAKE_SOURCE_DIR}/agent_fs/system")
+set(MPX_SYSTEM_FS_STAGING "${CMAKE_BINARY_DIR}/system_fs")
+
+add_custom_target(mpx_prepare_system_fs ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf "${MPX_SYSTEM_FS_STAGING}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${MPX_SYSTEM_FS_STAGING}"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${MPX_SYSTEM_FS_SOURCE}" "${MPX_SYSTEM_FS_STAGING}"
+    VERBATIM
+)
+
+littlefs_create_partition_image(system "${MPX_SYSTEM_FS_STAGING}" FLASH_IN_PROJECT
+    DEPENDS mpx_prepare_system_fs)
+
+skill_builder_configure_skill_sync(
+    TARGET littlefs_system_bin
+    SKILL_OUTPUT_DIR "${MPX_SYSTEM_FS_STAGING}/skills"
+)
+# The sync writes into the staging tree, so it has to run after the tree is
+# (re)created, and the image has to wait for both.
+add_dependencies(skill_builder_sync_skills mpx_prepare_system_fs)
