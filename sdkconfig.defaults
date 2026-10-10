@@ -25,8 +25,21 @@ CONFIG_SPIRAM_TYPE_AUTO=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_BOOT_INIT=y
 CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
-CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+
+# local-claw: internal RAM is the scarce resource once the screen, audio and
+# the wake word are up -- with small mallocs forced internal (it was 16384)
+# the robot booted with 2 KB of internal RAM left, and the Wi-Fi driver could
+# not get packet buffers ("wifi:m f null", phones dropped off the AP). Same
+# policy as mpv2-claw, which runs the same voice and display code: plain
+# malloc() may use PSRAM at any size, Wi-Fi/lwIP and mbedTLS buffers prefer
+# it, and 64 KB of internal RAM stays reserved for what must be internal
+# (DMA, task stacks, the Wi-Fi driver's static buffers). Safe without
+# XIP_FROM_PSRAM because nothing in main/ runs from an IRAM interrupt; IDF's
+# drivers allocate their ISR-side state with explicit internal caps.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
 # local-claw: the mpv2 movement players (robot/moves_mpe.inc) pace their 5 ms
 # frames with vTaskDelay(1) against esp_timer. At the IDF default of 100 Hz a

@@ -1,5 +1,6 @@
 #include <cstdint>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 
@@ -45,6 +46,15 @@ static void on_master_changed(bool active)
 	voice_glue::on_master_changed(active);
 }
 
+/* Internal RAM after each boot stage. The Wi-Fi driver needs internal RAM
+ * for every packet; when this runs out the AP stays up but phones time out. */
+static void log_internal_heap(const char *stage)
+{
+	ESP_LOGI(TAG, "internal RAM after %s: %u free, %u largest", stage,
+	         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+	         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
+
 static void init_nvs()
 {
 	esp_err_t ret = nvs_flash_init();
@@ -58,6 +68,7 @@ static void init_nvs()
 extern "C" void app_main(void)
 {
 	init_nvs();
+	log_internal_heap("boot");
 
 	// ── Robot HAL (servo bus, gait task on Core 1) ─────────────
 	mpx_robot_set_skill_hooks(&s_skill_hooks);
@@ -71,6 +82,7 @@ extern "C" void app_main(void)
 	// anything slow: the face is the first thing on the panel, and the
 	// backlight only comes on once it is drawn (no white flash).
 	display_glue::start_face();
+	log_internal_heap("robot + screen");
 
 	// ── Audio: microphones + speaker ──────────────────────────
 	// After the robot (the IMU and the ES7210 share the I2C bus; the IMU
@@ -87,6 +99,7 @@ extern "C" void app_main(void)
 		ESP_LOGW(TAG, "Pi link init failed — continuing standalone");
 	}
 #endif
+	log_internal_heap("audio + Pi link");
 
 	// Mount LittleFS (for .wasm storage and PWA assets)
 	if (!fs::init_littlefs()) {
@@ -110,6 +123,7 @@ extern "C" void app_main(void)
 
 	// ── Screen: network line under the eyes, Pi address, ROS badge ─
 	display_glue::start_events();
+	log_internal_heap("Wi-Fi");
 
 	// ── Deploy embedded PWA assets to LittleFS ────────────────
 	if (!network::deploy_www_assets()) {
@@ -145,6 +159,7 @@ extern "C" void app_main(void)
 	} else {
 		ESP_LOGI(TAG, "Lua VM ready — robot bindings registered");
 	}
+	log_internal_heap("HTTP + chat + WASM + Lua");
 
 	// ── Voice: wake word, the MangDang voice gateway, music ───
 	// Last, as in mpv2-claw: esp-sr's front end is the biggest consumer of
