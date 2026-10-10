@@ -41,7 +41,7 @@
  * is never touched again, the app still updates correctly.
  */
 
-const CACHE_VERSION = "v12-claw";  // v9: mpv2-claw app ported to mpx-dog; v10: Display page screen settings; v11: AI modes list + voice card; v12: chat brain toggle (Pupper / Cloud) + own-AI mode
+const CACHE_VERSION = "v13-claw";  // v9: mpv2-claw app ported to mpx-dog; v10: Display page screen settings; v11: AI modes list + voice card; v12: chat brain toggle (Pupper / Cloud) + own-AI mode; v13: mpv2-claw ede0804 (Servo Studio rework, Turn/Look right stick, PC Home pad, socket rate limit, calibration +-90)
 const CACHE = `mpx-dog-${CACHE_VERSION}`;
 
 /**

@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from "svelte";
   /**
    * MangDang Servo Studio: in-app tuning for the four AT32 driver boards.
    *
@@ -9,7 +10,9 @@
    * Functions follow minipupperesp's wizard.html; it all runs on the existing
    * /v1/studio/* API in components/http_server/http_server_mpx_studio_api.c.
    */
-  let { onBack } = $props();
+  /* backLabel / presets let another firmware reuse this page unchanged
+     (minipupperesp builds it into its /wizard with its own gain sets). */
+  let { onBack, backLabel = "Settings", presets: presetsProp = null } = $props();
 
   /* ── Model ─────────────────────────────────────────────────── */
   /* Mirror of the AT32 sms_config table. onlyMode: shown only in that
@@ -17,7 +20,7 @@
      AT32 board units. */
   const PARAMS = [
     { a: 0,  n: "Reverse position sensor", k: "reverse_position_sensor", bool: ["normal", "reversed"],
-      desc: "Invert the position sensor direction." },
+      desc: "Invert the position sensor direction. Reverse motor flips with it, so the servo keeps holding instead of running into its end stop." },
     { a: 1,  n: "Min position ADC", k: "min_position_adc", min: 0, max: 4096, step: 1,
       desc: "ADC reading at the low end of travel. Pot calibration sets this for you." },
     { a: 2,  n: "Max position ADC", k: "max_position_adc", min: 0, max: 4096, step: 1,
@@ -43,7 +46,32 @@
     { a: 12, n: "PWM scale", k: "pwm_scale", min: 0, max: 0.01, step: 0.00001, onlyMode: 1,
       desc: "PWM duty per unit of position-PID output (0.001 means PID output 1000 = 100 % PWM). Stiffness = Kp position x PWM scale (PWM mode only)." },
   ];
-  const TUNED = PARAMS.filter((p) => p.d !== undefined);
+  /* Gain presets, minipupperesp style (main.c tune_presets): one tap instead
+     of typing four gains. Default is what this robot ships with (the d
+     values above); Strong is minipupperesp's "Strong (backflip)". Only gains
+     are written: calibration (0..4) is per robot and never touched. */
+  const SHIPPED = Object.fromEntries(PARAMS.filter((p) => p.d !== undefined).map((p) => [p.a, p.d]));
+  const PRESETS = [
+    { id: "default", name: "Default", short: "Quiet, for walking", note: "Shipped gains. Quiet, for walking.",
+      set: [[5, SHIPPED[5]], [6, SHIPPED[6]], [7, SHIPPED[7]], [8, SHIPPED[8]], [11, 0]] },
+    { id: "strong", name: "Strong", short: "Stiff, for flips", note: "Stiff and snappy, for flips. Runs hotter.",
+      warn: "Strong holds harder and draws more current, so the motor runs warmer. Good for flips and jumps; switch back to Default for long walks.",
+      set: [[5, 120], [6, 1400], [7, 0.00006], [8, 0.0011], [9, 0.99], [11, 0]] },
+  ];
+  const presetList = $derived(presetsProp || PRESETS);
+  const presetSpec = (pr) => `Kp ${pr.set[0][1]} · Kd ${pr.set[1][1]}`;
+
+  /* Toolbar icons (Claude Design "MangDang Servo Studio" · Toolbar icons):
+     24 px grid, 2 px round stroke, one meaning each. */
+  const ICON = {
+    connect: "M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0zM12 16v5",
+    scan: "M10.5 3.5a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM15.5 15.5L21 21M8 9h5v3.5H8zM10.5 12.5V15",
+    refresh: "M20 12a8 8 0 1 1-2.35-5.65M20 4v5h-5",
+    calibrate: "M4.2 17.5a8.5 8.5 0 1 1 15.6 0M12 15l4-5M12 6.5V8.5M7 9.2l1.4 1.1M17 9.2l-1.4 1.1M10.5 15a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0",
+    table: "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14",
+    graph: "M4 4v16h16M7 15l4-5 3 3 5-7",
+    flash: "M7 7h10v10H7zM10 4v3M14 4v3M10 17v3M14 17v3M4 10h3M4 14h3M17 10h3M17 14h3M12 9.5v5M10 12.5l2 2 2-2",
+  };
 
   /* Live keys exactly as /v1/studio/live sends them. */
   const LIVE = [
@@ -112,7 +140,9 @@
   let editP = $state(null);            // address being edited
   let draft = $state("");
   let edMsg = $state(""), edBad = $state(false);
-  let resetArm = $state(false), tunedArm = $state(false);
+  let presetAsk = $state(null);        // preset waiting for "are you sure"
+  let presetBusy = $state(false);
+  let unsaved = $state(0);             // writes since the last Save to flash
 
   const cur = $derived(sel > 0 ? sel : 0);
   const allMode = $derived(sel === -1);
@@ -121,6 +151,16 @@
     P.onlyMode === undefined || ctlMode === null || ctlMode === P.onlyMode));
   const answering = $derived(found ? found.length : null);
   const torqueOn = $derived(live && (live.mode === 1 || live.mode === 2));
+  /* Which preset the gains on the board match: a preset id, "custom",
+     "mixed" (All servos, boards differ) or null (not read yet). */
+  const same = (a, b) => isNum(a) && Math.abs(a - b) <= Math.abs(b) * 1e-4 + 1e-9;
+  const activePreset = $derived.by(() => {
+    const g = [5, 6, 7, 8].map((a) => vals[a]);
+    if (g.some((v) => v === "mixed")) return "mixed";
+    if (!g.every(isNum)) return null;
+    const hit = presetList.find((pr) => pr.set.slice(0, 4).every(([a, v]) => same(vals[a], v)));
+    return hit ? hit.id : "custom";
+  });
 
   $effect(() => {
     const mq = window.matchMedia("(min-width: 1000px)");
@@ -175,23 +215,35 @@
   }
 
   /* Lend the app shell's permission WebSocket back to the robot while this
-     screen is open: it is one of the five sockets and worth nothing here. */
-  $effect(() => {
+     screen is open: it is one of the five sockets and worth nothing here.
+     onMount, NOT $effect: the shell's listeners run synchronously inside this
+     callback and read its socket state. Inside an $effect those reads became
+     this effect's dependencies, so closing the socket re-ran the effect, which
+     gave the socket back (reopen), which re-ran it again (close)... a
+     reconnect storm at network speed that starved the robot's few HTTP
+     sockets until the studio's polls failed and it showed "Robot offline".
+     onMount runs once and tracks nothing. */
+  onMount(() => {
     window.dispatchEvent(new Event("mpx:yield-socket"));
     return () => window.dispatchEvent(new Event("mpx:resume-socket"));
   });
 
   /* ── Connection ────────────────────────────────────────────── */
+  /* One missed check is not "offline": the robot's server is single-threaded
+     and a busy moment (a long scan, a burst of other clients) can drop one.
+     Two in a row is. */
+  let modeMisses = 0;
   async function pollMode() {
     if (inflight) return;
     try {
       const d = await jget("/v1/studio/mode");
+      modeMisses = 0;
       online = true;
       if (d.studio !== cli) {
         cli = d.studio;
         if (cli && found === null) scan(true);
       }
-    } catch { online = false; }
+    } catch { if (++modeMisses >= 2) online = false; }
   }
   $effect(() => {
     pollMode();
@@ -229,13 +281,13 @@
   /* ── Selection + reading ───────────────────────────────────── */
   function openServo(id) {
     if (cur !== id) gReset();
-    sel = id; editP = null; resetArm = false; tunedArm = false;
+    sel = id; editP = null; presetAsk = null;
     live = null; vals = {};
     if (!wide) { view = "servo"; scrollTop(); }
     if (cli) readOne();
   }
   function openAll() {
-    sel = -1; editP = null; resetArm = false; tunedArm = false;
+    sel = -1; editP = null; presetAsk = null;
     live = null; vals = {}; grun = false;
     if (wide && tab === "graph") tab = "table";
     if (!wide) { view = "servo"; scrollTop(); }
@@ -307,6 +359,53 @@
     draft = String(+v.toFixed(dp));
   }
 
+  /* Reversing the position sensor without the motor turns the position loop
+     into positive feedback: torque on, and the servo drives itself into the
+     end stop. So whenever the sensor flips, the motor flips with it. A flip
+     (not "make them equal") keeps whatever pairing each servo is wired for. */
+  async function sensorBefore() {
+    if (!allMode) return [{ id: cur, s: vals[0], m: vals[4] }];
+    const out = [];
+    for (const id of found || []) {
+      try {
+        const d = await jget("/v1/studio/dump?id=" + id);
+        if (!d.ok) continue;
+        const g = (p) => d.params.find((x) => x.p === p)?.v;
+        out.push({ id, s: g(0), m: g(4) });
+      } catch { /* skipped: it did not answer */ }
+    }
+    return out;
+  }
+  async function followSensor(before, v) {
+    const want = v >= 0.5 ? 1 : 0;
+    let flipped = 0, bad = [];
+    for (const b of before) {
+      if (!isNum(b.s) || !isNum(b.m)) { bad.push(b.id); continue; }
+      if ((b.s >= 0.5 ? 1 : 0) === want) continue;         // sensor did not change here
+      const m = b.m >= 0.5 ? 0 : 1;
+      try {
+        const d = await jget(`/v1/studio/set?id=${b.id}&p=4&v=${m}`);
+        if (!d.ok) { bad.push(b.id); continue; }
+        flipped++;
+        if (!allMode) vals[4] = d.v;
+      } catch { bad.push(b.id); }
+    }
+    if (allMode && flipped) {
+      const all4 = new Set();
+      for (const b of before) if (isNum(b.m)) all4.add((b.s >= 0.5 ? 1 : 0) === want ? (b.m >= 0.5 ? 1 : 0) : (b.m >= 0.5 ? 0 : 1));
+      vals[4] = all4.size === 1 ? [...all4][0] : "mixed";
+    }
+    if (flipped) unsaved += flipped;
+    if (bad.length) {
+      edMsg = `Sensor changed, but Reverse motor could not be flipped on ${bad.map(pad3).join(", ")}. Flip it by hand before torque on.`;
+      edBad = true;
+      toast("Reverse motor not flipped on " + bad.map(pad3).join(", "), true);
+    } else if (flipped) {
+      edMsg += allMode ? ` Reverse motor flipped on ${flipped} servo${flipped === 1 ? "" : "s"} to match.` : ` Reverse motor is now ${PARAMS[4].bool[vals[4] >= 0.5 ? 1 : 0]} to match.`;
+      toast(`Reverse motor flipped to match the sensor${allMode ? ` (${flipped})` : ""}`);
+    }
+  }
+
   async function writeParam(a, text) {
     const P = PARAMS[a];
     const v = parseFloat(asText(text));
@@ -316,6 +415,7 @@
     }
     if (!cli) { edMsg = "Turn on Connect first; the gait still owns the bus"; edBad = true; return false; }
     edMsg = allMode ? "Writing to every servo…" : "Writing…"; edBad = false;
+    const before = a === 0 ? await sensorBefore() : null;
     try {
       const enc = encodeURIComponent(asText(text));
       const d = allMode
@@ -333,6 +433,8 @@
         edMsg = `Board reads back ${fmtV(d.v)}. In RAM until you save.`;
         toast(`${P.n} = ${fmtV(d.v)}`);
       }
+      unsaved++;
+      if (before) await followSensor(before, v);
       return true;
     } catch (e) {
       edMsg = "Write failed: " + (e?.message || e); edBad = true;
@@ -341,31 +443,49 @@
     }
   }
 
-  async function writeTuned() {
-    if (!tunedArm) { tunedArm = true; return; }
-    tunedArm = false;
-    let bad = 0;
-    for (const P of TUNED) if (!(await writeParam(P.a, String(P.d)))) bad++;
-    toast(bad ? `${bad} gain(s) not written` : "Tuned gains written, in RAM until you save", !!bad);
+  /* ── Gain presets ──────────────────────────────────────────── */
+  function askPreset(pr) {
+    if (!cli) return toast("Turn on Connect first", true);
+    if (!cur && !allMode) return;
+    if (activePreset === pr.id) return toast(`Already on ${pr.name}`);
+    presetAsk = pr;
+  }
+  async function applyPreset() {
+    const pr = presetAsk;
+    if (!pr || presetBusy) return;
+    presetBusy = true;
+    let bad = [], n = 0;
+    for (const [a, v] of pr.set) {
+      // control_mode only when it actually changes: AT32 firmware older than
+      // 0.0.8 does not know it and would report a failure for nothing.
+      if (a === 11 && (!isNum(vals[11]) || same(vals[11], v))) continue;
+      try {
+        const d = allMode
+          ? await jget(`/v1/studio/setall?p=${a}&v=${v}`)
+          : await jget(`/v1/studio/set?id=${cur}&p=${a}&v=${v}`);
+        // A servo that is not plugged in (absent from the last scan) is not
+        // a failure: All servos writes to whoever answers.
+        const missed = (d.fail || []).filter((id) => !found || found.includes(id));
+        if (!d.ok || missed.length) bad.push(PARAMS[a].n);
+        if (d.ok) { vals[a] = +Number(d.v).toPrecision(6); n++; }
+      } catch { bad.push(PARAMS[a].n); }
+    }
+    presetBusy = false;
+    presetAsk = null;
+    // An open editor shows the new value, not the one it was opened with.
+    if (editP !== null && pr.set.some(([a]) => a === editP) && isNum(vals[editP])) draft = fmtV(vals[editP]);
+    if (n) unsaved += n;
+    const where = allMode ? "all servos" : "servo " + pad3(cur);
+    toast(bad.length ? `${pr.name}: ${bad.join(", ")} not written` : `${pr.name} gains on ${where}. Save to flash to keep them.`, !!bad.length);
   }
 
-  async function saveFlash(all) {
+  async function saveFlash() {
     if (!cli) return toast("Turn on Connect first", true);
     try {
-      const d = await jget("/v1/studio/save?id=" + (all ? 0 : cur));
-      toast(d.ok ? (all ? "All four boards saved to flash" : "Saved to flash") : (d.err || "Save failed"), !d.ok);
+      const d = await jget("/v1/studio/save?id=0");
+      if (d.ok) unsaved = 0;
+      toast(d.ok ? "All four boards saved to flash" : (d.err || "Save failed"), !d.ok);
     } catch { toast("Save failed", true); }
-  }
-
-  async function factoryReset() {
-    if (!cli) return toast("Turn on Connect first", true);
-    if (!resetArm) { resetArm = true; return; }
-    resetArm = false;
-    try {
-      const d = await jget("/v1/studio/restore?id=" + (allMode ? 0 : cur));
-      toast(d.ok ? "Factory defaults in RAM, save to keep" : (d.err || "Reset failed"), !d.ok);
-      if (d.ok) reread();
-    } catch { toast("Reset failed", true); }
   }
 
   async function toggleTorque() {
@@ -634,6 +754,7 @@
         if (!d.ok) throw new Error(d.err || "no reply");
         vals[p] = d.v;
       }
+      if (!andSave) unsaved += 3;
       if (andSave) {
         const d = await jget("/v1/studio/save?id=" + cur);
         if (!d.ok) throw new Error(d.err || "save failed");
@@ -752,7 +873,7 @@
       <div class="group">
         {#each leg.ids as id, j}
           {@const miss = found && !found.includes(id)}
-          <button type="button" class="srow" class:compact class:sel={sel === id} class:miss
+          <button type="button" class="srow" class:compact class:sel={sel === id} class:miss title={servoName(id)}
                   aria-current={sel === id} onclick={() => openServo(id)}>
             <span class="sid mono">{pad3(id)}</span>
             <span class="sname">{JOINT[j]}</span>
@@ -781,7 +902,7 @@
   <svg width={w} height={w * 0.9} viewBox="0 0 120 108" aria-label={gauge === null ? "Position unknown" : `Position ${gauge.toFixed(1)} degrees of 270`}>
     <path d="M 26.06 93.94 A 48 48 0 1 1 93.94 93.94" fill="none" stroke="#F3F3F1" stroke-width="10" stroke-linecap="round"></path>
     {#if gauge !== null}
-      <path d="M 26.06 93.94 A 48 48 0 1 1 93.94 93.94" fill="none" stroke="#111111" stroke-width="10" stroke-linecap="round" stroke-dasharray="{(226.2 * fr).toFixed(1)} 226.2"></path>
+      <path d="M 26.06 93.94 A 48 48 0 1 1 93.94 93.94" fill="none" stroke="#FFE605" stroke-width="10" stroke-linecap="round" stroke-dasharray="{(226.2 * fr).toFixed(1)} 226.2"></path>
     {/if}
     <text x="60" y="60" text-anchor="middle" fill="#111111" font-size="20" font-weight="600" font-family="JetBrains Mono, monospace">{gauge === null ? "—" : gauge.toFixed(1)}</text>
     <text x="60" y="74" text-anchor="middle" fill="#6B6862" font-size="8.5" letter-spacing="1.5" font-family="Inter, sans-serif">DEGREES</text>
@@ -823,9 +944,9 @@
 {#snippet configRows(table)}
   {#each shownParams as P (P.a)}
     {@const v = vals[P.a]}
-    <button type="button" class="prow" class:table class:sel={editP === P.a} onclick={() => openEdit(P.a)}>
+    <button type="button" class="prow" class:table class:sel={editP === P.a} onclick={() => openEdit(P.a)} title={P.k}>
       <span class="addr mono" class:on={editP === P.a}>{P.a}</span>
-      <span class="pname"><span class="pn">{P.n}</span><span class="pk mono">{P.k}</span></span>
+      <span class="pname"><span class="pn">{P.n}</span></span>
       {#if table}
         <span class="pv mono">{fmtV(v)}</span>
         <span class="pact">{actText(P, v)}</span>
@@ -844,22 +965,57 @@
   {/if}
 {/snippet}
 
-{#snippet tunedRow()}
-  <div class="tuned">
-    <span class="d">Shipped gains: Kp {TUNED[0].d} · Kd {TUNED[1].d} · Kp current {TUNED[2].d} · Kff current {TUNED[3].d}</span>
-    <button type="button" class="pill ghost sm" class:arm={tunedArm} onclick={writeTuned} disabled={!cli}>
-      {tunedArm ? "Tap again to write" : "Write tuned gains"}
-    </button>
+{#snippet presetBox()}
+  <div class="presets">
+    <h2>Gains · {allMode ? "all servos" : "this servo"}</h2>
+    <div class="pgrid" role="radiogroup" aria-label="Gain preset">
+      {#each presetList as pr}
+        <button type="button" role="radio" aria-checked={activePreset === pr.id} class="popt" class:on={activePreset === pr.id}
+                onclick={() => askPreset(pr)} disabled={!cli || presetBusy}>
+          <span class="pnm">{pr.name}</span>
+          <span class="pnt">{pr.note}</span>
+          <span class="psp mono">{presetSpec(pr)}</span>
+        </button>
+      {/each}
+    </div>
+    <p class="note">
+      {#if activePreset === "custom"}Custom gains right now. Tap a preset to switch; you confirm first.
+      {:else if activePreset === "mixed"}The servos have different gains. Tap a preset to give them all the same.
+      {:else}Tap one to switch. You confirm before anything is written.{/if}
+    </p>
   </div>
 {/snippet}
 
-{#snippet saveRow(small)}
-  <div class="two">
-    <button type="button" class="pill line danger" class:sm={small} class:arm={resetArm} onclick={factoryReset} disabled={!cli}>
-      {resetArm ? (allMode ? "Reset all 4 boards?" : "Reset this board (3 servos)?") : "Factory reset"}
-    </button>
-    <button type="button" class="pill dark" class:sm={small} onclick={() => saveFlash(allMode)} disabled={!cli}>Save to flash</button>
+{#snippet presetBar()}
+  <div class="pbar" role="radiogroup" aria-label={!sel ? "Gain preset" : `Gain preset for ${allMode ? "all servos" : "servo " + pad3(cur)}`}>
+    <span class="pblab">
+      <span class="k">Gains</span>
+      <span class="v">{!sel ? "pick a servo" : allMode ? "all servos" : "servo " + pad3(cur)}{activePreset === "custom" ? " · custom" : activePreset === "mixed" ? " · mixed" : ""}</span>
+    </span>
+    {#each presetList as pr}
+      <button type="button" role="radio" aria-checked={activePreset === pr.id} class:on={activePreset === pr.id} title={pr.note}
+              onclick={() => askPreset(pr)} disabled={!cli || !sel || presetBusy}>
+        <span class="pnm">{pr.name}</span>
+        {#if pr.short}<span class="pst">{pr.short}</span>{/if}
+        <span class="psp mono">{presetSpec(pr)}</span>
+      </button>
+    {/each}
   </div>
+{/snippet}
+
+{#snippet saveBtn(cls)}
+  <button type="button" class={cls} onclick={saveFlash} disabled={!cli} aria-label={unsaved ? `Save to flash, ${unsaved} unsaved` : "Save to flash"}>
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFE605" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={ICON.flash}></path></svg>
+    <span>Save to flash</span>
+    {#if unsaved}<span class="badge">{unsaved}</span>{/if}
+  </button>
+{/snippet}
+
+{#snippet tb(icon, label, onclick, disabled)}
+  <button type="button" class="tbtn" {onclick} {disabled}>
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={icon}></path></svg>
+    <span>{label}</span>
+  </button>
 {/snippet}
 
 {#snippet editor(inSheet)}
@@ -908,7 +1064,8 @@
   <button type="button" class="pill dark wide" onclick={() => writeParam(P.a, draft)} disabled={asText(draft) === ""}>
     {asText(draft) === "" ? "Set" : `Set ${asText(draft)}`}{allMode ? " on all servos" : ""}
   </button>
-  <p class="msg" class:bad={edBad}>{edMsg || "Set writes to RAM only. Save to flash keeps it after power-off."}</p>
+  <!-- PC: only real messages, to keep the editor on one screen. The phone sheet keeps the hint. -->
+  {#if edMsg || inSheet}<p class="msg" class:bad={edBad}>{edMsg || "Set writes to RAM. Save to flash keeps it."}</p>{/if}
 {/snippet}
 
 {#snippet graphPanel()}
@@ -1076,24 +1233,31 @@
 {#if wide}
   <!-- ══════════════ PC ══════════════ -->
   <header class="pchead">
-    <button type="button" class="pill soft backpill" onclick={onBack}>{@render ico("M15 6l-6 6 6 6", 18)}Settings</button>
-    <div class="pctitle">
-      <h1>Servo Studio</h1>
-      <span>Mini Pupper · 4 AT32 driver boards · SPI2</span>
-    </div>
-    <span class="chip {chip.k}"><span class="cdot"></span>{cli ? "Connected · gait paused · " + (answering === null ? "scanning" : chip.t) : chip.t}</span>
-    <span class="grow"></span>
-    <div class="tools">
-      <span class="connpill"><span>Connect</span>{@render sw(cli, "Connect", toggleConn, !online)}</span>
-      <button type="button" class="pill line" onclick={() => scan()} disabled={!cli}>Scan</button>
-      <button type="button" class="pill line" onclick={reread} disabled={!cli || !sel}>Refresh</button>
-      <div class="seg tabs" role="tablist" aria-label="Middle view">
-        <button type="button" role="tab" aria-selected={tab === "table"} class:on={tab === "table"} onclick={() => (tab = "table")}>Settings</button>
-        <button type="button" role="tab" aria-selected={tab === "graph"} class:on={tab === "graph"} onclick={() => (tab = "graph")} disabled={!cur}>Graph</button>
+    <div class="hrow">
+      <button type="button" class="pill soft backpill" onclick={onBack}>{@render ico("M15 6l-6 6 6 6", 18)}{backLabel}</button>
+      <div class="pctitle">
+        <h1>Servo Studio</h1>
+        <span>Mini Pupper · 4 AT32 driver boards · SPI2</span>
       </div>
-      <button type="button" class="pill line" onclick={openCal} disabled={!cli || !cur}>Calibrate</button>
-      <button type="button" class="pill line" onclick={() => saveFlash(false)} disabled={!cli || !cur}>Save</button>
-      <button type="button" class="pill dark" onclick={() => saveFlash(true)} disabled={!cli}>Save all</button>
+      <span class="connpill">{@render ico(ICON.connect, 18)}<span>Connect</span>{@render sw(cli, "Connect", toggleConn, !online)}</span>
+      <span class="chip {chip.k}"><span class="cdot"></span>{cli ? "Gait paused · " + (answering === null ? "scanning" : chip.t) : chip.t}</span>
+    </div>
+    <div class="toolbar" role="toolbar" aria-label="Servo tools">
+      {@render tb(ICON.scan, "Scan", () => scan(), !cli)}
+      {@render tb(ICON.refresh, "Refresh", reread, !cli || !sel)}
+      {@render tb(ICON.calibrate, "Calibrate", openCal, !cli || !cur)}
+      <span class="tsep" aria-hidden="true"></span>
+      <div class="vtabs" role="tablist" aria-label="Middle view">
+        <button type="button" role="tab" aria-selected={tab === "table"} class:on={tab === "table"} onclick={() => (tab = "table")}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={ICON.table}></path></svg><span>Settings</span>
+        </button>
+        <button type="button" role="tab" aria-selected={tab === "graph"} class:on={tab === "graph"} onclick={() => (tab = "graph")} disabled={!cur}>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={ICON.graph}></path></svg><span>Graph</span>
+        </button>
+      </div>
+      <span class="grow"></span>
+      {@render presetBar()}
+      {@render saveBtn("tbtn save")}
     </div>
   </header>
 
@@ -1116,15 +1280,15 @@
         </div>
       {:else}
         <div class="group ptable">
-          <div class="thead"><span>Addr</span><span>Parameter</span><span class="r">Value</span><span>Actual</span></div>
+          <div class="thead"><span>Addr</span><span>Parameter</span><span class="r vl">Value</span><span class="vl">Actual</span></div>
           <div class="tsec">Configuration · stored {allMode ? "on every servo" : "per servo"}{#if loading}<span class="ld">{loading}</span>{/if}</div>
           {@render configRows(true)}
           {#if !allMode}
             <div class="tsec">Live telemetry · read-only</div>
             {#each LIVE as L}
-              <div class="prow table ro">
+              <div class="prow table ro" title={L.k}>
                 <span class="addr mono">{L.a}</span>
-                <span class="pname"><span class="pn">{L.n}</span><span class="pk mono">{L.k}</span></span>
+                <span class="pname"><span class="pn">{L.n}</span></span>
                 <span class="pv mono">{live && isNum(live[L.k]) ? (L.k === "mode" ? live[L.k] : liveText({ ...L, u: "" }, live)) : "—"}</span>
                 <span class="pact">{liveText(L, live)}</span>
               </div>
@@ -1132,7 +1296,6 @@
           {/if}
         </div>
         {@render modeNote()}
-        {@render tunedRow()}
       {/if}
     </main>
 
@@ -1146,25 +1309,24 @@
           </div>
           {#if !allMode}
             <div class="lc-top">
-              {@render gaugeSvg(112)}
+              {@render gaugeSvg(156)}
               <div class="lc-sw">
                 <div class="swrow"><span class="swtxt"><span class="t2">Torque</span><span class="d2">{torqueOn ? "holding position" : "motor off"}</span></span>{@render sw(!!torqueOn, "Torque", toggleTorque)}</div>
-                <div class="swrow"><span class="swtxt"><span class="t2">Live poll</span></span>{@render sw(poll, "Live poll", () => (poll = !poll))}</div>
+                <div class="swrow"><span class="swtxt"><span class="t2">Live poll</span><span class="d2">{poll ? "readings refresh" : "paused"}</span></span>{@render sw(poll, "Live poll", () => (poll = !poll))}</div>
               </div>
             </div>
-            {@render meters()}
+            <div class="meters2">{@render meters()}</div>
             <div class="mini">
-              {#each [["Position", "now_deg"], ["Goal", "set_deg"], ["Pos error", "err_deg"], ["Current", "now_ma"], ["Current cap", "cap_ma"], ["Temperature", "temp_c"], ["Mode", "mode"]] as [label, k]}
+              {#each [["Position", "now_deg"], ["Goal", "set_deg"], ["Position error", "err_deg"], ["Current", "now_ma"], ["Current cap", "cap_ma"], ["Temperature", "temp_c"]] as [label, k]}
                 <div><span>{label}</span><b class="mono">{liveText(LIVE.find((L) => L.k === k), live)}</b></div>
               {/each}
             </div>
           {/if}
-          {@render saveRow(true)}
         </section>
         {#if editing}
           <section class="card edcard">{@render editor(false)}</section>
         {:else}
-          <p class="note center">Click a setting in the table to change it.</p>
+          <p class="note center">Click a setting in the table to change it. Writes go to RAM; Save to flash (top right) keeps them.</p>
         {/if}
       {/if}
     </aside>
@@ -1227,8 +1389,8 @@
       {#if !allMode}
         {@render liveCard(false)}
         <div class="two">
-          <button type="button" class="tile wide2" onclick={() => { view = "graph"; scrollTop(); }}>{@render ico("M3 3v18h18M7 15l4-5 3 3 5-7")}Graph</button>
-          <button type="button" class="tile wide2" onclick={openCal}>{@render ico("M3 17l14-14 4 4L7 21H3zM14 6l4 4M9 11l2 2M6 14l2 2")}Calibrate</button>
+          <button type="button" class="tile wide2" onclick={() => { view = "graph"; scrollTop(); }}>{@render ico(ICON.graph)}Graph</button>
+          <button type="button" class="tile wide2" onclick={openCal}>{@render ico(ICON.calibrate)}Calibrate</button>
         </div>
       {/if}
 
@@ -1236,7 +1398,6 @@
         <h2>Configuration · stored {allMode ? "on every servo" : "per servo"}{#if loading}<span class="ld">{loading}</span>{/if}</h2>
         <div class="group">{@render configRows(false)}</div>
         {@render modeNote()}
-        {@render tunedRow()}
       </section>
 
       {#if !allMode}
@@ -1250,14 +1411,15 @@
         </section>
       {/if}
 
-      {@render saveRow(false)}
-      <p class="note center">A setting you change lives in RAM until you save it.</p>
+      <section>{@render presetBox()}</section>
+      {@render saveBtn("pill dark wide savewide")}
+      <p class="note center">{unsaved ? `${unsaved} change${unsaved === 1 ? "" : "s"} in RAM until you save. ` : "A setting you change lives in RAM until you save it. "}Saves all four boards.</p>
     {/if}
     {@render activity()}
 
   {:else}
     <div class="ptop between">
-      <button type="button" class="pill soft backpill" onclick={onBack}>{@render ico("M15 6l-6 6 6 6", 18)}Settings</button>
+      <button type="button" class="pill soft backpill" onclick={onBack}>{@render ico("M15 6l-6 6 6 6", 18)}{backLabel}</button>
       <span class="chip {chip.k}"><span class="cdot"></span>{chip.t}</span>
     </div>
     <div class="hero">
@@ -1273,9 +1435,9 @@
     </div>
 
     <div class="tools3">
-      <button type="button" class="tile" onclick={() => scan()} disabled={!cli}>{@render ico("M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4")}Scan</button>
-      <button type="button" class="tile" onclick={() => { if (cli) { scan(true); } }} disabled={!cli}>{@render ico("M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7")}Refresh</button>
-      <button type="button" class="tile" onclick={() => saveFlash(true)} disabled={!cli}>{@render ico("M5 3h11l3 3v15H5zM8 3v5h7V3M8 21v-7h8v7")}Save all</button>
+      <button type="button" class="tile" onclick={() => scan()} disabled={!cli}>{@render ico(ICON.scan)}Scan</button>
+      <button type="button" class="tile" onclick={() => { if (cli) { scan(true); } }} disabled={!cli}>{@render ico(ICON.refresh)}Refresh</button>
+      <button type="button" class="tile" class:has={unsaved} onclick={saveFlash} disabled={!cli}>{@render ico(ICON.flash)}Save to flash{#if unsaved}<span class="badge">{unsaved}</span>{/if}</button>
     </div>
 
     {@render allRow(false)}
@@ -1296,6 +1458,30 @@
   {/if}
 {/if}
 
+  {#if presetAsk}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="scrim mid" onclick={(e) => e.target === e.currentTarget && !presetBusy && (presetAsk = null)}>
+      <div class="askdlg" role="alertdialog" aria-modal="true" aria-labelledby="ask-h">
+        <div class="askhead">
+          <h2 class="dlgh" id="ask-h">Switch to {presetAsk.name}?</h2>
+          <span class="d">{allMode ? "All 12 servos get these gains:" : `Servo ${pad3(cur)} · ${servoName(cur).toLowerCase()} gets these gains:`}</span>
+        </div>
+        <div class="group chg">
+          {#each presetAsk.set.filter(([a]) => a !== 11 || (isNum(vals[11]) && !same(vals[11], 0))) as [a, v]}
+            <div class="chrow"><span class="ck">{PARAMS[a].n}</span><span class="cf mono">{a === 11 ? actText(PARAMS[11], vals[11]) : fmtV(vals[a])}</span>{@render ico("M5 12h14M13 6l6 6-6 6", 14)}<span class="ct mono">{a === 11 ? PARAMS[11].bool[v] : v}</span></div>
+          {/each}
+        </div>
+        {#if presetAsk.warn}<div class="warnbox">{presetAsk.warn}</div>{/if}
+        <span class="d small">Written to RAM. Save to flash keeps it after power-off.</span>
+        <div class="two">
+          <button type="button" class="pill line" onclick={() => (presetAsk = null)} disabled={presetBusy}>Cancel</button>
+          <button type="button" class="pill dark" onclick={applyPreset} disabled={presetBusy}>{presetBusy ? "Writing…" : `Switch to ${presetAsk.name}`}</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if toastMsg}<div class="toast" class:bad={toastBad} role="status">{toastMsg}</div>{/if}
 </div>
 
@@ -1304,7 +1490,7 @@
     position: fixed; inset: 0; z-index: 60; overflow-y: auto; -webkit-overflow-scrolling: touch;
     background: var(--page, #fff); color: var(--ink, #111);
     font-family: Inter, "SF Pro Display", -apple-system, "Segoe UI", sans-serif;
-    --warn-ink: #8A4100; --danger: #A1311F; --sel: #FFFBDA;
+    --warn-ink: #8A4100; --danger: #A1311F; --sel: #FFF1A1; --hov: #FFFCE6; --hov-chip: #FFF6BF;
   }
   button { font: inherit; color: inherit; cursor: pointer; }
   button:disabled { cursor: not-allowed; opacity: 0.45; }
@@ -1341,7 +1527,6 @@
   .pill.dark { background: var(--ink); color: #fff; }
   .pill.ghost { background: transparent; border: 1px solid var(--line); height: 36px; padding: 0 12px; font-size: 12px; }
   .pill.danger { color: var(--danger); }
-  .pill.arm { background: var(--danger); color: #fff; border-color: var(--danger); }
   .pill.rec { background: var(--danger); }
   .pill.wide { width: 100%; height: 52px; border-radius: 26px; font-size: 16px; }
   .backpill { padding: 0 16px 0 12px; }
@@ -1376,6 +1561,48 @@
   .tools3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
   .tile { height: 64px; border: none; border-radius: 16px; background: var(--ground); font-size: 13px; font-weight: 700; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
   .tile.wide2 { height: 56px; flex-direction: row; gap: 8px; font-size: 14px; }
+  .tile { position: relative; }
+  .tile .badge { position: absolute; top: 6px; right: 8px; }
+  .badge { min-width: 22px; height: 22px; padding: 0 6px; box-sizing: border-box; border-radius: 11px; background: var(--mpx-yellow); color: var(--ink); font-size: 11px; font-weight: 800; display: inline-flex; align-items: center; justify-content: center; }
+  .savewide { gap: 10px; }
+
+  /* gain presets */
+  .presets { display: flex; flex-direction: column; gap: 8px; }
+  .pgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .popt { border: 2px solid var(--line); border-radius: 18px; background: #fff; text-align: left; padding: 12px 14px; display: flex; flex-direction: column; gap: 3px; }
+  .popt.on { border-color: var(--ink); background: var(--sel); }
+  @media (hover: hover) { .popt:not(.on):not(:disabled):hover { background: var(--hov); } }
+  .pnm { font-size: 16px; font-weight: 800; }
+  .pnt { font-size: 12px; line-height: 1.35; color: #4F4C46; }
+  .psp { font-size: 11px; color: var(--sub); }
+  .presets .note { margin: 0 6px; }
+  /* PC: the same choice as a toolbar group beside Save to flash */
+  .pbar { display: flex; align-items: stretch; gap: 4px; border: 1px solid var(--line); border-radius: 18px; padding: 3px 3px 3px 12px; margin-right: 6px; }
+  .pblab { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding-right: 6px; min-width: 78px; }
+  .pblab .k { font-size: 10px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sub); }
+  .pblab .v { font-size: 12px; font-weight: 700; white-space: nowrap; }
+  .pbar button { min-width: 108px; padding: 0 10px; white-space: nowrap; border: 1.5px solid transparent; border-radius: 14px; background: var(--ground); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; }
+  .pbar button.on { border-color: var(--ink); background: var(--sel); }
+  @media (hover: hover) { .pbar button:not(.on):not(:disabled):hover { background: var(--hov); } }
+  .pbar .pnm { font-size: 13px; font-weight: 800; }
+  .pbar .psp { font-size: 10px; color: var(--sub); }
+  .pbar .pst { font-size: 10.5px; color: #4F4C46; }
+
+  /* are-you-sure */
+  .scrim.mid { align-items: center; padding: 16px; box-sizing: border-box; }
+  .askdlg { width: 100%; max-width: 400px; box-sizing: border-box; background: #fff; border-radius: 28px; padding: 24px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.22); }
+  .askhead { display: flex; flex-direction: column; gap: 4px; }
+  .askdlg .dlgh { font-size: 22px; }
+  .askhead .d { font-size: 14px; line-height: 1.45; color: #4F4C46; }
+  .askdlg .small { font-size: 12px; }
+  .chg { border-radius: 16px; }
+  .chrow { display: grid; grid-template-columns: minmax(0, 1fr) auto 14px auto; align-items: center; gap: 8px; padding: 8px 14px; font-size: 13px; color: var(--sub); }
+  .chrow + .chrow { border-top: 1px solid var(--hair-2); }
+  .ck { font-weight: 600; color: var(--ink); }
+  .cf { text-align: right; }
+  .ct { font-weight: 700; color: var(--ink); text-align: right; min-width: 64px; }
+  .warnbox { background: #FFF3E6; border-radius: 12px; padding: 10px 12px; font-size: 13px; line-height: 1.45; color: #7A3A00; }
+  .askdlg .two .pill { height: 48px; border-radius: 24px; }
 
   .allrow { width: 100%; border: 1px solid var(--line); border-radius: 20px; background: #fff; display: flex; align-items: center; gap: 12px; padding: 12px 16px; text-align: left; }
   .allrow.compact { border-radius: 16px; padding: 8px 12px; gap: 10px; }
@@ -1389,6 +1616,10 @@
   .srow { width: 100%; border: none; background: #fff; display: flex; align-items: center; gap: 12px; padding: 12px 16px; text-align: left; }
   .srow.compact { padding: 7px 12px; gap: 10px; }
   .srow.sel { background: var(--sel); }
+  @media (hover: hover) {
+    .srow:not(.sel):hover, .allrow:not(.sel):hover, .prow:not(.ro):not(.sel):hover { background: var(--hov); }
+    .srow:not(.sel):hover .sid, .prow:not(.ro):not(.sel):hover .addr, .allrow:not(.sel):hover .allbadge { background: var(--hov-chip); }
+  }
   .srow.miss { opacity: 0.5; }
   .sid { width: 44px; height: 38px; border-radius: 11px; background: var(--ground); font-size: 14px; font-weight: 600; display: grid; place-items: center; flex-shrink: 0; }
   .srow.compact .sid { width: 40px; height: 30px; border-radius: 9px; font-size: 12px; }
@@ -1414,30 +1645,26 @@
   .mrow { display: flex; justify-content: space-between; font-size: 13px; }
   .mrow span:first-child { font-weight: 700; }
   .track { height: 8px; border-radius: 4px; background: var(--ground); overflow: hidden; }
-  .fill { height: 8px; border-radius: 4px; background: var(--ink); transition: width 0.2s; }
+  .fill { height: 8px; border-radius: 4px; background: var(--mpx-yellow); transition: width 0.2s; }   /* the switches' yellow */
 
   .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .two .pill { height: 52px; border-radius: 26px; font-size: 15px; }
-  .two .pill.sm { height: 40px; border-radius: 20px; font-size: 13px; }
 
   .prow { width: 100%; border: none; background: #fff; display: flex; align-items: center; gap: 12px; padding: 10px 14px; text-align: left; }
   .prow.sel { background: var(--sel); }
   .addr { width: 36px; height: 30px; border-radius: 9px; background: var(--ground); font-size: 12px; font-weight: 600; display: grid; place-items: center; flex-shrink: 0; }
   .addr.on { background: var(--mpx-yellow); }
   .pname { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .pn { font-size: 15px; font-weight: 700; }
-  .pk { font-size: 11px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pn { font-size: 14px; font-weight: 600; }   /* semi-bold, like the live rows */
   .pvcol { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
   .pv { font-size: 15px; font-weight: 600; }
   .pact { font-size: 11px; color: var(--sub); }
 
   .lrow { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
   .laddr { width: 36px; height: 26px; border-radius: 8px; background: var(--ground); font-size: 11px; font-weight: 600; color: #4F4C46; display: grid; place-items: center; flex-shrink: 0; }
-  .ln { flex: 1; font-size: 14px; }
+  .ln { flex: 1; font-size: 14px; font-weight: 600; }
   .lv { font-size: 14px; font-weight: 600; }
 
-  .tuned { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 0 6px; }
-  .tuned .d { flex: 1; min-width: 180px; font-size: 12px; }
 
   .empty { padding: 28px 20px; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
   .empty b { font-size: 17px; }
@@ -1538,56 +1765,83 @@
   .toast.bad { background: var(--danger); }
 
   /* ══ PC ══ */
-  .pchead { background: #fff; border-bottom: 1px solid var(--line); padding: 14px 28px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .pchead { background: #fff; border-bottom: 1px solid var(--line); padding: 12px 28px 10px; display: flex; flex-direction: column; gap: 8px; }
+  .hrow { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; }
+  .tbtn { position: relative; width: 84px; height: 58px; border: 1px solid var(--line); border-radius: 16px; background: #fff; font-size: 12px; font-weight: 700; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; }
+  @media (hover: hover) { .tbtn:not(:disabled):not(.save):hover { background: var(--hov); border-color: #E9D66B; } .vtabs button:not(.on):not(:disabled):hover { background: rgba(255, 255, 255, 0.6); } }
+  .tbtn:not(:disabled):active { transform: translateY(1px); }
+  .tbtn.save { width: 112px; border: none; background: var(--ink); color: #fff; }
+  .tbtn.save .badge { position: absolute; top: -7px; right: -7px; border: 2px solid #fff; }
+  .tsep { width: 1px; margin: 8px 6px; background: var(--line); }
+  .vtabs { display: flex; gap: 4px; background: #EFEEEA; border-radius: 18px; padding: 4px; }
+  .vtabs button { width: 80px; height: 50px; border: none; border-radius: 14px; background: transparent; font-size: 12px; font-weight: 700; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; }
+  .vtabs button.on { background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
   .pctitle { display: flex; flex-direction: column; gap: 1px; margin: 0 8px 0 4px; }
   .pctitle h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; }
   .pctitle span { font-size: 12px; color: var(--sub); }
-  .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .connpill { display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 6px 0 14px; border-radius: 22px; background: var(--ground); font-size: 14px; font-weight: 700; }
-  .seg.tabs { display: flex; }
-  .seg.tabs button { height: 36px; padding: 0 16px; font-size: 13px; color: var(--ink); }
-  .pcbody { padding: 22px 28px 28px; display: flex; gap: 22px; align-items: flex-start; }
-  .pcnav { flex: 0 0 250px; display: flex; flex-direction: column; gap: 14px; }
+  .pcbody { padding: 10px 28px 28px; display: flex; gap: 22px; align-items: flex-start; }
+  .pcnav { flex: 0 0 236px; display: flex; flex-direction: column; gap: 14px; }
   .pcnav .legsec { gap: 6px; }
   .pcnav h2 { font-size: 11px; }
   .pcnav .group { border-radius: 16px; }
   .pcmain { flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
-  .pcaside { flex: 0 0 330px; display: flex; flex-direction: column; gap: 14px; position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; }
+  .pcaside { flex: 0 0 400px; display: flex; flex-direction: column; gap: 10px; position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; }
 
-  .ptable .thead, .prow.table { display: grid; grid-template-columns: 64px minmax(0, 1fr) 120px 170px; gap: 12px; align-items: center; }
-  .ptable .thead { padding: 10px 16px; background: var(--ground); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--sub); }
-  .thead .r, .prow.table .pv { text-align: right; }
+  .ptable .thead, .prow.table { display: grid; grid-template-columns: 56px minmax(0, 1fr) 150px 190px; gap: 0; align-items: stretch; }
+  .ptable .thead { padding: 0; background: var(--mpx-yellow); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #4F4C46; }
+  .ptable .thead > span { padding: 11px 12px; }
+  .ptable .thead > span:first-child { padding-left: 16px; }
+  .thead .vl { border-left: 1px solid #E2CD18; padding: 11px 16px !important; }
+  .thead .r { text-align: right; }
+  .prow.table > * { display: flex; align-items: center; }
+  .prow.table .addr { margin-left: 16px; align-self: center; justify-content: center; }
+  .prow.table .pname { padding: 9px 12px; flex-direction: row; align-items: center; }
+  .prow.table .pv, .prow.table .pact { padding: 9px 16px; }   /* column lines only in the header */
+  .prow.table .pv { justify-content: flex-end; text-align: right; }
   .tsec { padding: 12px 16px 6px; font-size: 12px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sub); }
-  .prow.table { padding: 7px 16px; }
-  .prow.table .addr { width: 40px; height: 26px; border-radius: 8px; }
+  .prow.table { padding: 0; }
+  .prow.table .addr { width: 36px; height: 26px; border-radius: 8px; }
   .prow.table .pn { font-size: 14px; }
   .prow.table .pv { font-size: 14px; }
-  .prow.table .pact { font-size: 13px; }
+  .prow.table .pact { font-size: 13px; color: #4F4C46; }
   .prow.ro { cursor: default; }
-  .prow.ro .pn { font-weight: 500; }
   .ptable .tsec + .prow { border-top: none; }
 
-  .scard { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
-  .shead { display: flex; align-items: center; gap: 10px; }
-  .shead .t { font-size: 17px; font-weight: 800; }
-  .shead .d { font-size: 12px; }
-  .scard .lc-sw { gap: 10px; }
-  .scard .t2 { font-size: 14px; }
-  .scard .d2 { font-size: 11px; }
-  .scard .switch { width: 48px; height: 30px; border-radius: 15px; }
-  .scard .knob { width: 24px; height: 24px; border-radius: 12px; }
-  .scard .mrow { font-size: 12px; }
-  .mini { border-top: 1px solid var(--hair-2); padding-top: 4px; }
-  .mini div { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
+  /* PC right column: wide (440 px) and large -- the table's middle had room
+     to spare (Claude Design "PC · Settings"). */
+  .scard { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; border-radius: 22px; }
+  .shead { display: flex; align-items: center; gap: 12px; }
+  .scard .sbadge { width: 54px; height: 44px; border-radius: 13px; font-size: 17px; }
+  .shead .t { font-size: 21px; font-weight: 800; }
+  .shead .d { font-size: 13px; }
+  .scard .lc-top { gap: 18px; }
+  .scard .lc-sw { gap: 12px; }
+  .scard .t2 { font-size: 17px; }
+  .scard .d2 { font-size: 13px; }
+  .scard .switch { width: 56px; height: 34px; border-radius: 17px; }
+  .scard .knob { width: 28px; height: 28px; border-radius: 14px; }
+  .scard .mrow { font-size: 14px; }
+  .scard .track, .scard .fill { height: 10px; border-radius: 5px; }
+  /* Current and PWM duty side by side: one row instead of two */
+  .meters2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .mini { border-top: 1px solid var(--hair-2); padding-top: 6px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 24px; }
+  .mini div { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; font-size: 13.5px; white-space: nowrap; }
   .mini span { color: #4F4C46; }
   .mini b { font-weight: 600; }
-  .edcard { border: 2px solid var(--ink); padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+  /* Editor kept compact so the big gauge above and the whole editor share one screen. */
+  .edcard { border: 2px solid var(--ink); border-radius: 22px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .edcard .ed-addr { width: 38px; height: 32px; font-size: 14px; }
   .edcard .ed-h { font-size: 18px; }
-  .edcard .ed-desc { font-size: 13px; }
-  .edcard .round.big { width: 44px; height: 44px; font-size: 22px; }
-  .edcard .valin { height: 44px; font-size: 18px; border-radius: 12px; }
-  .edcard .pill.wide { height: 44px; font-size: 14px; }
-  .edcard .facts b { font-size: 14px; }
+  .edcard .ed-desc { font-size: 13.5px; line-height: 1.4; }
+  .edcard .round.big { width: 40px; height: 40px; font-size: 22px; }
+  .edcard .facts > div { padding: 5px 10px; border-radius: 12px; }
+  .edcard .facts span { font-size: 11px; }
+  .edcard .facts b { font-size: 15px; }
+  .edcard .valin { height: 42px; font-size: 20px; border-radius: 12px; }
+  .edcard .pill.wide { height: 46px; font-size: 15px; border-radius: 23px; }
+  .edcard .msg { font-size: 12px; }
   .wide .scrim { align-items: flex-start; overflow-y: auto; padding: 60px 0; }
   .caldlg { width: calc(100% - 240px); max-width: 1200px; background: #fff; border-radius: 28px; padding: 24px 28px 28px; display: flex; flex-direction: column; gap: 18px; }
   .calhead { display: flex; align-items: center; gap: 12px; }
@@ -1595,5 +1849,6 @@
   .calhead .d { font-size: 14px; }
   .caldlg .calgrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
   .caldlg .refrow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 84px; }
-  @media (max-width: 1240px) { .caldlg { width: calc(100% - 64px); } .pcaside { flex-basis: 300px; } .ptable .thead, .prow.table { grid-template-columns: 52px minmax(0, 1fr) 96px 130px; } }
+  @media (max-width: 1240px) { .caldlg { width: calc(100% - 64px); } }
+  @media (max-width: 1400px) { .pcaside { flex-basis: 360px; } .pcnav { flex-basis: 210px; } .ptable .thead, .prow.table { grid-template-columns: 48px minmax(0, 1fr) 96px 112px; } .prow.table .addr { margin-left: 12px; } .ptable .thead > span:first-child { padding-left: 12px; } .thead .vl, .prow.table .pv, .prow.table .pact { padding-left: 12px !important; padding-right: 12px !important; } }
 </style>

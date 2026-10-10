@@ -65,9 +65,12 @@ static const char *TAG = "IMU";
  * because every chunk still has to fit the I2C driver's transfer buffer. */
 #define BMI2_READ_WRITE_LEN 128
 
-/* Poll period of the sampling task. Matches the 100 Hz ODR the BMI270 is
- * configured for, so the gait loop's reflexes (alive.c) see every sample. */
-#define IMU_POLL_MS 10
+/* Poll period of the sampling task. Matches the 200 Hz ODR the BMI270 is
+ * configured for (mpv2-claw's mpx_imu.cc): the Pi/ROS link streams it to the
+ * EKF, and the RL link (pi/rl_link.cc) puts it in every 5 ms STATE, where a
+ * policy reads each frame. The gait loop's reflexes (alive.c) see every
+ * sample too. */
+#define IMU_POLL_MS 5
 
 namespace {
 
@@ -152,7 +155,8 @@ inline float lsb_to_units(int16_t raw, float full_scale) {
     return (full_scale * static_cast<float>(raw)) / 32768.0f;
 }
 
-constexpr float ACCEL_RANGE_G   = 2.0f;      /* BMI2_ACC_RANGE_2G   */
+constexpr float ACCEL_RANGE_G   = 16.0f;     /* BMI2_ACC_RANGE_16G, as mpv2-claw: a landing
+                                                * or a push must not clip */
 constexpr float GYRO_RANGE_DPS  = 2000.0f;   /* BMI2_GYR_RANGE_2000 */
 
 /*
@@ -189,16 +193,16 @@ bool configure_sensors() {
         return false;
     }
 
-    /* 100 Hz suits a 20 Hz poll with room to spare and keeps the gyro out of
-     * its high-power mode. Performance-optimised filtering is the low-noise
+    /* 200 Hz, as mpv2-claw: one fresh sample per RL tick (5 ms).
+     * Performance-optimised filtering is the low-noise
      * setting; the alternative saves ~200 uA, which is not a trade worth
      * making on a robot driving four servo boards. */
-    cfg[0].cfg.acc.odr         = BMI2_ACC_ODR_100HZ;
-    cfg[0].cfg.acc.range       = BMI2_ACC_RANGE_2G;
+    cfg[0].cfg.acc.odr         = BMI2_ACC_ODR_200HZ;
+    cfg[0].cfg.acc.range       = BMI2_ACC_RANGE_16G;
     cfg[0].cfg.acc.bwp         = BMI2_ACC_NORMAL_AVG4;
     cfg[0].cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;
 
-    cfg[1].cfg.gyr.odr         = BMI2_GYR_ODR_100HZ;
+    cfg[1].cfg.gyr.odr         = BMI2_GYR_ODR_200HZ;
     cfg[1].cfg.gyr.range       = BMI2_GYR_RANGE_2000;
     cfg[1].cfg.gyr.ois_range   = BMI2_GYR_OIS_2000;
     cfg[1].cfg.gyr.bwp         = BMI2_GYR_NORMAL_MODE;
@@ -335,8 +339,8 @@ void imu_task(void *arg) {
             robot::imu_print();
         }
 #endif
-        /* 100 Hz: the picked-up / push reflexes integrate the IMU every
-         * control tick, and the BMI270 is configured for a 100 Hz ODR. */
+        /* 200 Hz: the RL link reads a fresh sample every tick, and the
+         * picked-up / push reflexes integrate the IMU every control tick. */
         vTaskDelay(pdMS_TO_TICKS(IMU_POLL_MS));
     }
 }
@@ -369,7 +373,7 @@ bool imu_init() {
     }
 
     /* INT1 is wired to IO10 but nothing subscribes to it yet: the polling
-     * task is well inside the 100 Hz ODR, so data-ready interrupts would buy
+     * task keeps up with the 200 Hz ODR, so data-ready interrupts would buy
      * nothing today. Configure it as a plain input so the pin is in a defined
      * state and a future data-ready path only has to attach a handler. */
     gpio_config_t int_io = {};
@@ -423,7 +427,7 @@ bool imu_init() {
         return false;
     }
 
-    ESP_LOGI(TAG, "IMU ready (accel+gyro @100Hz, poll %d ms)", (int)IMU_POLL_MS);
+    ESP_LOGI(TAG, "IMU ready (accel+gyro @200Hz, +/-16 g, poll %d ms)", (int)IMU_POLL_MS);
     return true;
 }
 

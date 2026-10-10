@@ -1,34 +1,7 @@
 menu "MPX Dog App Configuration"
 
-choice PWA_DESIGN
-    prompt "PWA UI Design"
-    default PWA_DESIGN_CLAW
-    help
-        Select which PWA (Progressive Web App) UI design to embed
-        in the firmware and serve from the robot's web server.
-
-config PWA_DESIGN_CLAW
-    bool "Claw (mpv2-claw app: look pad, rest, Wi-Fi picker, skill registry)"
-    help
-        The phone app ported from mpv2-claw. Adds the analog look pad,
-        rest-when-idle setting, Wi-Fi network picker, skill registry
-        view, 3D calibration model and the redesigned Settings hub.
-        Sections that need firmware this build does not have (AI,
-        Display, Raspberry Pi) hide themselves.  Source: pwa-claw/
-
-config PWA_DESIGN_ORIGINAL
-    bool "Original (dark theme)"
-    help
-        Dark-themed PWA with basic design and complete robot
-        control functionality.  Source: pwa/
-
-config PWA_DESIGN_REDESIGN
-    bool "Redesign (light theme, consumer)"
-    help
-        Light-themed consumer-facing PWA with polished UI/UX
-        and real robot API integration.  Source: pwa-redesign/
-
-endchoice
+# The phone app is pwa-claw/ (mpv2-claw's app, ported). The two older designs
+# (pwa/, pwa-redesign/) and the PWA_DESIGN choice were removed in Phase 6.
 
 config APP_LITTLEFS_PARTITION
     string "LittleFS partition label"
@@ -326,6 +299,75 @@ config APP_PI_LINK_REQUIRE_HOST_PIN
         Slave mode needs both a fresh WANT_CONTROL heartbeat and the
         yellow HOST_PRESENT wire high. Turn off only for bench tests with
         a bare UART and no IO3 wire.
+
+config APP_RL_LINK_ENABLE
+    bool "RL host link (mp4-link protocol) on the Pi UART"
+    default y
+    help
+        mp4-link's mp3-link protocol on the same UART as the ROS link:
+        a policy on the Pi sends all twelve joint targets (SET_ALL) and
+        gets positions, currents, temperatures and the IMU back (STATE)
+        every tick, with mp4-link's watchdog and current/temperature
+        guard. Its first frame parks the gait; with no frame for
+        APP_RL_RELEASE_MS the robot stands up again on its own. Host
+        side: python -m mp3link (ros2jazzympv2 rl_link/), port
+        /dev/ttyAMA0 at APP_PI_LINK_UART_BAUD. Protocol notes in
+        main/pi/RL_LINK.md.
+
+if APP_RL_LINK_ENABLE
+
+config APP_RL_TICK_HZ
+    int "RL link tick rate (Hz)"
+    range 50 400
+    default 200
+    help
+        One frame to each servo board and one STATE to the Pi per tick.
+        A 106-byte STATE every 5 ms is about 23% of 921600 baud.
+
+config APP_RL_WATCHDOG_MS
+    int "RL link watchdog (ms)"
+    range 20 2000
+    default 100
+    help
+        Armed and no SET_ALL for this long: every servo IDLE, WATCHDOG
+        latched (as mp4-link).
+
+config APP_RL_RELEASE_MS
+    int "RL session end (ms without a frame)"
+    range 500 60000
+    default 2000
+    help
+        No RL frame of any kind for this long ends the session: the app,
+        voice and skills get the robot back and the legs glide into the
+        stand.
+
+config APP_RL_GUARD_CUR_MA
+    int "RL guard: current limit (mA)"
+    range 100 5000
+    default 500
+    help
+        A driven servo above this current for APP_RL_GUARD_CUR_MS
+        disarms everything and latches FAULT_CUR.
+
+config APP_RL_GUARD_CUR_MS
+    int "RL guard: current dwell (ms)"
+    range 10 10000
+    default 500
+
+config APP_RL_GUARD_TEMP_DC
+    int "RL guard: housing temperature limit (0.1 degC)"
+    range 300 1200
+    default 600
+    help
+        600 = 60.0 degC. The housing lags the winding, so this is a
+        backstop, not a thermal model.
+
+config APP_RL_GUARD_TEMP_MS
+    int "RL guard: temperature dwell (ms)"
+    range 10 60000
+    default 1000
+
+endif  # APP_RL_LINK_ENABLE
 
 endif  # APP_PI_LINK_ENABLE
 

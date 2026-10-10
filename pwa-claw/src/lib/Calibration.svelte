@@ -21,7 +21,9 @@
     { id: "hip",  label: "Hip",       hint: "Upper leg forward/back" },
     { id: "knee", label: "Knee",      hint: "Lower leg bend" },
   ];
-  const MIN = -50, MAX = 50;
+  // ±90°: a quarter turn either way. Was ±50, which some servos needed more than;
+  // the firmware stores any value (no clamp there).
+  const MIN = -90, MAX = 90;
 
   const ZERO = () => ({ abd: 0, hip: 0, knee: 0 });
   let calValues = $state({ fl: ZERO(), fr: ZERO(), rl: ZERO(), rr: ZERO() });

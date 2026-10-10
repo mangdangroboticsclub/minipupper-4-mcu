@@ -98,13 +98,9 @@ std::string uri_to_path(const char *uri)
         return std::string(WWW_ROOT) + "/index.html";
     }
 
-    // Map favicon.ico to the design-appropriate SVG icon
+    // Map favicon.ico to the app's SVG icon
     if (std::strcmp(uri, "/favicon.ico") == 0) {
-#if defined(CONFIG_PWA_DESIGN_REDESIGN) || defined(CONFIG_PWA_DESIGN_CLAW)
         return std::string(WWW_ROOT) + "/md.svg";
-#else
-        return std::string(WWW_ROOT) + "/icon.svg";
-#endif
     }
 
     std::string path = std::string(WWW_ROOT) + uri;
@@ -1132,7 +1128,7 @@ static esp_err_t api_robot_status(httpd_req_t *req)
  * fields as mpv2 / mpv2-claw. */
 static esp_err_t api_pi_status(httpd_req_t *req)
 {
-    char buf[768];
+    char buf[1024];   // with the "rl" object (pi/rl_link.cc)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     if (pi_link::status_json(buf, sizeof(buf)) < 0) {
@@ -2487,19 +2483,11 @@ bool start_http_server()
     register_static("/manifest.json");
     register_static("/sw.js");
     register_static("/favicon.ico");
-#if defined(CONFIG_PWA_DESIGN_CLAW)
     register_static("/md.svg");
     register_static("/eye-open.svg");
     register_static("/eye-close.svg");
     register_static("/m-pupper3d.js");         // lazily loaded three.js viewer
     register_static("/pupper_model.json");     // three.js calibration model
-#elif defined(CONFIG_PWA_DESIGN_REDESIGN)
-    register_static("/md.svg");
-    register_static("/eye-open.svg");
-    register_static("/eye-close.svg");
-#else
-    register_static("/icon.svg");
-#endif
 
     // ── Register WebSocket endpoint (telemetry) ──
     httpd_uri_t ws_uri = {

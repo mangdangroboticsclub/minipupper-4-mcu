@@ -23,10 +23,12 @@ set(sources
     "robot/alive.c"
     "robot/imu.cc"
     "robot/mpx_robot_c_api.cc"
-    # The Raspberry Pi (ROS 2) link on J-PI, mpv2's protocol.
+    # The Raspberry Pi link on J-PI: mpv2's ROS protocol, plus mp4-link's RL
+    # host protocol on the same UART (pi/RL_LINK.md).
     "pi/pi_link.cc"
     "pi/pi_audio.cc"
     "pi/pi_video.cc"
+    "pi/rl_link.cc"
     # Microphone + speaker (mpv2-claw's mpx_audio, direct I2S/codec init).
     "audio/mpx_audio.c"
     "audio/mpx_audio_tune.c"
@@ -85,47 +87,24 @@ if(CONFIG_APP_VOICE_ENABLE)
     )
 endif()
 
-# ── Design-specific assets ───────────────────────────────────
-if(CONFIG_PWA_DESIGN_CLAW)
-    # The mpv2-claw phone app (pwa-claw/, ported). It is about twice the size
-    # of the redesign (three.js model viewer + its 157 KB model), so the big
-    # files are embedded as .gz ONLY: every browser that can run this app
-    # accepts gzip, and static_handler() falls back to the .gz even for one
-    # that does not. Raw+gz of everything would not fit the 2.5 MB app slot.
-    message(STATUS "PWA design: claw (mpv2 app)")
-    set(pwa_www_dir "../pwa-claw/www")
-    set(design_assets
-        "../pwa-claw/www/md.svg"
-        "../pwa-claw/www/md.svg.gz"
-        "../pwa-claw/www/eye-open.svg"
-        "../pwa-claw/www/eye-open.svg.gz"
-        "../pwa-claw/www/eye-close.svg"
-        "../pwa-claw/www/eye-close.svg.gz"
-        "../pwa-claw/www/m-pupper3d.js.gz"
-        "../pwa-claw/www/pupper_model.json.gz"
-    )
-    set(big_assets_gz_only TRUE)
-elseif(CONFIG_PWA_DESIGN_REDESIGN)
-    message(STATUS "PWA design: redesign (light theme)")
-    set(pwa_www_dir "../pwa-redesign/www")
-    set(design_assets
-        "../pwa-redesign/www/md.svg"
-        "../pwa-redesign/www/md.svg.gz"
-        "../pwa-redesign/www/eye-open.svg"
-        "../pwa-redesign/www/eye-open.svg.gz"
-        "../pwa-redesign/www/eye-close.svg"
-        "../pwa-redesign/www/eye-close.svg.gz"
-    )
-else()
-    message(STATUS "PWA design: original (dark theme)")
-    set(pwa_www_dir "../pwa/www")
-    set(design_assets
-        "../pwa/www/icon.svg"
-        "../pwa/www/icon.svg.gz"
-    )
-endif()
+# ── Phone app assets (pwa-claw/, built into pwa-claw/www) ────
+# The mpv2-claw phone app. It carries a three.js model viewer and its 157 KB
+# model, so the big files are embedded as .gz ONLY: every browser that can run
+# this app accepts gzip, and static_handler() falls back to the .gz even for
+# one that does not.
+set(pwa_www_dir "../pwa-claw/www")
+set(design_assets
+    "../pwa-claw/www/md.svg"
+    "../pwa-claw/www/md.svg.gz"
+    "../pwa-claw/www/eye-open.svg"
+    "../pwa-claw/www/eye-open.svg.gz"
+    "../pwa-claw/www/eye-close.svg"
+    "../pwa-claw/www/eye-close.svg.gz"
+    "../pwa-claw/www/m-pupper3d.js.gz"
+    "../pwa-claw/www/pupper_model.json.gz"
+)
 
-# ── Assets shared by all designs (same names, different content) ──
+# ── App shell ─────────────────────────────────────────────────
 set(common_assets
     "${pwa_www_dir}/index.html"
     "${pwa_www_dir}/index.html.gz"
@@ -136,12 +115,6 @@ set(common_assets
     "${pwa_www_dir}/sw.js"
     "${pwa_www_dir}/sw.js.gz"
 )
-if(NOT big_assets_gz_only)
-    list(APPEND common_assets
-        "${pwa_www_dir}/index.css"
-        "${pwa_www_dir}/m.js"
-    )
-endif()
 
 # ── Register component ───────────────────────────────────────
 idf_component_register(

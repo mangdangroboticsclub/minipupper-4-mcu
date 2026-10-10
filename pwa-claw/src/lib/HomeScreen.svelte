@@ -156,7 +156,18 @@
     return () => { mqSide.removeEventListener("change", sync); mqPort.removeEventListener("change", sync); };
   });
 
-  const showWide = $derived(activeTab === "home" && !showAllActions && !showAddAction && !showActionAssignment && (wideMode || phoneSideways));
+  // PC: a big enough window that isn't a phone held sideways gets the
+  // landscape pad inline on Home -- no full screen, no rotate button.
+  let desktop = $state(false);
+  $effect(() => {
+    const mq = matchMedia("(min-width: 1000px) and (min-height: 600px)");
+    const sync = () => (desktop = mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  });
+
+  const showWide = $derived(!desktop && activeTab === "home" && !showAllActions && !showAddAction && !showActionAssignment && (wideMode || phoneSideways));
   const rotated = $derived(showWide && viewportPortrait);
 
   async function enterWide() {
@@ -238,7 +249,7 @@
           onBack={() => (showAllActions = false)}
         />
       {:else}
-        <div class="home">
+        <div class="home" class:desk={desktop}>
           <header class="home-head">
             <button
               type="button"
@@ -256,9 +267,11 @@
               <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
             </button>
             <img class="logo" src="/md.svg" alt="MangDang" />
+            {#if desktop}<span></span>{:else}
             <button type="button" class="round" onclick={enterWide} aria-label="Landscape controller">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="3"/><path d="M8 10v4M6 12h4M16 11h.01M18 13h.01"/></svg>
             </button>
+            {/if}
           </header>
 
           {#if network?.linkState === "offline"}
@@ -268,6 +281,7 @@
           <div class="home-scroll">
             <div class="pad-wrap">
               <Controller
+                wide={desktop}
                 assignments={actionAssignments}
                 catalog={allActions}
                 {online}
@@ -426,6 +440,14 @@
   .qa.add { background: #fff; border: 1.5px dashed #CFC9BB; }
   .qa-ico { font-size: 20px; line-height: 1; }
   .qa-lbl { font-size: 12px; font-weight: 700; max-width: 100%; padding: 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ── PC: the landscape pad inline, quick actions in one row under it ── */
+  .home.desk .home-head, .home.desk .offline { max-width: 1080px; padding-left: 24px; padding-right: 24px; }
+  .home.desk .home-scroll { align-items: center; padding-bottom: 16px; }
+  .home.desk .pad-wrap { max-width: 1080px; padding: 12px 24px 0; height: clamp(420px, 58vh, 560px); }
+  .home.desk .quick { flex: 0 0 auto; max-width: 1032px; margin-top: 18px; }
+  .home.desk .quick-grid { grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); }
+  .home.desk .qa { height: 72px; }
 
   /* ── Chat ── */
   .chat-tab { position: absolute; inset: 0; display: flex; flex-direction: column; }

@@ -46,6 +46,7 @@
 #include "pi/pi_audio.h"
 #include "pi/pi_protocol.h"
 #include "pi/pi_video.h"
+#include "pi/rl_link.h"
 #include "robot/board_config.h"
 #include "robot/robot.h"
 #include "wasm/wasm_sandbox.h"
@@ -315,6 +316,9 @@ void on_frame(uint8_t type, uint8_t seq, const uint8_t *p, uint8_t len)
     if (type == PI_MSG_VIDEO_DATA) {   // display only - any link state
         if (len <= sizeof(pi_video_hdr_t)) { s_rx_bad++; return; }
         s_rx_frames++;
+#if CONFIG_APP_RL_LINK_ENABLE
+        rl_link::note_bulk();
+#endif
         pi_video::chunk(p, len);
         return;
     }
@@ -396,6 +400,9 @@ void on_frame(uint8_t type, uint8_t seq, const uint8_t *p, uint8_t len)
     case PI_MSG_AUDIO_DATA: {
         if (len == 0 || (len & 1)) { s_rx_bad++; return; }
         s_rx_frames++;
+#if CONFIG_APP_RL_LINK_ENABLE
+        rl_link::note_bulk();
+#endif
         if (!slave) return;            // quietly: up to 170 of these a second
         pi_audio::push(p, len);
         return;
@@ -463,10 +470,13 @@ void feed(uint8_t b)
 }
 
 /* ── The Pi's IP for the face: tell the observer when it changes ─────── */
+/* Fresh HOST_INFO alone is enough, in any link state. pi_announce on the Pi
+ * sends nothing else (no heartbeat), so it can show the Pi's address without
+ * ever touching who controls the robot: a heartbeat of its own, interleaved
+ * with the ROS bridge's, flipped the robot in and out of slave mode. */
 bool host_info_fresh_locked(int64_t now)
 {
-    return s_host_info_us != 0 && now - s_host_info_us < HOST_INFO_STALE_US &&
-           s_status.state != State::Standalone;
+    return s_host_info_us != 0 && now - s_host_info_us < HOST_INFO_STALE_US;
 }
 
 void tell_ip(int64_t now)
@@ -503,6 +513,13 @@ bool update_state(int64_t now)
 
     State want = State::Standalone;
     if (hb) want = (s_want_control && pin_ok) ? State::Slave : State::Monitor;
+#if CONFIG_APP_RL_LINK_ENABLE
+    // An RL policy driving the joints (rl_link.cc) and the ROS bridge cannot
+    // both own the robot. Whoever was first keeps it: a running RL session
+    // keeps the bridge in monitor, and a slave robot refuses the policy's ARM.
+    if (want == State::Slave && s_state != State::Slave && rl_link::session_active())
+        want = State::Monitor;
+#endif
 
     if (want == State::Slave && s_state != State::Slave) {
         s_state = want;            // before enter_slave(): the event reports it
@@ -542,8 +559,23 @@ void link_task(void *)
     int64_t next_state = 0, next_info = 0, next_diag = 0;
 
     for (;;) {
-        const int n = uart_read_bytes(PI_UART_PORT, rx, sizeof(rx), RX_WAIT);
+        // Wait for one byte, then take whatever else has arrived. Asking for a
+        // full buffer would hold a 36-byte RL SET_ALL until the 10 ms timeout:
+        // two of the policy's 5 ms ticks late (mp4-link learned this too).
+        int n = uart_read_bytes(PI_UART_PORT, rx, 1, RX_WAIT);
+        if (n > 0) {
+            size_t more = 0;
+            uart_get_buffered_data_len(PI_UART_PORT, &more);
+            if (more > sizeof(rx) - 1) more = sizeof(rx) - 1;
+            if (more) {
+                const int m = uart_read_bytes(PI_UART_PORT, rx + 1, more, 0);
+                if (m > 0) n += m;
+            }
+        }
         for (int i = 0; i < n; ++i) feed(rx[i]);
+#if CONFIG_APP_RL_LINK_ENABLE
+        if (n > 0) rl_link::feed(rx, n);
+#endif
 
         const int64_t now = esp_timer_get_time();
         const bool pin = update_state(now);
@@ -556,6 +588,14 @@ void link_task(void *)
             next_state = next_info = next_diag = now;
             continue;
         }
+#if CONFIG_APP_RL_LINK_ENABLE
+        // The RL policy's STATE owns the wire while it runs: no ROS telemetry
+        // in between (pi_announce, say, may still be heartbeating for a moment).
+        if (rl_link::driving()) {
+            next_state = next_info = next_diag = now;
+            continue;
+        }
+#endif
 
         if (now >= next_state) {
             send_state(pin);
@@ -622,6 +662,9 @@ esp_err_t init()
     gpio_set_level(PI_SLAVE_OUT_PIN, 0);
 
     s_status.ms_since_rx = 0xFFFFFFFFu;
+#if CONFIG_APP_RL_LINK_ENABLE
+    rl_link::init();   // before the link task can feed it
+#endif
     if (xTaskCreatePinnedToCore(link_task, "pi_link", 4096, nullptr, 9, nullptr, 0) != pdPASS) {
         ESP_LOGE(TAG, "failed to start the link task");
         return ESP_ERR_NO_MEM;
@@ -655,6 +698,18 @@ void get_status(Status *out)
     out->video_frames_shown   = v.frames_shown;
     out->video_frames_dropped = v.frames_dropped;
     out->video_decode_errors  = v.decode_errors;
+#if CONFIG_APP_RL_LINK_ENABLE
+    const rl_link::Stats r = rl_link::stats();
+    out->rl_session     = r.session;
+    out->rl_robot       = r.robot;
+    out->rl_armed       = r.armed;
+    out->rl_flags       = r.flags;
+    out->rl_fault_servo = r.fault_servo;
+    out->rl_frames      = r.frames;
+    out->rl_crc_err     = r.crc_err;
+    out->rl_sessions    = r.sessions;
+    out->rl_ticks       = r.ticks;
+#endif
 }
 
 const char *state_name(State s)
@@ -725,7 +780,9 @@ int status_json(char *buf, size_t size)
         R"("tx_frames":%lu,"tx_drop":%lu,"slave_entries":%lu,"last_exit_reason":"%s",)"
         R"("pi_ip":"%s","pi_hostname":"%s",)"
         R"("audio":{"playing":%s,"buffered_ms":%lu,"underruns":%lu},)"
-        R"("video":{"shown":%lu,"dropped":%lu,"errors":%lu}})",
+        R"("video":{"shown":%lu,"dropped":%lu,"errors":%lu},)"
+        R"("rl":{"session":%s,"robot":%s,"armed":%s,"flags":%u,"fault_servo":%u,)"
+        R"("frames":%lu,"crc_err":%lu,"sessions":%lu,"ticks":%lu}})",
         state_name(st.state),
         robot::master_active() ? "true" : "false",
         st.host_pin ? "true" : "false",
@@ -745,7 +802,16 @@ int status_json(char *buf, size_t size)
         static_cast<unsigned long>(st.audio_underruns),
         static_cast<unsigned long>(st.video_frames_shown),
         static_cast<unsigned long>(st.video_frames_dropped),
-        static_cast<unsigned long>(st.video_decode_errors));
+        static_cast<unsigned long>(st.video_decode_errors),
+        st.rl_session ? "true" : "false",
+        st.rl_robot ? "true" : "false",
+        st.rl_armed ? "true" : "false",
+        static_cast<unsigned>(st.rl_flags),
+        static_cast<unsigned>(st.rl_fault_servo),
+        static_cast<unsigned long>(st.rl_frames),
+        static_cast<unsigned long>(st.rl_crc_err),
+        static_cast<unsigned long>(st.rl_sessions),
+        static_cast<unsigned long>(st.rl_ticks));
     return (n < 0 || static_cast<size_t>(n) >= size) ? -1 : n;
 }
 

@@ -1,4 +1,5 @@
 <script>
+  import { untrack } from "svelte";
   import { colors } from "./lib/colors.js";
   import LockScreen from "./lib/LockScreen.svelte";
   import PermissionCard from "./lib/PermissionCard.svelte";
@@ -97,13 +98,36 @@
   let pendingActions = $state([]);
   let wsRetryTimer = null;
   let wsLent = false;   // Servo Studio has borrowed the socket (see below)
+  /* The socket being opened or open. A plain variable, not $state: reading it
+     inside an effect must not make that effect re-run when it changes. */
+  let wsSock = null;
+  let wsLastAttempt = 0;
+  /* Never more than one new socket per WS_MIN_GAP_MS, whatever asks for it.
+     The robot's HTTP server has a handful of sockets; a client that reopens
+     this one in a tight loop (seen in the log as dozens of "chat client fd=N"
+     lines a second) starves everything else, and Servo Studio's checks then
+     time out and it says "Robot offline". */
+  const WS_MIN_GAP_MS = 3000;
 
   function connectPermissionWs() {
-    if (permissionWs && permissionWs.readyState === WebSocket.OPEN) return;
+    untrack(connectPermissionWsNow);
+  }
+
+  function connectPermissionWsNow() {
+    if (wsLent) return;
+    if (wsSock && (wsSock.readyState === WebSocket.OPEN || wsSock.readyState === WebSocket.CONNECTING)) return;
+    const wait = wsLastAttempt + WS_MIN_GAP_MS - Date.now();
+    if (wait > 0) {
+      clearTimeout(wsRetryTimer);
+      wsRetryTimer = setTimeout(connectPermissionWs, wait);
+      return;
+    }
+    wsLastAttempt = Date.now();
 
     try {
       const ws = new WebSocket(PERMISSION_WS_URL);
-      ws.onopen = () => { permissionWs = ws; wsConnected = true; };
+      wsSock = ws;
+      ws.onopen = () => { if (ws === wsSock) { permissionWs = ws; wsConnected = true; } };
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
@@ -124,10 +148,12 @@
         } catch { /* ignore malformed JSON */ }
       };
       ws.onclose = () => {
+        if (ws !== wsSock) return;      // an old socket closing: not ours to retry
+        wsSock = null;
         permissionWs = null;
         wsConnected = false;
         clearTimeout(wsRetryTimer);
-        if (!wsLent) wsRetryTimer = setTimeout(connectPermissionWs, 3000);
+        if (!wsLent) wsRetryTimer = setTimeout(connectPermissionWs, WS_MIN_GAP_MS);
       };
       ws.onerror = () => { ws.close(); };
     } catch { /* ignore */ }
@@ -139,12 +165,21 @@
   // this permanent WebSocket back on the way in and returns it on the way out
   // (window events "mpx:yield-socket" / "mpx:resume-socket").
   $effect(() => {
-    const lend = () => {
+    // untrack: these run synchronously inside whatever dispatched the event.
+    // If that is an effect, reading permissionWs here would make it one of
+    // that effect's dependencies, and the close/reopen below would re-run it
+    // forever (the Servo Studio "Robot offline" reconnect storm).
+    const lend = () => untrack(() => {
+      if (wsLent) return;
       wsLent = true;
       clearTimeout(wsRetryTimer);
-      if (permissionWs) permissionWs.close();
-    };
-    const takeBack = () => { wsLent = false; connectPermissionWs(); };
+      if (wsSock) wsSock.close();
+    });
+    const takeBack = () => untrack(() => {
+      if (!wsLent) return;
+      wsLent = false;
+      connectPermissionWs();
+    });
     window.addEventListener("mpx:yield-socket", lend);
     window.addEventListener("mpx:resume-socket", takeBack);
     return () => {
@@ -166,7 +201,10 @@
   }
 
   // ── Lifecycle ───────────────────────────────────────────────
-  $effect(() => {
+  // Runs once. untrack: pollNetworkStatus() reads link state synchronously,
+  // and as a dependency of this effect every link change used to re-run it,
+  // and the re-run's cleanup closed and reopened the permission socket.
+  $effect(() => untrack(() => {
     pollNetworkStatus();
     connectPermissionWs();
 
@@ -183,9 +221,9 @@
       clearTimeout(pollTimer);
       clearTimeout(wsRetryTimer);
       document.removeEventListener("visibilitychange", onVis);
-      if (permissionWs) permissionWs.close();
+      if (wsSock) { const s = wsSock; wsSock = null; s.close(); }
     };
-  });
+  }));
 
   // ── Pack props for children ─────────────────────────────────
   let network = $derived({

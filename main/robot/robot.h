@@ -784,4 +784,46 @@ void set_foot_targets(const float xyz_m[4][3]);
 
 }  // namespace master
 
+// ── Raw host (the Pi's RL policy, mpx_pi_link rl_link.cc) ───
+//
+// The policy drives every joint itself at 200 Hz over the J-PI link, in raw
+// AT32 units, with mp4-link's protocol. It is a master too - master_active()
+// is true and every local motion entry point is fenced exactly as above - but
+// it drives the servo boards directly (driver_board_sync_raw), so the gait
+// parks and flush() writes nothing while it holds them.
+
+namespace host {
+
+/**
+ * Take the robot for the raw host. Fails only while the ROS bridge (a
+ * robot::master::begin() master) holds it. Takes the bus from Servo Studio or
+ * a skill the way master::begin() does, stops the gait where it is and tells
+ * the master observer (voice off, ROS on the screen). The servos keep the
+ * last pose they were sent until the host commands them. Reads the servo
+ * gains (about 0.2 s) so end() can put them back.
+ */
+bool begin();
+
+/**
+ * Hand the robot back: the servo gains begin() read are written back (the
+ * policy's own were only ever in the boards' RAM), local controls return and
+ * the legs glide from wherever they are into the stand, as when waking from
+ * rest.
+ */
+void end();
+
+/** True between begin() and end(). */
+bool active();
+
+/**
+ * Store a calibration offset (degrees, the gait's offset[]): into this
+ * firmware's NVS, as set_offset() would, and into the "parameter" namespace
+ * mp4-link and minipupperesp read, so every firmware on this robot keeps
+ * one calibration. Allowed while the host holds the robot. False if either
+ * NVS write failed (the offset is in use either way).
+ */
+bool store_offset(int servo_id, float deg);
+
+}  // namespace host
+
 }  // namespace robot

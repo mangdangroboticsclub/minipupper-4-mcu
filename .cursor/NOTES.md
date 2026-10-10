@@ -627,6 +627,10 @@ NVS namespaces:
 
 ## 11. The PWAs
 
+> **Since local-claw Phase 6** there is one app, `pwa-claw/` (mpv2-claw's,
+> see `PORT_NOTES.md`); `pwa/`, `pwa-redesign/` and `PWA_DESIGN` were
+> removed. The rest of this section describes those two older apps.
+
 Two Svelte 5 + Vite + Tailwind apps talk to the same firmware API. Kconfig
 `PWA_DESIGN` picks which one is embedded; **the default is `pwa-redesign/`**.
 

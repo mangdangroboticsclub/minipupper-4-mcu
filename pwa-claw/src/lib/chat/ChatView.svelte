@@ -1,3 +1,10 @@
+<script module>
+  /* Shared by every ChatView ever mounted: a view that is torn down and
+     mounted again quickly must not open a new socket each time. */
+  let lastConnectAt = 0;
+  const CONNECT_MIN_GAP_MS = 3000;
+</script>
+
 <script>
   import { onMount } from "svelte";
   import { marked } from "marked";
@@ -319,6 +326,11 @@
   function connect() {
     // Don't open a second socket if one is already open OR still connecting.
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+    // Rate limit: at most one new socket per CONNECT_MIN_GAP_MS. A reconnect
+    // storm starves the robot's few HTTP sockets (see app.svelte).
+    if (Date.now() - lastConnectAt < CONNECT_MIN_GAP_MS) { scheduleReconnect(); return; }
+    lastConnectAt = Date.now();
 
     // Make sure any previous socket is fully torn down before opening a new one.
     if (ws) {

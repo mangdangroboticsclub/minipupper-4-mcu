@@ -320,7 +320,50 @@ enum {
     DB_LIVE_COUNT
 };
 
+/* One live value past DB_LIVE_COUNT, outside the enum on purpose: Servo
+ * Studio sizes its key table by DB_LIVE_COUNT and reads every entry, and this
+ * one needs AT32 fw >= 0.0.9. driver_board_get_live() accepts it. */
+#define DB_LIVE_SUPPLY_CURRENT_MA  13   /* battery-side current |I| x duty, mA */
+
 bool driver_board_get_live(int servo /*1..12*/, int live_id, float *out);
+
+/* ---- raw host link: the Pi's RL policy (mp4-link's mp3-link protocol) ----
+ * The policy commands every joint itself at 200 Hz in RAW AT32 deci-degrees
+ * (0..scale, no direction flip, no calibration offset): the units mp4-link's
+ * SET_ALL frame carries. Everything here is indexed by LOGICAL servo id and
+ * mapped through db_phys() like the rest of this file.
+ *
+ * mode[i] is DB_MODE_IDLE, DB_MODE_POSITION or DB_MODE_TORQUE, or
+ * DB_MODE_HOLD: keep the position that channel was last commanded (the parked
+ * gait pose, until the host first arms). A channel last left in any other
+ * mode (a skill's torque command, say) goes IDLE instead, and per-frame gains
+ * are dropped. In MODE_POSITION cur_mA is the current cap, as everywhere
+ * else.
+ *
+ * *answered and *fresh, either may be NULL: bit L is logical leg L (servos
+ * 3L+1..3L+3). answered = its board replied; fresh = the reply was servo
+ * feedback and the caches were refreshed. A config reply, and the first
+ * ordinary frame after a config exchange (which still carries the parameter
+ * in the board's first channel), are answered but not fresh.
+ *
+ * The SCS-scale caches the gait reads (driver_board_present_position() and
+ * friends) are refreshed too, so the app and Servo Studio keep seeing the
+ * legs while the host drives them. */
+#define DB_MODE_HOLD 0xFFFFu
+void driver_board_sync_raw(const uint16_t mode[12], const uint16_t pos_dd[12],
+                           const int16_t cur_mA[12], uint8_t *answered, uint8_t *fresh);
+
+/* What the last driver_board_sync_raw() read for a logical servo: position in
+ * RAW deci-degrees, motor current in mA, NTC temperature in 0.1 degC and the
+ * board's status word. Returns false, with every value 0, when that servo's
+ * board gave no feedback on the last sync_raw. Any pointer may be NULL. */
+bool driver_board_raw_feedback(int servo, uint16_t *pos_dd, int16_t *cur_mA,
+                               int16_t *temp_dc, uint16_t *status);
+
+/* Forget the raw feedback: every servo reads "no feedback" until the next
+ * driver_board_sync_raw(). Called when a host session starts, so nothing from
+ * an earlier session is reported as current. */
+void driver_board_raw_invalidate(void);
 
 #ifdef __cplusplus
 }

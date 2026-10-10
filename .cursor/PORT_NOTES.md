@@ -23,6 +23,7 @@ Phases:
 | 3 | LCD face + GIFs (`/v1/display*`), needs LVGL + ST7789 bring-up | this branch (builds; first light owed) |
 | 4 | Audio + voice (esp-sr wake word, MangDang voice gateway, music, voice tools), `/v1/ai` (mangdang/off), `/v1/voice` | this branch (builds, 0 warnings; bench checks owed) |
 | 5 | On-device agent (ESP-Claw, vendored), `/v1/ai` "own" mode, chat answered locally behind a per-conversation Pupper / Cloud toggle | this branch (builds, 0 warnings; bench checks owed) |
+| 6 | Catch-up with mpv2-claw `ede0804` ("new pi link and RL"): RL host link on the Pi UART, Pi link UART/HOST_INFO fixes, raw servo path in the robot core, IMU at 200 Hz / +-16 g, `pi_announce`, PWA updates | this branch (not built here; PWA builds; bench checks owed) |
 
 ## Phase 1 changes
 
@@ -680,6 +681,123 @@ skills, ESP-Claw's built-in ones and the recovery seeds. Bench checks owed:
 - Internal RAM after the agent + AFE both up; if Wi-Fi starves again, the
   agent's `claw_core` task stacks are the first candidates to trim.
 
+## Phase 6 changes (catch-up with mpv2-claw `ede0804`)
+
+Phases 1-5 were ported from mpv2-claw `cf0378c` ("Pi link Uart"). mpv2-claw
+then gained `ede0804` ("new pi link and RL", 2026-10-10). This phase brings
+that commit over. Nothing in it touches the agent, voice or display.
+
+### Robot core (`main/robot/`)
+
+`robot.cc`, `robot.h`, `driver_board.c`, `driver_board.h` were still
+byte-identical to mpv2-claw `cf0378c`, so they are now mpv2-claw `ede0804`'s
+files verbatim:
+
+- `driver_board_sync_raw()` / `driver_board_raw_feedback()` /
+  `driver_board_raw_invalidate()`: the raw AT32 path (deci-degrees, no
+  direction flip, no offset) an RL policy drives, with `DB_MODE_HOLD`.
+  `DB_LIVE_SUPPLY_CURRENT_MA` (live id 13, AT32 fw >= 0.0.9).
+- `robot::host::begin/end/active/store_offset`: the raw host is a master
+  like the ROS bridge (`master_active()` is true, every local motion entry
+  point is fenced, the master observer fires: voice off, ROS on the screen),
+  but it drives the boards itself, so the gait parks. Servo gains are saved
+  on begin and written back on end; end glides into the stand.
+  `store_offset` writes this firmware's offset and the `parameter`
+  namespace mp4-link / minipupperesp read.
+
+`imu.cc` stays this firmware's (shared I2C), but now matches mpv2-claw's
+`mpx_imu.cc` numbers: **200 Hz ODR, 5 ms poll, +-16 g** (was 100 Hz, 10 ms,
++-2 g). The RL STATE carries a fresh sample every 5 ms tick, and the
+reflexes in `alive.c` were tuned on mpv2-claw at these settings.
+
+### Pi link (`main/pi/`)
+
+- `rl_link.{h,cc}` and `RL_LINK.md`: mpv2-claw's verbatim, Kconfig prefix
+  `MP4_RL_*` -> `APP_RL_*`, include paths `pi/...`. mp4-link's frames byte
+  for byte on the J-PI UART (`/dev/ttyAMA0` on the Pi, 921600), so
+  `python -m mp3link` works unchanged. Sessions, watchdog, guard, HOLD
+  before first ARM: see `RL_LINK.md`.
+- `pi_link.cc` (3-way merge of mpv2-claw's diff onto this file's renamed
+  version, no conflicts beyond names):
+  - the link task waits for one byte and then takes what is buffered,
+    instead of waiting for a full buffer (a 36-byte SET_ALL was held for
+    the 10 ms timeout);
+  - every received chunk also goes to `rl_link::feed()`; audio/video
+    frames call `rl_link::note_bulk()`;
+  - a running RL session keeps the ROS bridge in monitor (whoever came
+    first keeps the robot), and no ROS telemetry is sent while RL drives;
+  - the Pi's IP shows for a fresh HOST_INFO in **any** link state (was:
+    not in standalone), so `tools/pi/pi_announce.py` can put it on the
+    screen from boot without heartbeating;
+  - `Status` / `GET /v1/pi/status` gain the `rl` object
+    (`session, robot, armed, flags, fault_servo, frames, crc_err,
+    sessions, ticks`). The handler's buffer is 1 KB now.
+- Kconfig: `APP_RL_LINK_ENABLE` (y) and `APP_RL_TICK_HZ`,
+  `APP_RL_WATCHDOG_MS`, `APP_RL_RELEASE_MS`, `APP_RL_GUARD_CUR_MA/_MS`,
+  `APP_RL_GUARD_TEMP_DC/_MS`, inside `APP_PI_LINK_ENABLE`. `sdkconfig`
+  picks the defaults up on the next configure.
+- Not ported: mpv2-claw's `pi` console command's RL line (no console here;
+  the same numbers are in `/v1/pi/status`).
+
+### Tools (`tools/`)
+
+- `tools/pi/`: `pi_announce.py` + `pi-announce.service` (the Pi sends only
+  HOST_INFO every 2 s) and the Pi-side README (wiring, bridge parameters,
+  checks), adapted to this firmware's names. mpv2-claw's `mp4_link.py` (the
+  old text-line test link) is not carried: no firmware speaks it.
+- `tools/check_comments.py`, which these notes used to run from
+  `..\mpv2-claw\tools`.
+
+### Phone app (`pwa-claw/`)
+
+`ServoStudio.svelte`, `Controller.svelte`, `HomeScreen.svelte` and
+`Calibration.svelte` were identical to mpv2-claw `cf0378c`, so they are
+`ede0804`'s verbatim: Servo Studio rework (unsaved-change count, save all
+four boards), right stick Turn / Look toggle (turn uses the existing
+`/v1/robot/joy` `t`), the landscape pad inline on a PC-sized window,
+calibration range +-90 deg. `app.svelte` and `ChatView.svelte` got
+mpv2-claw's socket fixes by 3-way merge (no conflicts with the brain
+toggle): at most one new WebSocket per 3 s, `untrack` around the
+lend/take-back handlers (the Servo Studio "Robot offline" reconnect storm).
+Service-worker cache `v13-claw`. `npm run build` is clean.
+
+### Not ported, on purpose
+
+- mpv2-claw's Wi-Fi changes (`mpx_wifi_tune` config lock, scan that
+  interrupts a join attempt): they fix ESP-Claw's `wifi_manager`, which
+  retries forever. This firmware's `network/wifi_sta.cc` stops at
+  `NO_AP_FOUND`, already switches AP -> AP+STA to scan, and has no tuner.
+- `fatfs_create_rawflash_image(... PRESERVE_TIME)`: mpv2-claw serves the
+  PWA from a FAT image; here it is embedded in the app.
+- `pi_ros_src.tgz` / `pi_ros_hashes.txt` (a 119 MB Pi-side source dump).
+
+### Cleanup
+
+- **One phone app.** `pwa/` (original, dark) and `pwa-redesign/` are gone,
+  with the `PWA_DESIGN` Kconfig choice and every `CONFIG_PWA_DESIGN_*`
+  branch in `main/CMakeLists.txt`, `network/http_server.cc` and
+  `network/www_assets.cc`. `pwa-claw/` is the app; its big files are
+  embedded as `.gz` only, as before. The original app's Lua editor, WASM
+  list and servo ping/sweep page went with it (mpv2-claw has none of them
+  either; the HTTP routes they used are still there).
+  `.devcontainer/post-create.sh` installs `pwa-claw/`'s packages.
+- `components/dong-12345__ftservo` removed: nothing used it (the servos are
+  the AT32 boards on SPI), but ESP-IDF compiled it on every build.
+- `main/test_skill.wasm` removed (not referenced by the build).
+- Windows checkouts: `git config core.autocrlf true` in the clone, so the
+  CRLF working tree no longer shows every file as modified.
+
+### Bench checks owed
+
+- `python -m mp3link ping` on the Pi: 200 Hz STATE, no CRC errors, IMU_OK set.
+- A policy session: the gait parks, the app gets 423, voice stops, ROS on the
+  screen; 2 s after the last frame the legs glide into the stand and the app
+  works again.
+- ROS bridge and an RL policy together: whoever starts first keeps the robot.
+- `pi_announce` running alone: the Pi's IP under the eyes, robot stays
+  `standalone`.
+- IMU at +-16 g: picked-up / push reflexes still trigger as before.
+
 ## Design decisions
 
 - **(Superseded in phase 2) Keep mpx-dog's sign conventions.** mpv2-claw
@@ -732,7 +850,7 @@ skills, ESP-Claw's built-in ones and the recovery seeds. Bench checks owed:
 ```powershell
 cd pwa-claw && npm install && npm run build      # -> pwa-claw/www (gitignored)
 cd .. && idf.py build                            # sdkconfig has PWA_DESIGN_CLAW=y
-python ..\mpv2-claw\tools\check_comments.py      # no slash-asterisk inside comments (-Werror=comment)
+python tools\check_comments.py                  # no slash-asterisk inside comments (-Werror=comment)
 ```
 
 After editing `main/idf_component.yml` or `main/Kconfig.projbuild`, run

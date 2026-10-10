@@ -1,0 +1,13 @@
+[Unit]
+Description=Show the Pi's IP on the robot's screen (J-PI link, monitor only)
+After=network.target
+
+[Service]
+User=ubuntu
+Group=dialout
+ExecStart=/usr/bin/python3 /usr/local/bin/pi_announce.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -24,6 +24,11 @@
  * speaker, slave mode only), HOST_INFO (its IP, shown under the eyes) and
  * VIDEO_DATA (a camera picture on the screen).
  *
+ * The same UART also carries mp4-link's RL host protocol (pi/rl_link.cc,
+ * pi/RL_LINK.md): a policy on the Pi (python -m mp3link) drives all twelve
+ * joints directly at 200 Hz. Whoever takes the robot first, the ROS bridge
+ * or an RL session, keeps it.
+ *
  * Who reacts to slave mode is wired in main.cc through
  * robot::set_master_observer(): voice stops, the screen says ROS. The
  * /v1/robot routes answer 423 pi_in_control while robot::master_active().
@@ -64,6 +69,16 @@ struct Status {
     uint32_t video_frames_shown;
     uint32_t video_frames_dropped;
     uint32_t video_decode_errors;
+    // The RL host link (mp4-link protocol, rl_link.cc) on the same UART.
+    bool     rl_session;          // an RL policy is talking to the robot
+    bool     rl_robot;            // ...and owns it (not the ROS bridge)
+    bool     rl_armed;
+    uint16_t rl_flags;            // the last STATE flags (mp4-link ST_*)
+    uint8_t  rl_fault_servo;
+    uint32_t rl_frames;
+    uint32_t rl_crc_err;
+    uint32_t rl_sessions;
+    uint32_t rl_ticks;
 };
 
 /* Open UART1 on the J-PI pins, configure IO3 (input, pulled down) and IO11
@@ -84,8 +99,9 @@ const char *state_name(State state);
 const char *state_str();
 
 /* The Pi's IP and hostname from its last HOST_INFO (the bridge sends one
- * every ~2 s). False, with "" in both, when the link is down or nothing
- * arrived for 6 s. Either pointer may be nullptr. */
+ * every ~2 s, tools/pi/pi_announce.py too). False, with "" in both, when
+ * nothing arrived for 6 s. Any link state: HOST_INFO alone shows the address.
+ * Either pointer may be nullptr. */
 bool host_info(char *ip, size_t ip_len, char *hostname, size_t hostname_len);
 
 /* Just the IP (GET /v1/wifi/status "pi" and the face's network line). */

@@ -26,37 +26,25 @@ static constexpr const char *MOUNT_POINT = "/fs";
     extern const uint8_t _binary_##name##_start[];                           \
     extern const uint8_t _binary_##name##_end[]
 
-// ── Common assets (present in both designs) ──────────────────
+// ── App shell (the large files are embedded as .gz only, see main/CMakeLists.txt)
 DECLARE_EMBED(index_html);
 DECLARE_EMBED(index_html_gz);
 DECLARE_EMBED(index_css_gz);
 DECLARE_EMBED(m_js_gz);
-#ifndef CONFIG_PWA_DESIGN_CLAW
-// The claw design embeds the large files as .gz only (main/CMakeLists.txt).
-DECLARE_EMBED(index_css);
-DECLARE_EMBED(m_js);
-#endif
 DECLARE_EMBED(manifest_json);
 DECLARE_EMBED(manifest_json_gz);
 DECLARE_EMBED(sw_js);
 DECLARE_EMBED(sw_js_gz);
 
-// ── Design-specific assets ───────────────────────────────────
-#if defined(CONFIG_PWA_DESIGN_REDESIGN) || defined(CONFIG_PWA_DESIGN_CLAW)
+// ── Icons and the calibration viewer ─────────────────────────
 DECLARE_EMBED(md_svg);
 DECLARE_EMBED(md_svg_gz);
 DECLARE_EMBED(eye_open_svg);
 DECLARE_EMBED(eye_open_svg_gz);
 DECLARE_EMBED(eye_close_svg);
 DECLARE_EMBED(eye_close_svg_gz);
-#ifdef CONFIG_PWA_DESIGN_CLAW
 DECLARE_EMBED(m_pupper3d_js_gz);       // three.js viewer chunk, gz only
 DECLARE_EMBED(pupper_model_json_gz);   // gz only, see main/CMakeLists.txt
-#endif
-#else
-DECLARE_EMBED(icon_svg);
-DECLARE_EMBED(icon_svg_gz);
-#endif
 
 /* ── File descriptor table ──────────────────────────────────── */
 
@@ -77,31 +65,20 @@ static const AssetFile ASSETS[] = {
     ASSET_ENTRY("/index.html.gz",    index_html_gz),
     ASSET_ENTRY("/index.css.gz",     index_css_gz),
     ASSET_ENTRY("/m.js.gz",          m_js_gz),
-#ifndef CONFIG_PWA_DESIGN_CLAW
-    ASSET_ENTRY("/index.css",        index_css),
-    ASSET_ENTRY("/m.js",             m_js),
-#endif
     ASSET_ENTRY("/manifest.json",    manifest_json),
     ASSET_ENTRY("/manifest.json.gz", manifest_json_gz),
     ASSET_ENTRY("/sw.js",            sw_js),
     ASSET_ENTRY("/sw.js.gz",         sw_js_gz),
 
-    // ── Design-specific ──────────────────────────────────────
-#if defined(CONFIG_PWA_DESIGN_REDESIGN) || defined(CONFIG_PWA_DESIGN_CLAW)
+    // ── Icons and the calibration viewer ─────────────────────
     ASSET_ENTRY("/md.svg",           md_svg),
     ASSET_ENTRY("/md.svg.gz",        md_svg_gz),
     ASSET_ENTRY("/eye-open.svg",     eye_open_svg),
     ASSET_ENTRY("/eye-open.svg.gz",  eye_open_svg_gz),
     ASSET_ENTRY("/eye-close.svg",    eye_close_svg),
     ASSET_ENTRY("/eye-close.svg.gz", eye_close_svg_gz),
-#ifdef CONFIG_PWA_DESIGN_CLAW
     ASSET_ENTRY("/m-pupper3d.js.gz",     m_pupper3d_js_gz),
     ASSET_ENTRY("/pupper_model.json.gz", pupper_model_json_gz),
-#endif
-#else
-    ASSET_ENTRY("/icon.svg",         icon_svg),
-    ASSET_ENTRY("/icon.svg.gz",      icon_svg_gz),
-#endif
 };
 
 static constexpr int NUM_ASSETS = sizeof(ASSETS) / sizeof(ASSETS[0]);

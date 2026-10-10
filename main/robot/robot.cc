@@ -1,5 +1,6 @@
 #include "robot/robot.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -232,7 +233,7 @@ constexpr int32_t kCalSeed = 1;
  * pose instead of writing, so nothing fights over the SPI transactions. Two
  * owners exist and must not steal from each other: the Servo Studio console
  * (a human) and a WASM skill doing low-level control. */
-enum : int { BUS_FREE = 0, BUS_STUDIO = 1, BUS_SKILL = 2 };
+enum : int { BUS_FREE = 0, BUS_STUDIO = 1, BUS_SKILL = 2, BUS_HOST = 3 };   // HOST: robot::host
 volatile int s_bus_owner = BUS_FREE;
 
 // ── Sync‑write ID list for all 12 servos ─────────────────────
@@ -1660,9 +1661,22 @@ static void crouch_targets(uint16_t out[12])
     std::memcpy(s_goal_pos, saved, sizeof(saved));
 }
 
+// How many flush() calls are past their start, a count because flush() also
+// runs outside the gait task (the C API, WASM host functions). A flush can
+// take tens of ms (the wake glide reads the legs in several passes), so
+// robot::host::begin() waits for this to reach 0 instead of guessing a delay.
+// Raised BEFORE the ownership test: an owner that takes the bus after the
+// test still sees it.
+static std::atomic<int> s_flush_busy{0};
+struct FlushBusy {
+    FlushBusy()  { s_flush_busy.fetch_add(1); }
+    ~FlushBusy() { s_flush_busy.fetch_sub(1); }
+};
+
 void flush()
 {
     if (s_master && !in_gait_task()) { master_blocks("flush"); return; }
+    FlushBusy flush_busy_guard;
     // Studio or a skill owns the bus - hold the last pose rather than fight it.
     if (s_bus_owner != BUS_FREE) return;
     // Ensure at least 5 ms between bus accesses
@@ -1993,6 +2007,116 @@ void set_foot_targets(const float xyz_m[4][3])
 }
 
 }  // namespace master
+
+// ── Raw host: the Pi's RL policy (see robot.h) ──────────────
+
+volatile bool s_host = false;
+
+// The servo gains as they were when the host took the robot. A policy writes
+// its own into the boards' RAM (mp3link `config`: control mode 1, kp 80, ...);
+// the walk was tuned on these, so end() puts them back - the gains_push() /
+// gains_pop() pair the stunts use, around a whole host session.
+float s_host_gains[13][TUNE_NP];
+bool  s_host_gains_saved = false;
+
+namespace host {
+
+bool begin()
+{
+    if (s_host) return true;
+    if (s_master) {
+        ESP_LOGW(TAG, "RL host refused - the ROS bridge is in control");
+        return false;
+    }
+    // Fence first, exactly as master::begin(): from here nothing local moves.
+    s_master = true;
+    s_host   = true;
+
+    if (s_bus_owner == BUS_STUDIO || s_bus_owner == BUS_SKILL) {
+        ESP_LOGW(TAG, "RL host taking the servo bus from %s",
+                 s_bus_owner == BUS_STUDIO ? "Servo Studio" : "a skill");
+    }
+    if (::skill_is_running()) {
+        ESP_LOGW(TAG, "RL host taking control - stopping the running skill");
+        ::skill_request_stop();
+    }
+    for (int i = 1; i <= 12; ++i) s_overlay[i] = 0.0f;
+    s_js_active = false;
+    s_js_f = 0.0f;
+    s_js_s = 0.0f;
+    s_js_t = 0.0f;
+    s_js_last_ms = 0;
+    s_pi_vx = 0.0f;
+    s_pi_vy = 0.0f;
+    s_pi_wz = 0.0f;
+    s_pi_vel_ms = 0;
+    s_gait_cmd = GaitCmd::None;
+
+    // flush() writes nothing from here on; the boards hold the last frame
+    // until the host's tick replaces it. A flush already past its ownership
+    // test finishes first (the wake glide can take ~30 ms), so its frames
+    // cannot land between the host's.
+    s_bus_owner = BUS_HOST;
+    for (int i = 0; i < 100 && s_flush_busy.load() > 0; ++i) vTaskDelay(1);
+    if (s_flush_busy.load() > 0) ESP_LOGW(TAG, "RL host: the gait's flush did not finish in time");
+
+    // ~0.2 s of config reads (96 parameters, paced per board). A value that
+    // does not read back stays NAN and is left alone on the way out.
+    tune_read_all(s_host_gains);
+    s_host_gains_saved = true;
+    ESP_LOGW(TAG, "RL host in control - gait parked, the Pi drives the joints");
+    if (s_master_observer) s_master_observer(true);
+    return true;
+}
+
+void end()
+{
+    if (!s_host) return;
+    if (s_host_gains_saved) {          // the walk's gains back before it moves
+        tune_write_all(s_host_gains);
+        s_host_gains_saved = false;
+        ESP_LOGI(TAG, "RL host: servo gains restored");
+    }
+    // Wake as from rest: flush() reads where the legs are (they may be limp
+    // after a disarm) and glides them into the stand over WAKE_MS.
+    s_gait_cmd  = GaitCmd::None;
+    s_ps        = PS_OFF;
+    s_wake_now  = true;
+    s_bus_owner = BUS_FREE;
+    s_host      = false;
+    s_master    = false;
+    wake_gait();
+    ESP_LOGW(TAG, "RL host released - gliding back into the stand");
+    if (s_master_observer) s_master_observer(false);
+}
+
+bool active()
+{
+    return s_host;
+}
+
+bool store_offset(int servo_id, float deg)
+{
+    if (servo_id < 1 || servo_id > 12) return false;
+    s_offset[servo_id] = deg;
+    char key[16];
+    std::snprintf(key, sizeof(key), "offset%d", servo_id);
+    bool ok = s_nvs != 0 &&
+              nvs_set_blob(s_nvs, key, &deg, sizeof(deg)) == ESP_OK &&
+              nvs_commit(s_nvs) == ESP_OK;
+
+    // minipupperesp's and mp4-link's copy: the same key, a 4-byte float blob.
+    nvs_handle_t h = 0;
+    if (nvs_open("parameter", NVS_READWRITE, &h) == ESP_OK) {
+        ok = ok && nvs_set_blob(h, key, &deg, sizeof(deg)) == ESP_OK && nvs_commit(h) == ESP_OK;
+        nvs_close(h);
+    } else {
+        ok = false;
+    }
+    return ok;
+}
+
+}  // namespace host
 
 // ═══════════════════════════════════════════════════════════════
 //  Gait task (runs on core 1)
