@@ -16,9 +16,11 @@
 #include <sys/stat.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 extern "C" {
 #include "lua.h"
@@ -93,6 +95,7 @@ static void *l_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
 /* ── Global Lua state ─────────────────────────────────────────────────── */
 
 static lua_State *g_L = NULL;
+static SemaphoreHandle_t s_run_lock;   /* one script at a time; see run_chunk() */
 
 /* ── Print capture ────────────────────────────────────────────────────── */
 
@@ -168,6 +171,14 @@ esp_err_t lua_init(void)
         return ESP_OK;
     }
 
+    if (s_run_lock == NULL) {
+        s_run_lock = xSemaphoreCreateMutex();
+        if (s_run_lock == NULL) {
+            ESP_LOGE(TAG, "Failed to create the Lua run lock");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     /* Create Lua state with PSRAM-aware allocator */
     g_L = lua_newstate(l_alloc, NULL, luaL_makeseed(NULL));
     if (g_L == NULL) {
@@ -216,87 +227,135 @@ lua_State *lua_get_state(void)
     return g_L;
 }
 
-/* ── Execution with timeout ───────────────────────────────────────────── */
+/* ── Execution: one script at a time, with a deadline ─────────────────────
+ *
+ * The state is shared by the HTTP server (/v1/lua/run) and the chat worker,
+ * each on its own task; s_run_lock makes them take turns. Before it they
+ * simply raced on it.
+ *
+ * The timeout every caller passes was documented but not enforced, so a
+ * `while true do end` held its task (the HTTP server, for /v1/lua/run)
+ * forever. A count hook now checks the clock every kHookEvery instructions
+ * and raises an error past the deadline; bindings that sleep in C call
+ * lua_vm_check_deadline() themselves. Once past it the error comes back on
+ * every check, so a script cannot pcall its way out. */
 
-/*
- * We implement timeout by checking elapsed time between Lua C API calls.
- * For simple synchronous scripts this is sufficient.
- * For long-running Lua loops, we'd need hook-based interruption
- * (via lua_sethook), but that's a future enhancement.
- */
-static esp_err_t run_with_timeout(lua_State *L, uint32_t timeout_ms)
+static constexpr int      kHookEvery = 1000;   /* VM instructions between clock checks */
+static constexpr uint32_t kBusyWaitMs = 10000;
+
+static int64_t           s_deadline_us;        /* 0 = no limit */
+static bool              s_timed_out;
+
+void lua_vm_check_deadline(lua_State *L)
 {
-    int ret = lua_pcall(L, 0, LUA_MULTRET, 0);
-    if (ret != LUA_OK) {
-        const char *err = lua_tostring(L, -1);
-        ESP_LOGE(TAG, "Lua error: %s", err ? err : "(unknown)");
-        lua_pop(L, 1);
-        return ESP_FAIL;
+    if (s_deadline_us != 0 && esp_timer_get_time() > s_deadline_us) {
+        s_timed_out = true;
+        luaL_error(L, "script timed out");
     }
-    return ESP_OK;
+}
+
+void lua_vm_extend_deadline(uint32_t ms)
+{
+    if (s_deadline_us != 0) {
+        s_deadline_us += (int64_t)ms * 1000;
+    }
+}
+
+static void deadline_hook(lua_State *L, lua_Debug *ar)
+{
+    (void)ar;
+    lua_vm_check_deadline(L);
+}
+
+static void capture_append(capture_buf_t *cap, const char *text)
+{
+    if (!cap->buf || cap->size == 0 || !text) return;
+    size_t remaining = cap->size - cap->written - 1;
+    size_t len = strlen(text);
+    if (len > remaining) len = remaining;
+    memcpy(cap->buf + cap->written, text, len);
+    cap->written += len;
+    cap->buf[cap->written] = '\0';
+}
+
+typedef int (*chunk_loader_t)(lua_State *L, const char *arg);
+
+static int load_string(lua_State *L, const char *script) { return luaL_loadstring(L, script); }
+static int load_file(lua_State *L, const char *path)     { return luaL_loadfile(L, path); }
+
+/* Load with `loader`, run under the deadline, report into `output`. A load
+ * failure returns `load_err` (a missing file and a syntax error are
+ * different answers to the caller). */
+static esp_err_t run_chunk(chunk_loader_t loader, const char *arg, esp_err_t load_err,
+                           char *output, size_t output_size, uint32_t timeout_ms)
+{
+    if (output && output_size > 0) output[0] = '\0';
+    if (g_L == NULL || s_run_lock == NULL) {
+        ESP_LOGE(TAG, "Lua VM not initialised — call lua_init() first");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    capture_buf_t cap;
+    cap.buf     = (output && output_size > 0) ? output : NULL;
+    cap.size    = output_size;
+    cap.written = 0;
+
+    if (xSemaphoreTake(s_run_lock, pdMS_TO_TICKS(kBusyWaitMs)) != pdTRUE) {
+        capture_append(&cap, "Lua is busy running another script; try again shortly.");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    lua_pushstring(g_L, CAPTURE_BUF_REG_KEY);
+    lua_pushlightuserdata(g_L, &cap);
+    lua_rawset(g_L, LUA_REGISTRYINDEX);
+
+    esp_err_t result = ESP_OK;
+    if (loader(g_L, arg) != LUA_OK) {
+        const char *err = lua_tostring(g_L, -1);
+        ESP_LOGE(TAG, "Lua load error: %s", err ? err : "(unknown)");
+        capture_append(&cap, err ? err : "could not load the script");
+        lua_pop(g_L, 1);
+        result = load_err;
+    } else {
+        s_timed_out = false;
+        s_deadline_us = timeout_ms ? esp_timer_get_time() + (int64_t)timeout_ms * 1000 : 0;
+        lua_sethook(g_L, deadline_hook, LUA_MASKCOUNT, kHookEvery);
+
+        const int ret = lua_pcall(g_L, 0, 0, 0);
+
+        lua_sethook(g_L, NULL, 0, 0);
+        s_deadline_us = 0;
+        if (ret != LUA_OK) {
+            const char *err = lua_tostring(g_L, -1);
+            ESP_LOGE(TAG, "Lua error: %s", err ? err : "(unknown)");
+            if (cap.written > 0 && cap.buf[cap.written - 1] != '\n') {
+                capture_append(&cap, "\n");
+            }
+            capture_append(&cap, err ? err : "(unknown error)");
+            lua_pop(g_L, 1);
+            result = s_timed_out ? ESP_ERR_TIMEOUT : ESP_FAIL;
+        }
+    }
+
+    lua_pushstring(g_L, CAPTURE_BUF_REG_KEY);
+    lua_pushnil(g_L);
+    lua_rawset(g_L, LUA_REGISTRYINDEX);
+
+    xSemaphoreGive(s_run_lock);
+    return result;
 }
 
 esp_err_t lua_run_string(const char *script,
                          char *output, size_t output_size,
                          uint32_t timeout_ms)
 {
-    if (g_L == NULL) {
-        ESP_LOGE(TAG, "Lua VM not initialised — call lua_init() first");
-        if (output && output_size > 0) output[0] = '\0';
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    /* Set up capture buffer in registry */
-    capture_buf_t cap;
-    cap.buf     = output ? output : NULL;
-    cap.size    = output_size;
-    cap.written = 0;
-
-    lua_pushstring(g_L, CAPTURE_BUF_REG_KEY);
-    lua_pushlightuserdata(g_L, &cap);
-    lua_rawset(g_L, LUA_REGISTRYINDEX);
-
-    if (output && output_size > 0) output[0] = '\0';
-
-    /* Compile script */
-    if (luaL_loadstring(g_L, script) != LUA_OK) {
-        const char *err = lua_tostring(g_L, -1);
-        ESP_LOGE(TAG, "Lua compile error: %s", err ? err : "(unknown)");
-        if (output && cap.written < output_size) {
-            size_t remaining = output_size - cap.written - 1;
-            size_t elen = err ? strlen(err) : 0;
-            if (elen > remaining) elen = remaining;
-            if (elen > 0) {
-                memcpy(output + cap.written, err, elen);
-                cap.written += elen;
-            }
-            output[cap.written] = '\0';
-        }
-        lua_pop(g_L, 1);
-        return ESP_FAIL;
-    }
-
-    /* Execute */
-    esp_err_t result = run_with_timeout(g_L, timeout_ms);
-
-    /* Clean up capture buffer reference */
-    lua_pushstring(g_L, CAPTURE_BUF_REG_KEY);
-    lua_pushnil(g_L);
-    lua_rawset(g_L, LUA_REGISTRYINDEX);
-
-    return result;
+    return run_chunk(load_string, script, ESP_FAIL, output, output_size, timeout_ms);
 }
 
 esp_err_t lua_run_file(const char *path,
                        char *output, size_t output_size,
                        uint32_t timeout_ms)
 {
-    if (g_L == NULL) {
-        ESP_LOGE(TAG, "Lua VM not initialised — call lua_init() first");
-        if (output && output_size > 0) output[0] = '\0';
-        return ESP_ERR_INVALID_STATE;
-    }
-
     /* Resolve path to VFS path:
      *   "walk.lua"      → "/fs/lua/walk.lua"
      *   "/lua/walk.lua" → "/fs/lua/walk.lua"
@@ -312,33 +371,5 @@ esp_err_t lua_run_file(const char *path,
         vfs_path[sizeof(vfs_path) - 1] = '\0';
     }
 
-    /* Set up capture buffer in registry */
-    capture_buf_t cap;
-    cap.buf     = output ? output : NULL;
-    cap.size    = output_size;
-    cap.written = 0;
-
-    lua_pushstring(g_L, CAPTURE_BUF_REG_KEY);
-    lua_pushlightuserdata(g_L, &cap);
-    lua_rawset(g_L, LUA_REGISTRYINDEX);
-
-    if (output && output_size > 0) output[0] = '\0';
-
-    /* Load script from file */
-    if (luaL_loadfile(g_L, vfs_path) != LUA_OK) {
-        const char *err = lua_tostring(g_L, -1);
-        ESP_LOGE(TAG, "Lua load error (%s): %s", vfs_path, err ? err : "(unknown)");
-        lua_pop(g_L, 1);
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    /* Execute */
-    esp_err_t result = run_with_timeout(g_L, timeout_ms);
-
-    /* Clean up capture buffer reference */
-    lua_pushstring(g_L, CAPTURE_BUF_REG_KEY);
-    lua_pushnil(g_L);
-    lua_rawset(g_L, LUA_REGISTRYINDEX);
-
-    return result;
+    return run_chunk(load_file, vfs_path, ESP_ERR_NOT_FOUND, output, output_size, timeout_ms);
 }

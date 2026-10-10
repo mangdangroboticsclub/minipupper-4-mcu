@@ -23,11 +23,18 @@ esp_err_t lua_init(void);
  * @brief Run a Lua script from a C string (synchronous).
  *        Blocks until the script completes or timeout expires.
  *
+ * There is one Lua state, shared by every caller (the HTTP server and the
+ * chat worker), so runs are serialised: a caller
+ * waits up to 10 s for the one before it, then gets ESP_ERR_INVALID_STATE.
+ * On an error the message is appended to the output after anything the
+ * script printed.
+ *
  * @param script      Lua source code (null-terminated)
  * @param output      Output buffer (stdout capture — written via print redirect)
  * @param output_size Size of output buffer
  * @param timeout_ms  Max execution time in ms (0 = no limit)
  * @return ESP_OK on success, ESP_ERR_TIMEOUT if timeout reached,
+ *         ESP_ERR_INVALID_STATE if the VM is down or busy,
  *         ESP_FAIL if Lua runtime error occurred
  */
 esp_err_t lua_run_string(const char *script,
@@ -41,13 +48,30 @@ esp_err_t lua_run_string(const char *script,
  * @param output      Output buffer (stdout capture)
  * @param output_size Size of output buffer
  * @param timeout_ms  Max execution time in ms (0 = no limit)
+ * Serialised and reported like lua_run_string().
+ *
  * @return ESP_OK on success, ESP_ERR_NOT_FOUND if file missing,
  *         ESP_ERR_TIMEOUT if timeout reached,
+ *         ESP_ERR_INVALID_STATE if the VM is down or busy,
  *         ESP_FAIL if Lua runtime error occurred
  */
 esp_err_t lua_run_file(const char *path,
                        char *output, size_t output_size,
                        uint32_t timeout_ms);
+
+/**
+ * @brief For bindings that block in C (robot.delay_ms): raise the timeout
+ *        error if the running script is past its deadline. The deadline is
+ *        otherwise only checked between Lua instructions, which a script
+ *        sleeping in C does not execute.
+ */
+void lua_vm_check_deadline(struct lua_State *L);
+
+/**
+ * @brief Push the running script's deadline back by @p ms -- for time spent
+ *        waiting on the user (fs.write's permission prompt), not running.
+ */
+void lua_vm_extend_deadline(uint32_t ms);
 
 /**
  * @brief Get the current Lua VM state (for advanced use).

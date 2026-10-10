@@ -21,6 +21,7 @@
 #include <dirent.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -30,6 +31,7 @@ extern "C" {
 }
 
 #include "fs/littlefs_manager.h"
+#include "lua/lua_vm.h"
 #include "robot/robot.h"
 #include "wasm/wasm_sandbox.h"
 #include "wasm/wasm_decrypt.h"
@@ -421,14 +423,17 @@ static int l_robot_delay_ms(lua_State *L)
     int ms = (int)luaL_checkinteger(L, 1);
     if (ms <= 0) return 0;
 
-    // Break delay into 50 ms chunks
+    // Break delay into 50 ms chunks, so a script sleeping past its
+    // deadline is stopped within one chunk rather than after the sleep.
     const TickType_t CHUNK_MS = 50;
     while (ms > 0) {
+        lua_vm_check_deadline(L);
         TickType_t delay = pdMS_TO_TICKS(
             (ms > (int)CHUNK_MS) ? CHUNK_MS : (TickType_t)ms);
         vTaskDelay(delay);
         ms -= (int)CHUNK_MS;
     }
+    lua_vm_check_deadline(L);
 
     return 0;
 }
@@ -710,6 +715,16 @@ void lua_register_wasm_bindings(lua_State *L)
  * PWA and wait for explicit user approval via semaphore.
  */
 
+/* The permission prompt: up to 60 s of the user deciding, which is not the
+ * script running, so it does not count against the script's deadline. */
+static bool ask_user(const char *type, const char *desc)
+{
+    const int64_t t0 = esp_timer_get_time();
+    const bool ok = network::request_permission(type, desc, 60000);
+    lua_vm_extend_deadline((uint32_t)((esp_timer_get_time() - t0) / 1000));
+    return ok;
+}
+
 /**
  * fs.read(path) → string content or nil
  */
@@ -752,7 +767,7 @@ static int l_fs_write(lua_State *L)
     std::snprintf(desc, sizeof(desc), "Write file '%s' (%zu bytes)", path, content_len);
 
     // Request user permission (blocks until approved/denied, 60s timeout)
-    if (!network::request_permission("file_write", desc, 60000)) {
+    if (!ask_user("file_write", desc)) {
         ESP_LOGW(TAG, "fs.write: user denied write to '%s'", path);
         lua_pushboolean(L, 0);
         return 1;
@@ -784,7 +799,7 @@ static int l_fs_delete(lua_State *L)
     std::snprintf(desc, sizeof(desc), "Delete file '%s'", path);
 
     // Request user permission (blocks until approved/denied, 60s timeout)
-    if (!network::request_permission("file_delete", desc, 60000)) {
+    if (!ask_user("file_delete", desc)) {
         ESP_LOGW(TAG, "fs.delete: user denied delete of '%s'", path);
         lua_pushboolean(L, 0);
         return 1;

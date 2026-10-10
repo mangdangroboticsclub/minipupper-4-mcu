@@ -1962,9 +1962,11 @@ static esp_err_t api_lua_run(httpd_req_t *req)
     }
     output[0] = '\0';
 
+    // Saved files are routines (walk, dance) and get the chat worker's
+    // minute; inline snippets keep 5 s. Both are now enforced.
     esp_err_t err;
     if (!path.empty()) {
-        err = lua_run_file(path.c_str(), output, 2048, 5000);
+        err = lua_run_file(path.c_str(), output, 2048, 60000);
     } else {
         err = lua_run_string(script.c_str(), output, 2048, 5000);
     }
