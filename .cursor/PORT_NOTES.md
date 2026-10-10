@@ -22,7 +22,7 @@ Phases:
 | 2 | Robot additions from mpv2: extra moves (trajopt tables, backflips, `alive`), gain presets, Pi/ROS link (`robot::master`), `/v1/pi/status` | this branch (builds; bench checks owed) |
 | 3 | LCD face + GIFs (`/v1/display*`), needs LVGL + ST7789 bring-up | this branch (builds; first light owed) |
 | 4 | Audio + voice (esp-sr wake word, MangDang voice gateway, music, voice tools), `/v1/ai` (mangdang/off), `/v1/voice` | this branch (builds, 0 warnings; bench checks owed) |
-| 5 | On-device agent (ESP-Claw or equivalent), `/v1/ai` "own" mode, chat answered locally | deferred by the owner; see "Open decisions" |
+| 5 | On-device agent (ESP-Claw, vendored), `/v1/ai` "own" mode, chat answered locally behind a per-conversation Pupper / Cloud toggle | this branch (builds, 0 warnings; bench checks owed) |
 
 ## Phase 1 changes
 
@@ -421,16 +421,24 @@ Without `CONFIG_APP_VOICE_ENABLE` the glue compiles to stubs
   Windows cp1252 console does not kill the build at "Move and Pack models".
   Re-applied on every configure; no-op on POSIX.
 
-### The PSRAM-stack rule (differs from mpv2-claw)
+### The PSRAM-stack rule (superseded in Phase 5)
 
-mpv2-claw runs with `CONFIG_SPIRAM_XIP_FROM_PSRAM`, which makes a flash
-write from a PSRAM-stacked task safe. mpx-dog does not, so here the rule
-is: **a task whose stack is in PSRAM must never touch flash** (NVS, LittleFS,
-OTA). The voice code already respects it -- mpv2 kept `wake_auto_task`
-(provisioning writes NVS) on an internal stack and made the talk, playback,
-feed, fetch and music tasks flash-free -- and the two new tasks follow it:
-`voice_tools` is internal because of `robot_set_config`, `voice_ev` is
-internal and tiny. Keep it that way when adding tools.
+Through Phase 4 mpx-dog ran without `CONFIG_SPIRAM_XIP_FROM_PSRAM`, so the
+rule here was: **a task whose stack is in PSRAM must never touch flash**
+(NVS, LittleFS, OTA) -- a flash read disables the cache, and with the cache
+off a PSRAM stack is unreachable (IDF asserts in
+`spi_flash_disable_interrupts_caches_and_other_cpu`). The voice code
+respects it (`wake_auto_task` internal because provisioning writes NVS;
+talk, playback, feed, fetch and music tasks flash-free; `voice_tools`
+internal because of `robot_set_config`; `voice_ev` internal and tiny).
+
+Phase 5 turns XIP on (ESP-Claw puts every agent task stack in PSRAM and
+those tasks read the filesystem constantly; there is no Kconfig to stop it),
+so the rule is no longer load-bearing. The existing placements were left as
+they are: they cost nothing and keep the voice stack identical to mpv2-claw's.
+The flip side, as in mpv2-claw: **do not switch XIP off** to save PSRAM --
+the firmware then dies in the first `stat()` from an agent task, which reads
+like a filesystem bug.
 
 ### Result
 
@@ -461,6 +469,216 @@ Bench checks owed for phase 4b:
 - Pi master on -> music and listening stop; off -> listening resumes.
 - `/v1/ai` off -> link disconnects, mic stays closed (no AFE feed task in
   `ps`-equivalent heap logs).
+
+## Phase 5 changes (the on-device agent)
+
+The owner's brief: the local agent working inside mpx-dog, with a toggle in
+the chat heading choosing which brain a *new* conversation uses -- the
+robot's own agent or the cloud OpenClaw -- and no switching mid-conversation.
+A real handoff between the two brains is the eventual goal and is not in
+this phase.
+
+### Shape of the integration
+
+mpv2-claw *is* an ESP-Claw application: ESP-Claw's `app_claw` owns boot,
+settings, Wi-Fi, the HTTP server and the console, and mpv2's robot hangs off
+its extension points. mpx-dog has its own shell for all of that, so the
+integration is inverted: **ESP-Claw is a library inside mpx-dog's app.**
+Only the agent itself is taken -- `app_claw` (agent start-up, capability
+registration, LLM config), `claw_core`, `claw_cap`, `cap_im_local` (the
+"web" chat channel), `claw_event_router`, and whatever those pull in
+(`claw_manager`, `claw_memory`, `claw_skill`, `cap_boards`, `cap_files`,
+`cap_scheduler`, `cap_session_mgr`, `cap_skill_mgr`, `cap_system`,
+`cap_http_request`, `cap_agent_mgr`, `cap_llm_config`, `skill_builder`,
+`lua_module_builder`). Not taken: ESP-Claw's settings/Wi-Fi/HTTP/captive
+portal components, its console, `system_ui`, `cap_lua` and the Lua modules
+(mpx-dog has its own Lua VM and WASM skills; the agent's Lua is a different
+runtime, and carrying both was judged not worth 1 MB of flash and the RAM).
+
+**Vendored, not a submodule.** `third-party/esp-claw/` is a copy of the
+`components/` tree of mpv2-claw's pinned ESP-Claw (plus `.agents/`,
+`AGENTS.md`, `CLAUDE.md`, `LICENSE`, `README.md`, `CHANGELOG.md`; 357
+files, 3.1 MB) with `docs/`, `tools/`, `application/`, `pages/`,
+`components/lua_modules/` and the CI files dropped. mpv2-claw tracks ESP-Claw
+directly too (not as a submodule), so there was no pin to point a submodule
+at; the copy keeps the two trees byte-identical where they overlap, and
+**the never-edit rule carries over**: nothing under `third-party/esp-claw/`
+is modified. Where ESP-Claw needed bending, it was done from outside:
+
+- `main/agent/claw_overrides.c`: the event router task's 8 KB stack (no
+  Kconfig for it, overflowed on mpv2-claw) is raised to
+  `CONFIG_APP_AGENT_EVENT_ROUTER_STACK` by `-Wl,--wrap=claw_event_router_init`.
+- `main/Kconfig.projbuild` defines five `ESP_BOARD_DEV_*_SUPPORT` symbols
+  (false, with prompts) that ESP-Claw's manifests reference and
+  `esp_board_manager` would normally generate. Without them the component
+  manager stops with "Missing required kconfig option after retry" --
+  promptless symbols do not work because kconfgen leaves them out of
+  `sdkconfig.json`, the only file the component manager reads.
+- `components/gen_bmgr_codes/gen_board_metadata.yaml`: a hand-written board
+  inventory (pins from `board_config.h`) because `cap_boards` is always
+  linked and runs `generate_board_skill.py` on that path at configure time.
+  No `CMakeLists.txt` beside it on purpose -- it must not become a component.
+- All of ESP-Claw's Lua driver/module symbols are set `=n` in
+  `sdkconfig.defaults`: they do not depend on `APP_CLAW_CAP_LUA`, and
+  `app_lua_modules.c` includes each enabled one's header while the components
+  are not in the tree.
+
+**Dependencies are unconditional `path:` entries** in `main/idf_component.yml`
+(`app_claw`, `http_reuse`, `claw_core`, `claw_cap`, `cap_im_local`,
+`claw_event_router`). `CONFIG_APP_AGENT_ENABLE=n` still compiles them (dead
+code the linker drops) but does not start the agent -- gating the manifest
+on a Kconfig symbol would re-create the two-pass configure problem mpv2-claw
+documents for esp-sr.
+
+### sdkconfig and partitions
+
+- `CONFIG_SPIRAM_XIP_FROM_PSRAM=y` (see the PSRAM-stack rule above),
+  `ALLOW_BSS/NOINIT_SEG_EXTERNAL_MEMORY`, main task stack 6 KB,
+  `VFS_MAX_COUNT=12`, `LWIP_MAX_SOCKETS=20`, `HTTP_REUSE_ENABLE=n`
+  (esp-claw#101), memory mode FULL, stage verbosity VERBOSE (the "Round N"
+  notes are the PWA's activity lines), subagents capped at 2, CLI and the
+  unused capability groups off. Each has a comment in `sdkconfig.defaults`.
+- `sdkconfig` had to be regenerated (ESP-Claw's Kconfig, the new partition
+  table, XIP). It turned out to hold settings never recorded in
+  `sdkconfig.defaults` -- AP SSID, cloud ingress IP, `HTTPD_WS_SUPPORT`,
+  240 MHz, the Phase-4 Wi-Fi buffer trims -- which would have silently
+  reverted. They are now in `sdkconfig.defaults` with a note; the diff of the
+  regenerated file against the old one is exactly the intended changes.
+- `partitions.csv`: `factory` 7 MB (app is 5.05 MB, 31 % free), `model`
+  1 MB at 0x710000, new `system` LittleFS 1 MB at 0x810000 (read-only agent
+  image: skills + `.recovery` seeds), `storage` LittleFS 6.9 MB at 0x910000.
+  **storage moved again**, so flashing this build wipes installed skills,
+  uploaded GIFs and the deployed PWA copy (re-seeded from the embedded
+  assets at boot). `idf.py flash` writes all five images; `app-flash` alone
+  leaves the agent without its skills.
+
+### Agent filesystem: `main/agent/agent_fs.{h,cc}` + `agent_fs/system/`
+
+ESP-Claw wants two roots: SYSTEM (read-only: skills, recovery seeds) and
+DATA (sessions, memory, user skills, router rules, scheduler). Here SYSTEM is
+the `system` partition mounted at `/system`, built by CMake from
+`agent_fs/system/` (`.recovery/` seeds: `identity.md`/`soul.md` rewritten for
+Pupper the robot dog, `user.md` and `schedules.json` verbatim,
+`router_rules.json` without mpv2's light-switch rule) plus every build
+component's `skills/<id>/SKILL.md` collected by `skill_builder` -- the four
+robot skills live in `main/skills/` (`mpx_robot`, `mpx_skills`,
+`mpx_display`, `mpx_music`, frontmatter `cap_groups` naming the capability
+groups). DATA is `CONFIG_APP_AGENT_DATA_DIR` (`/fs/agent`) on the storage
+LittleFS -- a subdirectory rather than `/fs` itself so the agent's `skills/`
+never collides with the WASM skills in `/fs/skills`. `agent_fs::init()`
+mounts, makes the DATA tree, copies missing `.recovery` files in
+(mpv2-claw's seeding behaviour), and calls `claw_paths_set()`.
+
+### Who the brain talks to: `agent_config`, `voice_glue`, `/v1/ai`
+
+`main/agent/agent_config.{h,cc}` now owns the AI mode (`mangdang` | `own` |
+`off`, NVS `voice/ai_mode` -- the key voice_glue used, so a robot set to
+"off" stays off) and the owner's LLM account for `own` (NVS namespace
+`agent_llm`: backend, URL, model, auth type, max-tokens field, key; the key
+is never echoed, only `key_set`/`key_hint`). `voice_glue` lost its own
+`Mode`/NVS code and reads `agent_config::mode()` through `voice_wanted()`;
+`set_mode()` became `apply_mode()`. The model per mode (`agent_runtime.cc`
+`fill_config`), as mpv2-claw: `mangdang` -> the gateway's OpenAI-compatible
+`/v1/llm` (`CONFIG_APP_AGENT_GATEWAY_LLM_URL`) with the robot token
+`"<uuid>.<HMAC-SHA256(aes_key, "mpx-ai-v1:"+uuid)[:32]>"`, never persisted;
+`own` -> the stored account; `off` -> no model, `submit()` refuses. A change
+through `POST /v1/ai` is saved, then applied live: `voice_glue::apply_mode()`
+first (it may close the mic), then `agent::apply_config()` ->
+`app_claw_update_config()`. No restart, unlike mpv2-claw. ESP-Claw's own
+`/llm` chat command edits are persisted back as `own` by the save callback,
+unless they point at the gateway URL.
+
+**"own" is narrower than mpv2-claw's for now:** the key serves the chat
+page's Pupper brain; a voice turn is still answered by the MangDang voice
+gateway (its server runs the model). The voice -> local-agent handoff is the
+"final solution" the owner described and is left for the next step; the
+AISettings card says so when the robot reports an `agent` object.
+
+### Tools: `robot_tools` shared by voice MCP and the agent
+
+The tool bodies that were in `voice_tools.cc` (robot_move/pose/get_state/
+set_config, display_*, mpx_list/run/stop_skill, music_play/stop) moved to
+`main/agent/robot_tools.{h,cc}` as a plain table (`name, group, description,
+brief, schema, run`). `voice_tools.cc` keeps only the JSON-RPC/MCP transport
+and paging and calls into the table; `main/agent/agent_caps.cc` turns the
+same table into `claw_cap_descriptor_t` arrays per group and registers four
+external groups with the ids mpv2-claw uses (`cap_robot`, `cap_display`,
+`cap_mpx_skill`, `cap_music`) so the SKILL.md `cap_groups` match. One tool
+definition, two front ends. Descriptions longer than ESP-Claw's 256-byte
+limit have a `brief` for the agent side (the full text stays in the skill
+docs). `mpx_display_draw` (free-form Lua drawing on the face) was not ported:
+it needs `cap_lua`.
+
+### The chat bridge and the brain toggle
+
+Firmware (`chat_ws.cc`): a frame carrying `"brain":"local"` is for the
+on-device agent; anything else (including an older PWA that sends no brain)
+is the cloud path, unchanged. Local `user_chat_input` -> `agent::submit(
+session_id, text)` -> `cap_im_local_emit_user_message("web", ...)`, answered
+with `ack{sent}` or an `error` frame saying why not (no agent in the build,
+agent not running, AI off). The agent's outbound (bound in
+`init_chat_pipeline`, before `agent::start()`) produces the PWA's existing
+frames: progress notes (ESP-Claw's lobster-prefixed working reply, stripped)
+become `step{seq,total}` with the running count as both -- the agent decides
+how many rounds as it goes -- and the answer a `chat_reply`, after which the
+per-client step counter resets. The session id is the PWA's conversation id,
+so ESP-Claw's session history is per conversation and the robot keeps no
+brain state at all. `session_reset` for a local conversation is acked
+without the cloud round-trip. `POST /v1/chat/send` (the pre-PWA REST path)
+stays cloud-only.
+
+While there, the reply sender was unified: `send_reply_to_pwa()` splits long
+answers on UTF-8 boundaries *before* JSON-escaping (two passes, so `total` is
+right on the first chunk), and the cloud path uses it too -- the old
+splitter cut the escaped string at fixed byte offsets and could end a chunk
+inside `\uXXXX` or a multi-byte character.
+
+PWA: conversations carry `brain` (`conversationStore.js`; records from
+before default to `cloud`), and the last choice is remembered in
+`mpx_chat_brain` for the next new conversation. `ChatView.svelte` puts a
+segmented **Pupper / Cloud** control at the right end of the chat action bar;
+it is live only while the conversation is empty and locks (with a padlock)
+once a message exists -- the robot keeps the two histories apart by
+conversation id, so a conversation changing sides would lose its own past.
+Changing the toggle on an empty conversation re-sends `session_reset` with
+the brain, so the first message lands on the chosen side. `/v1/ai` is probed
+on connect: `agent.available:false`, `agent.running:false` or mode `off`
+grey out Pupper with the reason as the tooltip (and fall back to Cloud for a
+new conversation); a robot without `/v1/ai` leaves both offered and the
+robot answers with an error frame if it cannot take it. The sidebar shows a
+Pupper/Cloud badge per conversation. Service-worker cache `v12-claw`,
+`pwa_build: brains-v15`.
+
+### Deferred
+
+- Voice -> local agent handoff (and the broader cloud <-> local handoff).
+- `mpx_display_draw` (needs `cap_lua`).
+- The ESP-Claw skills that mention Lua scripts (`skills_lab_downloader`,
+  `skill_creator`) are in the system image because `cap_skill_mgr` ships
+  them; without `cap_lua` their scripts cannot run. Harmless, but the agent
+  may offer them. Filtering them out of the image is a small CMake step.
+- Moving the PWA's `.gz` assets from the app image into the `system`
+  partition would give the app slot ~0.7 MB back.
+
+### Result
+
+Firmware builds with zero warnings; app image 5.05 MB, 31 % of the 7 MB slot
+free; `check_comments.py` clean. System image builds with the four robot
+skills, ESP-Claw's built-in ones and the recovery seeds. Bench checks owed:
+
+- Boot: `agent` heap line after `agent::start()`; the agent's first
+  `/v1/ai` GET answers `agent.running:true`.
+- New conversation on Pupper: "sit down" -> a step line, the robot sits, a
+  reply; the sidebar shows the Pupper badge; reopening the conversation
+  shows the toggle locked.
+- Same question on Cloud still works; an old-PWA phone (no brain field)
+  still reaches the cloud.
+- `POST /v1/ai {"mode":"own", ...}` with a real key: a Pupper conversation
+  answers from that model; voice still answers via MangDang.
+- `POST /v1/ai {"mode":"off"}`: Pupper greys out in the chat, a queued local
+  message gets the "AI is off" error frame.
+- Internal RAM after the agent + AFE both up; if Wi-Fi starves again, the
+  agent's `claw_core` task stacks are the first candidates to trim.
 
 ## Design decisions
 
@@ -494,22 +712,20 @@ Bench checks owed for phase 4b:
 
 ## Open decisions (need the owner)
 
-1. **On-device agent.** mpv2-claw's chat brain is ESP-Claw, a framework that
-   owns boot, Lua, HTTP routes and memory. Options: (a) integrate ESP-Claw
-   into mpx-dog as a component (large; effectively becomes mpv2-claw with
-   mpx-dog's robot code), (b) keep mpx-dog's cloud chat and add only the
-   agent-facing endpoints (`/v1/ai` as a mode switch for the cloud), (c) stop
-   at phase 4. The owner chose to do phases 2-4 first and decide this later.
-   What phase 4 already provides for it: `/v1/ai` with a `modes` list the
-   app honours (adding `own` is a one-line change on each side), and a tool
-   table (`voice_tools.cc`) whose names and schemas match mpv2-claw's
-   capability descriptors, so an on-device agent could reuse it.
+1. **(Decided in Phase 5) On-device agent.** The owner chose option (a):
+   ESP-Claw integrated into mpx-dog -- but as a library inside mpx-dog's
+   shell rather than mpx-dog's code inside ESP-Claw's shell. See "Phase 5
+   changes". Still open within it: the handoff between the two brains (one
+   conversation moving between Pupper and the cloud, and voice turns
+   answered locally), which the per-conversation toggle stands in for.
 2. **Voice gateway credentials.** `CONFIG_APP_VOICE_OTA_URL` defaults to the
    same `http://35.220.215.160:8000/xiaozhi/ota/` as mpv2-claw; the
    provisioning body identifies the robot as `mpx-dog` / `mp4_esp32_core`.
-   If the gateway keys on app or board name this needs confirming. The robot
-   AES key / `MP4_SKILL_AES_KEY_HEX` path (gateway `/v1/llm` with a robot
-   token) is Phase 5 material and was not ported.
+   If the gateway keys on app or board name this needs confirming. The
+   agent's robot token (`CONFIG_APP_ROBOT_UUID` + HMAC of
+   `CONFIG_APP_CHAT_AES_KEY_HEX`, Phase 5) uses mpx-dog's existing chat key,
+   which is still the insecure default `...0001`; the gateway's `/v1/llm`
+   has to know this robot's uuid/key pair for `mangdang` mode to answer.
 
 ## Build and verification
 
@@ -522,9 +738,19 @@ python ..\mpv2-claw\tools\check_comments.py      # no slash-asterisk inside comm
 After editing `main/idf_component.yml` or `main/Kconfig.projbuild`, run
 `idf.py reconfigure` first (phase 4 added five managed components; the
 component manager fetched them on reconfigure, not on build). Flashing
-needs the `model` partition too -- `idf.py flash` writes it
-(`0x600000 build\srmodels\srmodels.bin`); a plain `app-flash` leaves a
-robot with no wake-word model, and `mpx_voice_wake_init` fails at boot.
+needs the data partitions too -- `idf.py flash` writes them
+(`0x710000 build\srmodels\srmodels.bin`, `0x810000 build\system.bin`); a
+plain `app-flash` leaves a robot with no wake-word model and an agent with
+no skills.
+
+Phase 5 build notes: `sdkconfig` is tracked; when `sdkconfig.defaults` gains
+a value, delete `sdkconfig` and reconfigure (defaults only apply to a fresh
+file), then diff the result against the old one before committing -- that
+is how the unrecorded settings above were caught. `cap_boards` needs PyYAML
+in the IDF Python (present in this venv); the first `system` image build has
+`joltwallet/littlefs` create a Python venv and pip-install littlefs-python,
+so it needs internet once. The system image is staged in `build/system_fs/`;
+look there to see which skills the agent will find.
 
 Phase 1 state: PWA builds (Vite, no warnings beyond Svelte's usual
 `state_referenced_locally` notes inherited from mpv2-claw); firmware builds

@@ -519,6 +519,16 @@ Cloud -> robot (decrypted JSON):
 matching `permission_response` or the timeout. Only one request can be pending.
 Lua `fs.write` and `fs.delete` use it with a 60 s timeout.
 
+**The local brain (branch `local-claw`, Phase 5).** A PWA frame carrying
+`"brain":"local"` bypasses the cloud: `user_chat_input` goes to the on-device
+ESP-Claw agent (`main/agent/agent_runtime.cc`, `agent::submit`) with the
+conversation id as the agent's session; the agent's progress notes come back
+as `step` frames and its answer as `chat_reply`/`chat_reply_chunk` through
+the same broadcast. Frames without a brain are the cloud path above, so an
+older PWA is unaffected. Replies from either brain are chunked on UTF-8
+boundaries by `send_reply_to_pwa()`. Details and the reasoning in
+`PORT_NOTES.md`, "Phase 5 changes".
+
 ---
 
 ## 8. Marketplace proxy (`marketplace_proxy.cc` + `api_marketplace_proxy`)
