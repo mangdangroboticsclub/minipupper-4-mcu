@@ -49,7 +49,24 @@ set(sources
     "util/trace_ring.cc"
     "lua/lua_vm.cc"
     "lua/lua_bindings.cc"
+    # The on-device agent (Phase 5). The owner's AI mode and the robot's
+    # tool table exist in every build (the voice server's MCP and /v1/ai use
+    # them); agent_runtime.cc compiles to stubs when the agent is off.
+    "agent/agent_config.cc"
+    "agent/robot_tools.cc"
+    "agent/agent_runtime.cc"
 )
+
+# ESP-Claw itself: the filesystem roots, the tools as capabilities, and the
+# link-time override of its event router stack. These include ESP-Claw
+# headers and read CONFIG_APP_AGENT_* symbols that only exist when it is on.
+if(CONFIG_APP_AGENT_ENABLE)
+    list(APPEND sources
+        "agent/agent_fs.cc"
+        "agent/agent_caps.cc"
+        "agent/claw_overrides.c"
+    )
+endif()
 
 # The voice stack itself (mpv2-claw's mpx_voice_link, mpx_voice_wake and
 # cap_music, plus the native MCP bridge) only when it is on: these files
@@ -129,7 +146,7 @@ endif()
 # ── Register component ───────────────────────────────────────
 idf_component_register(
     SRCS        ${sources}
-    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "pi" "audio" "display" "voice"
+    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "pi" "audio" "display" "voice" "agent"
     EMBED_FILES
         ${common_assets}
         ${design_assets}
@@ -176,9 +193,29 @@ idf_component_register(
         esp_event
         mbedtls
         json
+        # The on-device agent: ESP-Claw (third-party/esp-claw, pulled in by
+        # main/idf_component.yml). app_claw is the shell, claw_core has
+        # claw_paths, claw_cap the capability types, cap_im_local the "web"
+        # chat channel; claw_event_router for the stack override's header.
+        app_claw
+        claw_core
+        claw_cap
+        cap_im_local
+        claw_event_router
 )
 
 # Lua requires 32-bit mode on Xtensa/RISC-V architectures.
 # This must match the Lua component's own definition so that
 # including lua.h from our code sees LUA_32BITS=1.
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LUA_32BITS=1)
+
+# ESP-Claw starts its event router with an 8 KB stack and has no option for
+# it. Rather than edit the vendored tree, the linker hands every call to
+# claw_event_router_init() to __wrap_claw_event_router_init() in
+# agent/claw_overrides.c, which raises the stack and calls on. The -u keeps
+# the wrapper out of the linker's garbage collection (nothing references it
+# by name). mpv2-claw's main/CMakeLists.txt does the same.
+if(CONFIG_APP_AGENT_ENABLE)
+    target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=claw_event_router_init")
+    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u __wrap_claw_event_router_init")
+endif()
