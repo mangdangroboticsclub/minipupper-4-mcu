@@ -1382,6 +1382,11 @@ static void upstream_task(void *arg)
 
 bool init_chat_pipeline()
 {
+    // Bind the local agent before allocating any optional chat-pipeline
+    // resources. If a later allocation fails, the agent must not silently
+    // fall back to logging replies instead of delivering them to the PWA.
+    agent::set_outbound(on_agent_outbound);
+
     // ── Create socket mutex ────────────────────────────────────
     s_sock_mutex = xSemaphoreCreateMutex();
     if (!s_sock_mutex) {
@@ -1417,11 +1422,6 @@ bool init_chat_pipeline()
         ESP_LOGE(TAG, "Failed to create reply queue");
         return false;
     }
-
-    // ── The local brain's replies come back through here ──────
-    // Bound now, before agent::start() runs (main.cc), so nothing the
-    // agent says at startup is lost; with the agent off this is a no-op.
-    agent::set_outbound(on_agent_outbound);
 
     // ── Load AES key ───────────────────────────────────────────
     if (!load_aes_key()) {
