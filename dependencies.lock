@@ -308,73 +308,73 @@ dependencies:
       - if: $CONFIG{ESP_BOARD_DEV_CAMERA_SUPPORT} == True
       - if: $CONFIG{APP_CLAW_LUA_MODULE_VISION} == True
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\common\app_claw
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\common\app_claw
       type: local
     version: '*'
   cap_agent_mgr:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_capabilities\cap_agent_mgr
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_capabilities\cap_agent_mgr
       type: local
     version: '*'
   cap_boards:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_capabilities\cap_boards
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_capabilities\cap_boards
       type: local
     version: '*'
   cap_files:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_capabilities\cap_files
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_capabilities\cap_files
       type: local
     version: '*'
   cap_http_request:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_capabilities\cap_http_request
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_capabilities\cap_http_request
       type: local
     version: '*'
   cap_im_local:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_capabilities\cap_im_local
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_capabilities\cap_im_local
       type: local
     version: '*'
   cap_llm_config:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_capabilities\cap_llm_config
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_capabilities\cap_llm_config
       type: local
     version: '*'
   cap_scheduler:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_capabilities\cap_scheduler
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_capabilities\cap_scheduler
       type: local
     version: '*'
   cap_session_mgr:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_capabilities\cap_session_mgr
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_capabilities\cap_session_mgr
       type: local
     version: '*'
   cap_skill_mgr:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_capabilities\cap_skill_mgr
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_capabilities\cap_skill_mgr
       type: local
     version: '*'
   cap_system:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_capabilities\cap_system
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_capabilities\cap_system
       type: local
     version: '*'
   claw_cap:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_modules\claw_cap
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_modules\claw_cap
       type: local
     version: '*'
   claw_core:
@@ -385,37 +385,37 @@ dependencies:
       public: true
       version: ^1.7
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_modules\claw_core
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_modules\claw_core
       type: local
     version: '*'
   claw_event_router:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_modules\claw_event_router
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_modules\claw_event_router
       type: local
     version: '*'
   claw_manager:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_modules\claw_manager
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_modules\claw_manager
       type: local
     version: '*'
   claw_memory:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_modules\claw_memory
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_modules\claw_memory
       type: local
     version: '*'
   claw_skill:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_modules\claw_skill
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_modules\claw_skill
       type: local
     version: '*'
   claw_utils:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\claw_modules\claw_utils
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\claw_modules\claw_utils
       type: local
     version: '*'
   espressif/cjson:
@@ -701,7 +701,7 @@ dependencies:
   http_reuse:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\common\http_reuse
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\common\http_reuse
       type: local
     version: '*'
   idf:
@@ -721,7 +721,7 @@ dependencies:
   lua_module_builder:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\common\lua_module_builder
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\common\lua_module_builder
       type: local
     version: '*'
   lvgl/lvgl:
@@ -734,7 +734,7 @@ dependencies:
   skill_builder:
     dependencies: []
     source:
-      path: C:\Users\MangDang\Haris\mpx-dog\third-party\esp-claw\components\common\skill_builder
+      path: C:\esp\projects\mpx\third-party\esp-claw\components\common\skill_builder
       type: local
     version: '*'
   tangyumei3535/bmm150_sensorapi:
@@ -773,6 +773,6 @@ direct_dependencies:
 - joltwallet/littlefs
 - lvgl/lvgl
 - tangyumei3535/bmm150_sensorapi
-manifest_hash: 751372bfa50ef2b5a5c0dbf16af817ba59cdef584b25f219724049eb2963477c
+manifest_hash: 1cd2ab9b7b7182a3ea4d04ba98a851203f12600757d8632f5d46b13d8d00a555
 target: esp32s3
 version: 2.0.0
