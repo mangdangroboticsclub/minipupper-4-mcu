@@ -54,7 +54,34 @@ namespace sdk {
  * The version moves because a v5 module will NOT run on v4 firmware — the
  * import is missing and instantiation fails — and saying so through the
  * version check is better than a trap on the first call. */
-constexpr int32_t MPX_ABI_VERSION = 5;
+/* v6 brings the ABI closer to parity with the other two ways to drive this
+ * robot: the Lua VM (lua/lua_bindings.cc, lua_display.cc) and the local
+ * agent's tool table (agent/robot_tools.cc). Until now a skill could move the
+ * robot but not draw on its screen, read or write a file or play music, while
+ * a Lua script and the agent could do all of it.
+ *
+ * What v6 adds, each mirroring the Lua module or agent tool named:
+ *
+ *   display_*          the screen: Lua's display.* canvas primitives plus the
+ *                      agent's higher-level show_text / show_emotion /
+ *                      set_colors / set_brightness
+ *   fs_*               Lua's fs.read/write/delete/exists/list/info; the two
+ *                      write paths keep the same user-permission prompt
+ *   music_play/stop    the agent's music tools
+ *   robot_get_config, robot_get_gait
+ *                      the composite state Lua's robot.get_config()/get_mode()
+ *                      and the agent's robot_get_state answer
+ *
+ * Deliberately NOT here: Lua's crypto.* and the agent's skill-management
+ * tools (mpx_list/run/stop_skill). A sandboxed skill does not get to decode
+ * blobs, nor to list, start or stop other skills — those stay the agent's
+ * (mpx_run_skill) — and a skill asks for a movement with robot_gait().
+ *
+ * Every symbol is additive: a v5 module keeps running unchanged. The version
+ * moves because a v6 module will NOT run on v5 firmware — the imports are
+ * missing and instantiation fails — which is exactly what the version check
+ * exists to say before the first host call traps. */
+constexpr int32_t MPX_ABI_VERSION = 6;
 
 /* Every host function returns one of these, or a value >= 0 where it is
  * documented to return data. Before v2 there were four incompatible
@@ -583,6 +610,176 @@ int32_t host_mpx_tick_stop(wasm_exec_env_t exec_env);
 int32_t host_mpx_trace(wasm_exec_env_t exec_env,
 					   int32_t name_ptr, float value);
 
+// ═══════════════════════════════════════════════════════════════
+//  ABI v6 — display, files, music, robot state
+//
+//  Every group here mirrors a surface that already existed for Lua
+//  (lua/lua_bindings.cc, lua/lua_display.cc) or for the local agent's tool
+//  table (agent/robot_tools.cc); each comment names its counterpart, so the
+//  two stay comparable. Nothing here re-implements a code path — the bodies
+//  call the same cap_display / fs / cap_music / robot entry points those
+//  callers do.
+// ═══════════════════════════════════════════════════════════════
+
+// ── display: the drawing canvas, Lua's display.* ─────────────
+//
+// Paint, then display_show(); the face returns when the hold runs out. This
+// is the same canvas the agent's display_draw tool and the Lua module use, so
+// a skill can leave something on the screen after it exits. Colours are
+// 0xRRGGBB (display_rgb() packs one) and coordinates are pixels from the top
+// left, clipped at the edges. A build with no panel answers every call with
+// MPX_ERR_STATE, exactly as Lua raises "this robot has no screen".
+
+/** extern int display_width(void); "()i". Canvas width, 0 with no screen. */
+int32_t host_display_width(wasm_exec_env_t exec_env);
+
+/** extern int display_height(void); "()i". Canvas height, 0 with no screen. */
+int32_t host_display_height(wasm_exec_env_t exec_env);
+
+/** extern int display_rgb(int r, int g, int b); "(iii)i". Packs 0xRRGGBB. */
+int32_t host_display_rgb(wasm_exec_env_t exec_env,
+						 int32_t r, int32_t g, int32_t b);
+
+/** extern int display_clear(int color); "(i)i". Fills the canvas. */
+int32_t host_display_clear(wasm_exec_env_t exec_env, int32_t color);
+
+/** extern int display_pixel(int x, int y, int color); "(iii)i". */
+int32_t host_display_pixel(wasm_exec_env_t exec_env,
+						   int32_t x, int32_t y, int32_t color);
+
+/** extern int display_rect(int x, int y, int w, int h, int color,
+ *                          int radius, int border); "(iiiiiii)i".
+ *  radius -1 = pill; border 1 draws the outline only. */
+int32_t host_display_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
+						  int32_t w, int32_t h, int32_t color,
+						  int32_t radius, int32_t border);
+
+/** extern int display_circle(int cx, int cy, int r, int color, int border);
+ *  "(iiiii)i". */
+int32_t host_display_circle(wasm_exec_env_t exec_env, int32_t cx, int32_t cy,
+							int32_t r, int32_t color, int32_t border);
+
+/** extern int display_line(int x1, int y1, int x2, int y2, int color,
+ *                          int width); "(iiiiii)i". */
+int32_t host_display_line(wasm_exec_env_t exec_env, int32_t x1, int32_t y1,
+						  int32_t x2, int32_t y2, int32_t color, int32_t width);
+
+/** extern int display_arc(int cx, int cy, int r, int start_deg, int end_deg,
+ *                         int color, int width); "(iiiiiii)i".
+ *  0 degrees is 3 o'clock, clockwise. */
+int32_t host_display_arc(wasm_exec_env_t exec_env, int32_t cx, int32_t cy,
+						 int32_t r, int32_t start_deg, int32_t end_deg,
+						 int32_t color, int32_t width);
+
+/** extern int display_text(int x, int y, const char *text, int color,
+ *                         int size, int align, int max_w); "(ii$iiii)i".
+ *  size is 14, 28 or 48 (0 = the default 14); align is -1 left, 0 centre,
+ *  1 right; max_w 0 = until the text ends. */
+int32_t host_display_text(wasm_exec_env_t exec_env, int32_t x, int32_t y,
+						  int32_t text_ptr, int32_t color, int32_t size,
+						  int32_t align, int32_t max_w);
+
+/** extern int display_blit(int x, int y, int w, int h, const void *data,
+ *                         int len); "(iiiiii)i".
+ *  data is w*h*2 bytes of RGB565, little-endian — as Lua's display.blit. */
+int32_t host_display_blit(wasm_exec_env_t exec_env, int32_t x, int32_t y,
+						  int32_t w, int32_t h, int32_t data_ptr, int32_t len);
+
+/** extern int display_show(int hold_ms); "(i)i". Puts the canvas on the
+ *  panel, as display.draw does; 0 = until something else takes the screen. */
+int32_t host_display_show(wasm_exec_env_t exec_env, int32_t hold_ms);
+
+/** extern int display_face(void); "()i". Back to the eyes now. */
+int32_t host_display_face(wasm_exec_env_t exec_env);
+
+/** extern int display_show_text(const char *text); "($)i".
+ *  The agent's display_show_text: one line of text, centred. */
+int32_t host_display_show_text(wasm_exec_env_t exec_env, int32_t text_ptr);
+
+/** extern int display_show_emotion(const char *name); "($)i".
+ *  The agent's display_show_emotion. MPX_ERR_ARG when there is no such face,
+ *  which is the agent tool's "no such emotion". */
+int32_t host_display_show_emotion(wasm_exec_env_t exec_env, int32_t name_ptr);
+
+/** extern int display_set_colors(int background_rgb, int eyes_rgb); "(ii)i".
+ *  The agent's display_set_colors; -1 leaves that colour alone. */
+int32_t host_display_set_colors(wasm_exec_env_t exec_env,
+								int32_t background_rgb, int32_t eyes_rgb);
+
+/** extern int display_set_brightness(int percent); "(i)i". 0..100, clamped.
+ *  The agent's display_set_brightness. */
+int32_t host_display_set_brightness(wasm_exec_env_t exec_env, int32_t percent);
+
+// ── fs: LittleFS, Lua's fs.* ─────────────────────────────────
+//
+// Paths are absolute inside the LittleFS mount ("/my.lua"): the same strings
+// Lua's fs module takes, with the "/fs" VFS prefix added for you.
+
+/** extern int fs_read(const char *path, void *buf, int cap); "($ii)i".
+ *  Copies the file into buf. Returns the WHOLE file size; the bytes written
+ *  are min(size, cap), so a return greater than cap means it was truncated
+ *  and the caller should retry with a bigger buffer. Empty file = 0.
+ *  MPX_ERR_ARG when there is no such file. */
+int32_t host_fs_read(wasm_exec_env_t exec_env, int32_t path_ptr,
+					 int32_t buf_ptr, int32_t cap);
+
+/** extern int fs_write(const char *path, const void *data, int len);
+ *  "($ii)i". Asks the user on the phone app first, exactly as Lua's fs.write
+ *  does, and blocks until they answer (up to 60 s — a wait that does not
+ *  count against the skill's watchdog). MPX_OK, or MPX_ERR_ARG if they
+ *  declined or the write failed. */
+int32_t host_fs_write(wasm_exec_env_t exec_env, int32_t path_ptr,
+					  int32_t data_ptr, int32_t len);
+
+/** extern int fs_delete(const char *path); "($)i". Asks the user first,
+ *  exactly as Lua's fs.delete does. */
+int32_t host_fs_delete(wasm_exec_env_t exec_env, int32_t path_ptr);
+
+/** extern int fs_exists(const char *path); "($)i". 1 or 0. */
+int32_t host_fs_exists(wasm_exec_env_t exec_env, int32_t path_ptr);
+
+/** extern int fs_list(const char *dir, void *buf, int cap); "($ii)i".
+ *  One entry per line, "name<TAB>size<TAB>d|f\n" (d = directory, f = file),
+ *  which is Lua's fs.list {name, size, is_dir} flattened for a C caller.
+ *  Returns the byte count, or MPX_ERR_ARG if it does not fit in cap bytes. */
+int32_t host_fs_list(wasm_exec_env_t exec_env, int32_t dir_ptr,
+					 int32_t buf_ptr, int32_t cap);
+
+/** extern int fs_info(int *out); "(i)i". Writes out[0] = total bytes and
+ *  out[1] = used bytes on the partition; the buffer must be an int[2].
+ *  Lua's fs.info() the same two numbers. */
+int32_t host_fs_info(wasm_exec_env_t exec_env, int32_t out_ptr);
+
+// ── music: the agent's music tools ───────────────────────────
+//
+// Registered in every build so the ABI does not change shape; in a build
+// without the voice stack they answer MPX_ERR_STATE, the same "this robot has
+// no speaker" the agent tool reports.
+
+/** extern int music_play(const char *what, char *title, int cap); "($ii)i".
+ *  A genre or mood ("chill", "jazz") picks an internet radio station; an
+ *  http(s) URL plays directly. A NUL/0 title_ptr skips the title. Returns
+ *  MPX_OK or MPX_ERR_STATE. */
+int32_t host_music_play(wasm_exec_env_t exec_env, int32_t what_ptr,
+						int32_t title_ptr, int32_t cap);
+
+/** extern int music_stop(void); "()i". Stops the speaker. */
+int32_t host_music_stop(wasm_exec_env_t exec_env);
+
+// ── robot state: the composite getters ───────────────────────
+
+/** extern int robot_get_config(int *out); "(i)i". Writes six ints — period,
+ *  height, up_height, stride, tilt, sg_speed — the fields Lua's
+ *  robot.get_config() returns as a table and robot_get_state reports. The
+ *  buffer must be an int[6]. */
+int32_t host_robot_get_config(wasm_exec_env_t exec_env, int32_t out_ptr);
+
+/** extern int robot_get_gait(char *buf, int cap); "(ii)i".
+ *  The current movement name ("none" when idle): the string Lua's
+ *  robot.get_mode() returns. MPX_ERR_ARG if it does not fit in cap bytes. */
+int32_t host_robot_get_gait(wasm_exec_env_t exec_env, int32_t buf_ptr,
+							int32_t cap);
+
 // NOTE: intentionally NOT const. WAMR's wasm_runtime_register_natives()
 // sorts this table in place with qsort() so it can binary-search symbol
 // names later. If the array is const it is placed in flash (.rodata) and
@@ -694,6 +891,39 @@ static NativeSymbol NATIVE_SYMBOLS[] = {
 	{ "mpx_tick_stop",        (void *)host_mpx_tick_stop,        "()i",     nullptr },
 	// Being able to see what a control loop is doing
 	{ "mpx_trace",            (void *)host_mpx_trace,            "($f)i",   nullptr },
+
+	// ── ABI v6 ──────────────────────────────────────────────────────────────
+	// Display: Lua's display.* canvas, then the agent's high-level tools
+	{ "display_width",        (void *)host_display_width,        "()i",     nullptr },
+	{ "display_height",       (void *)host_display_height,       "()i",     nullptr },
+	{ "display_rgb",          (void *)host_display_rgb,          "(iii)i",  nullptr },
+	{ "display_clear",        (void *)host_display_clear,        "(i)i",    nullptr },
+	{ "display_pixel",        (void *)host_display_pixel,        "(iii)i",  nullptr },
+	{ "display_rect",         (void *)host_display_rect,         "(iiiiiii)i", nullptr },
+	{ "display_circle",       (void *)host_display_circle,       "(iiiii)i",nullptr },
+	{ "display_line",         (void *)host_display_line,         "(iiiiii)i",nullptr },
+	{ "display_arc",          (void *)host_display_arc,          "(iiiiiii)i", nullptr },
+	{ "display_text",         (void *)host_display_text,         "(ii$iiii)i", nullptr },
+	{ "display_blit",         (void *)host_display_blit,         "(iiiiii)i", nullptr },
+	{ "display_show",         (void *)host_display_show,         "(i)i",    nullptr },
+	{ "display_face",         (void *)host_display_face,         "()i",     nullptr },
+	{ "display_show_text",    (void *)host_display_show_text,    "($)i",    nullptr },
+	{ "display_show_emotion", (void *)host_display_show_emotion, "($)i",    nullptr },
+	{ "display_set_colors",   (void *)host_display_set_colors,   "(ii)i",   nullptr },
+	{ "display_set_brightness",(void *)host_display_set_brightness,"(i)i",  nullptr },
+	// Filesystem: Lua's fs.*
+	{ "fs_read",              (void *)host_fs_read,              "($ii)i",  nullptr },
+	{ "fs_write",             (void *)host_fs_write,             "($ii)i",  nullptr },
+	{ "fs_delete",            (void *)host_fs_delete,            "($)i",    nullptr },
+	{ "fs_exists",            (void *)host_fs_exists,            "($)i",    nullptr },
+	{ "fs_list",              (void *)host_fs_list,              "($ii)i",  nullptr },
+	{ "fs_info",              (void *)host_fs_info,              "(i)i",    nullptr },
+	// Music: the agent's music tools
+	{ "music_play",           (void *)host_music_play,           "($ii)i",  nullptr },
+	{ "music_stop",           (void *)host_music_stop,           "()i",     nullptr },
+	// Robot state: the composite getters
+	{ "robot_get_config",     (void *)host_robot_get_config,     "(i)i",    nullptr },
+	{ "robot_get_gait",       (void *)host_robot_get_gait,       "(ii)i",   nullptr },
 };
 
 static constexpr uint32_t NUM_NATIVE_SYMBOLS =

@@ -3,20 +3,35 @@
 #include <cinttypes>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <string>
+#include <vector>
 
+#include <dirent.h>
+
+#include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 #include "wasm_export.h"
 
 extern "C" {
 #include "robot/driver_board.h"
 }
 
+#include "display/cap_display.h"
+#include "fs/littlefs_manager.h"
+#include "network/chat_ws.h"
 #include "robot/robot.h"
 #include "util/trace_ring.h"
 #include "wasm/wasm_sandbox.h"
+
+#if CONFIG_APP_VOICE_ENABLE
+#include "voice/cap_music.h"
+#endif
 
 static const char *TAG = "wasm_sdk";
 
@@ -1314,6 +1329,428 @@ int32_t host_mpx_trace(wasm_exec_env_t exec_env, int32_t name_ptr, float value)
 
 	util::trace_ring_put(name, value, wasm::skill_millis());
 	return MPX_OK;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ABI v6 — display, files, music, robot state
+//
+//  Declared in wasm_host_functions.h; each body calls the same cap_display /
+//  fs / cap_music / robot entry point the Lua VM (lua/lua_bindings.cc,
+//  lua/lua_display.cc) and the local agent's tool table (agent/robot_tools.cc)
+//  call, so the three surfaces cannot drift apart.
+// ═══════════════════════════════════════════════════════════════
+
+namespace {
+
+/* esp_err_t -> the one error convention. ESP_ERR_INVALID_STATE is "this robot
+ * has no screen / no speaker", which a skill sees as MPX_ERR_STATE -- the same
+ * condition Lua's display module raises "this robot has no screen" for. */
+int32_t from_esp_err(esp_err_t err)
+{
+	switch (err) {
+	case ESP_OK:              return MPX_OK;
+	case ESP_ERR_INVALID_ARG: return MPX_ERR_ARG;
+	case ESP_ERR_NOT_FOUND:   return MPX_ERR_ARG;
+	default:                  return MPX_ERR_STATE;
+	}
+}
+
+/* A '$' in the signature hands us a native pointer WAMR has already
+ * bounds-checked; the older host functions carry it as an int32_t. */
+const char *guest_str(int32_t ptr)
+{
+	if (ptr == 0) return nullptr;
+	return reinterpret_cast<const char *>(static_cast<uintptr_t>(ptr));
+}
+
+/* Copy a string into a guest buffer. Returns the length copied (a terminating
+ * NUL is written when there is room; it is not counted), or MPX_ERR_ARG when
+ * the buffer is too small. Every "return a string" host call uses this, so the
+ * capacity rule is stated once. */
+int32_t return_string(wasm_exec_env_t exec_env, int32_t buf_ptr, int32_t cap,
+					  const char *text)
+{
+	if (!text) return MPX_ERR_ARG;
+	const int32_t need = static_cast<int32_t>(std::strlen(text));
+	if (buf_ptr == 0 || cap < need) return MPX_ERR_ARG;
+	char *out = static_cast<char *>(
+		wasm_ptr(exec_env, buf_ptr, static_cast<uint32_t>(cap)));
+	if (!out) return MPX_ERR_ARG;
+	std::memcpy(out, text, static_cast<std::size_t>(need));
+	if (cap > need) out[need] = '\0';
+	return need;
+}
+
+}  // namespace
+
+// ── display ──────────────────────────────────────────────────
+
+int32_t host_display_width(wasm_exec_env_t exec_env)
+{
+	(void)exec_env;
+	return cap_display_draw_width();
+}
+
+int32_t host_display_height(wasm_exec_env_t exec_env)
+{
+	(void)exec_env;
+	return cap_display_draw_height();
+}
+
+int32_t host_display_rgb(wasm_exec_env_t exec_env,
+						 int32_t r, int32_t g, int32_t b)
+{
+	(void)exec_env;
+	return ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+}
+
+int32_t host_display_clear(wasm_exec_env_t exec_env, int32_t color)
+{
+	(void)exec_env;
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	return from_esp_err(cap_display_draw_fill(static_cast<uint32_t>(color) & 0xFFFFFFu));
+}
+
+int32_t host_display_pixel(wasm_exec_env_t exec_env,
+						   int32_t x, int32_t y, int32_t color)
+{
+	(void)exec_env;
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	return from_esp_err(cap_display_draw_pixel(x, y,
+							static_cast<uint32_t>(color) & 0xFFFFFFu));
+}
+
+int32_t host_display_rect(wasm_exec_env_t exec_env, int32_t x, int32_t y,
+						  int32_t w, int32_t h, int32_t color,
+						  int32_t radius, int32_t border)
+{
+	(void)exec_env;
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	return from_esp_err(cap_display_draw_rect(
+		x, y, w, h, static_cast<uint32_t>(color) & 0xFFFFFFu, radius, border));
+}
+
+int32_t host_display_circle(wasm_exec_env_t exec_env, int32_t cx, int32_t cy,
+							int32_t r, int32_t color, int32_t border)
+{
+	(void)exec_env;
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	return from_esp_err(cap_display_draw_circle(
+		cx, cy, r, static_cast<uint32_t>(color) & 0xFFFFFFu, border));
+}
+
+int32_t host_display_line(wasm_exec_env_t exec_env, int32_t x1, int32_t y1,
+						  int32_t x2, int32_t y2, int32_t color, int32_t width)
+{
+	(void)exec_env;
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	return from_esp_err(cap_display_draw_line(
+		x1, y1, x2, y2, static_cast<uint32_t>(color) & 0xFFFFFFu, width));
+}
+
+int32_t host_display_arc(wasm_exec_env_t exec_env, int32_t cx, int32_t cy,
+						 int32_t r, int32_t start_deg, int32_t end_deg,
+						 int32_t color, int32_t width)
+{
+	(void)exec_env;
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	return from_esp_err(cap_display_draw_arc(
+		cx, cy, r, start_deg, end_deg,
+		static_cast<uint32_t>(color) & 0xFFFFFFu, width));
+}
+
+int32_t host_display_text(wasm_exec_env_t exec_env, int32_t x, int32_t y,
+						  int32_t text_ptr, int32_t color, int32_t size,
+						  int32_t align, int32_t max_w)
+{
+	(void)exec_env;
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	const char *text = guest_str(text_ptr);
+	if (!text) return MPX_ERR_ARG;
+	return from_esp_err(cap_display_draw_text(
+		x, y, text, static_cast<uint32_t>(color) & 0xFFFFFFu,
+		size, align, max_w));
+}
+
+int32_t host_display_blit(wasm_exec_env_t exec_env, int32_t x, int32_t y,
+						  int32_t w, int32_t h, int32_t data_ptr, int32_t len)
+{
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	/* The canvas is 320x240; anything this large is a guest mistake, and the
+	 * bounds check below must not be handed a size that overflows int32. */
+	if (w < 1 || h < 1 || w > 4096 || h > 4096) return MPX_ERR_ARG;
+	const int32_t need = w * h * 2;
+	if (len < need) return MPX_ERR_ARG;
+	const void *data = wasm_ptr(exec_env, data_ptr, static_cast<uint32_t>(need));
+	if (!data) return MPX_ERR_ARG;
+	return from_esp_err(cap_display_draw_blit(
+		x, y, w, h, static_cast<const uint8_t *>(data),
+		static_cast<std::size_t>(need)));
+}
+
+int32_t host_display_show(wasm_exec_env_t exec_env, int32_t hold_ms)
+{
+	(void)exec_env;
+	return from_esp_err(cap_display_draw_show(
+		hold_ms < 0 ? 0u : static_cast<uint32_t>(hold_ms)));
+}
+
+int32_t host_display_face(wasm_exec_env_t exec_env)
+{
+	(void)exec_env;
+	return from_esp_err(cap_display_clear());
+}
+
+int32_t host_display_show_text(wasm_exec_env_t exec_env, int32_t text_ptr)
+{
+	(void)exec_env;
+	const char *text = guest_str(text_ptr);
+	if (!text) return MPX_ERR_ARG;
+	return from_esp_err(cap_display_show_text(text));
+}
+
+int32_t host_display_show_emotion(wasm_exec_env_t exec_env, int32_t name_ptr)
+{
+	(void)exec_env;
+	const char *name = guest_str(name_ptr);
+	if (!name) return MPX_ERR_ARG;
+	return from_esp_err(cap_display_show_emotion(name));
+}
+
+int32_t host_display_set_colors(wasm_exec_env_t exec_env,
+								int32_t background_rgb, int32_t eyes_rgb)
+{
+	(void)exec_env;
+	return from_esp_err(cap_display_set_colors(background_rgb, eyes_rgb));
+}
+
+int32_t host_display_set_brightness(wasm_exec_env_t exec_env, int32_t percent)
+{
+	(void)exec_env;
+	if (percent < 0) percent = 0;
+	if (percent > 100) percent = 100;
+	return from_esp_err(cap_display_set_brightness(static_cast<int>(percent)));
+}
+
+// ── fs ───────────────────────────────────────────────────────
+
+int32_t host_fs_read(wasm_exec_env_t exec_env, int32_t path_ptr,
+					 int32_t buf_ptr, int32_t cap)
+{
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	const char *path = guest_str(path_ptr);
+	if (!path || !*path || cap < 0) return MPX_ERR_ARG;
+
+	/* read_file() returns an empty vector for a missing file AND for an empty
+	 * one, so ask existence first -- a skill reading a file it just truncated
+	 * to zero must not be told "no such file". */
+	if (!fs::file_exists(path)) return MPX_ERR_ARG;
+	const std::vector<uint8_t> data = fs::read_file(path);
+	const int32_t size = static_cast<int32_t>(data.size());
+	if (size > 0 && cap > 0) {
+		const int32_t n = size < cap ? size : cap;
+		void *buf = wasm_ptr(exec_env, buf_ptr, static_cast<uint32_t>(n));
+		if (!buf) return MPX_ERR_ARG;
+		std::memcpy(buf, data.data(), static_cast<std::size_t>(n));
+	}
+	/* The whole size, not what fit: a return greater than cap says the file
+	 * was truncated, so the caller can retry with a bigger buffer. */
+	return size;
+}
+
+int32_t host_fs_write(wasm_exec_env_t exec_env, int32_t path_ptr,
+					  int32_t data_ptr, int32_t len)
+{
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	const char *path = guest_str(path_ptr);
+	if (!path || !*path || len < 0) return MPX_ERR_ARG;
+
+	static const uint8_t kEmpty = 0;
+	const void *data = &kEmpty;
+	if (len > 0) {
+		data = wasm_ptr(exec_env, data_ptr, static_cast<uint32_t>(len));
+		if (!data) return MPX_ERR_ARG;
+	}
+
+	/* The same permission prompt Lua's fs.write raises, and the wait is
+	 * reported to the watchdog so the user deciding does not look like the
+	 * skill running. */
+	char desc[256];
+	std::snprintf(desc, sizeof(desc), "Write file '%s' (%" PRId32 " bytes)",
+				  path, len);
+	const int64_t t0 = esp_timer_get_time();
+	const bool ok = network::request_permission("file_write", desc, 60000);
+	wasm::extend_watchdog(static_cast<uint32_t>((esp_timer_get_time() - t0) / 1000));
+	if (!ok) {
+		ESP_LOGW(TAG, "fs_write: user denied write to '%s'", path);
+		return MPX_ERR_ARG;
+	}
+	return fs::write_file(path, data, static_cast<std::size_t>(len)) ? MPX_OK
+																	: MPX_ERR_ARG;
+}
+
+int32_t host_fs_delete(wasm_exec_env_t exec_env, int32_t path_ptr)
+{
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	const char *path = guest_str(path_ptr);
+	if (!path || !*path) return MPX_ERR_ARG;
+
+	char desc[256];
+	std::snprintf(desc, sizeof(desc), "Delete file '%s'", path);
+	const int64_t t0 = esp_timer_get_time();
+	const bool ok = network::request_permission("file_delete", desc, 60000);
+	wasm::extend_watchdog(static_cast<uint32_t>((esp_timer_get_time() - t0) / 1000));
+	if (!ok) {
+		ESP_LOGW(TAG, "fs_delete: user denied delete of '%s'", path);
+		return MPX_ERR_ARG;
+	}
+	return fs::delete_file(path) ? MPX_OK : MPX_ERR_ARG;
+}
+
+int32_t host_fs_exists(wasm_exec_env_t exec_env, int32_t path_ptr)
+{
+	(void)exec_env;
+	const char *path = guest_str(path_ptr);
+	if (!path || !*path) return 0;
+	return fs::file_exists(path) ? 1 : 0;
+}
+
+int32_t host_fs_list(wasm_exec_env_t exec_env, int32_t dir_ptr,
+					 int32_t buf_ptr, int32_t cap)
+{
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	const char *dir_path = guest_str(dir_ptr);
+	if (!dir_path || !*dir_path) dir_path = "/";
+	if (buf_ptr == 0 || cap <= 0) return MPX_ERR_ARG;
+
+	/* Lua's fs.list builds the VFS path by hand and reads the directory
+	 * directly (fs::list_files() drops subdirectories), so a skill sees the
+	 * same entries the Lua module and the web file browser do. */
+	char vfs_path[256];
+	if (dir_path[0] != '/') {
+		std::snprintf(vfs_path, sizeof(vfs_path), "/fs/%s", dir_path);
+	} else if (std::strncmp(dir_path, "/fs/", 4) != 0) {
+		std::snprintf(vfs_path, sizeof(vfs_path), "/fs%s", dir_path);
+	} else {
+		std::strncpy(vfs_path, dir_path, sizeof(vfs_path) - 1);
+		vfs_path[sizeof(vfs_path) - 1] = '\0';
+	}
+
+	DIR *dir = opendir(vfs_path);
+	if (!dir) return MPX_ERR_ARG;
+
+	char *out = static_cast<char *>(
+		wasm_ptr(exec_env, buf_ptr, static_cast<uint32_t>(cap)));
+	int32_t used = 0;
+	if (out) {
+		struct dirent *entry;
+		while ((entry = readdir(dir)) != nullptr) {
+			const char *name = entry->d_name;
+			if (std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0) {
+				continue;
+			}
+			const bool is_dir = (entry->d_type == DT_DIR);
+			char full_path[320];
+			std::snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, name);
+			const std::size_t sz = is_dir ? 0 : fs::file_size(full_path);
+
+			char line[400];
+			const int n = std::snprintf(line, sizeof(line), "%s\t%lu\t%c\n",
+										name, static_cast<unsigned long>(sz),
+										is_dir ? 'd' : 'f');
+			if (n <= 0) continue;
+			if (used + n > cap) {
+				closedir(dir);
+				return MPX_ERR_ARG;
+			}
+			std::memcpy(out + used, line, static_cast<std::size_t>(n));
+			used += n;
+		}
+		if (used < cap) out[used] = '\0';
+	}
+	closedir(dir);
+	return out ? used : MPX_ERR_ARG;
+}
+
+int32_t host_fs_info(wasm_exec_env_t exec_env, int32_t out_ptr)
+{
+	std::size_t total = 0, used = 0;
+	if (!fs::stats(total, used)) return MPX_ERR_ARG;
+	int32_t *out = static_cast<int32_t *>(
+		wasm_ptr(exec_env, out_ptr, 2u * sizeof(int32_t)));
+	if (!out) return MPX_ERR_ARG;
+	out[0] = static_cast<int32_t>(total);
+	out[1] = static_cast<int32_t>(used);
+	return MPX_OK;
+}
+
+// ── music ────────────────────────────────────────────────────
+
+int32_t host_music_play(wasm_exec_env_t exec_env, int32_t what_ptr,
+						int32_t title_ptr, int32_t cap)
+{
+#if CONFIG_APP_VOICE_ENABLE
+	(void)exec_env;
+	const char *what = guest_str(what_ptr);
+	if (!what || !*what) return MPX_ERR_ARG;
+
+	char title[64] = {0};
+	const esp_err_t err = cap_music_play(what, title, sizeof(title));
+	if (err != ESP_OK) return from_esp_err(err);
+
+	if (title_ptr != 0 && cap > 0) {
+		char *out = static_cast<char *>(
+			wasm_ptr(exec_env, title_ptr, static_cast<uint32_t>(cap)));
+		if (out) {
+			std::strncpy(out, title, static_cast<std::size_t>(cap) - 1);
+			out[cap - 1] = '\0';
+		}
+	}
+	return MPX_OK;
+#else
+	/* A build with no voice stack: the symbol is registered so the ABI does
+	 * not change shape, and answers the same "no speaker" the agent tool's
+	 * esp_err_to_name(ESP_ERR_NOT_SUPPORTED) path reports. */
+	(void)exec_env; (void)what_ptr; (void)title_ptr; (void)cap;
+	return MPX_ERR_STATE;
+#endif
+}
+
+int32_t host_music_stop(wasm_exec_env_t exec_env)
+{
+	(void)exec_env;
+#if CONFIG_APP_VOICE_ENABLE
+	cap_music_stop();
+	return MPX_OK;
+#else
+	return MPX_ERR_STATE;
+#endif
+}
+
+// ── robot state ──────────────────────────────────────────────
+
+int32_t host_robot_get_config(wasm_exec_env_t exec_env, int32_t out_ptr)
+{
+	(void)exec_env;
+	int32_t *out = static_cast<int32_t *>(
+		wasm_ptr(exec_env, out_ptr, 6u * sizeof(int32_t)));
+	if (!out) return MPX_ERR_ARG;
+
+	const robot::Config cfg = robot::get_config();
+	out[0] = cfg.period;
+	out[1] = cfg.height;
+	out[2] = cfg.up_height;
+	out[3] = cfg.stride;
+	out[4] = cfg.tilt;
+	out[5] = cfg.sg_speed;
+	return MPX_OK;
+}
+
+int32_t host_robot_get_gait(wasm_exec_env_t exec_env, int32_t buf_ptr,
+							int32_t cap)
+{
+	const char *name = robot::gait_to_name(robot::current_gait_cmd());
+	return return_string(exec_env, buf_ptr, cap, name ? name : "none");
 }
 
 }  // namespace sdk
