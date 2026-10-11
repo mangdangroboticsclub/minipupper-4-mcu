@@ -147,15 +147,30 @@ static inline bool fb_frame_valid(const SMS_host_t *rx)
 
 /* Pull position / current / temperature out of one feedback frame into the
  * caches. b = index of the board's first physical channel (0,3,6,9). */
+static bool fb_fresh[12];   /* set by fb_store; driver_board_sync_idle clears it first */
+
 static void fb_store(int b, const SMS_host_t *rx)
 {
     const servo_fb_sub_t *fb[3] = { &rx->s1, &rx->s2, &rx->s3 };
     for (int j = 0; j < 3; j++) {
+        fb_fresh[b + j] = true;
         fb_position[b + j] = (uint16_t)((float)fb[j]->position * 1024.0f / db_scale_dd);
         fb_current[b + j]  = fb[j]->torque;          /* present motor current, mA */
         fb_temp_dc[b + j]  = (int16_t)fb[j]->res1;   /* NTC temperature, 0.1 degC */
     }
 }
+
+/* Raw feedback for the host link (driver_board_sync_raw), by PHYSICAL
+ * channel: deci-degrees as the AT32 sent them, unlike fb_position above. */
+static uint16_t raw_posdd[12];
+static int16_t  raw_cur[12];
+static int16_t  raw_temp_dc[12];
+static uint16_t raw_status[12];
+static bool     raw_valid[12];
+/* After a config exchange the board's next ordinary reply still carries the
+ * parameter id and value in its first channel. cfg_request() sets this, and
+ * sync_raw drops that one frame instead of reporting it as a position. */
+static bool     raw_skip[4];
 
 /* shadow of the last commanded state per servo (deci-degrees), so a direct
  * single-servo write can resend the board frame without disturbing the
@@ -276,7 +291,7 @@ bool driver_board_init(void)
     }
 
     driver_board_power(true);
-    ESP_LOGI(TAG, "driver board SPI init OK (4 boards, 12 servos, variant %d)",
+    ESP_LOGD(TAG, "driver board SPI init OK (4 boards, 12 servos, variant %d)",
              SERVO_BOARD);
     return true;
 }
@@ -304,7 +319,7 @@ float driver_board_probe_scale(void)
                      PROBE[i], deg, db_scale_dd / 10.0f,
                      100.0f * (dd - db_scale_dd) / db_scale_dd);
         } else {
-            ESP_LOGI(TAG, "servo %d confirms range_position_deg = %.1f", PROBE[i], deg);
+            ESP_LOGD(TAG, "servo %d confirms range_position_deg = %.1f", PROBE[i], deg);
         }
         driver_board_set_scale_dd(dd);
         db_probe_answered = true;
@@ -354,6 +369,45 @@ void driver_board_sync_write(const uint16_t pos[12], const uint16_t cur_mA[12])
     DB_UNLOCK();
 }
 
+/* Every servo to IDLE (motor off, limp) in one pass, reading feedback on the
+ * way. Position rides along unchanged; the current cap is 0. Returns how many
+ * boards answered with a valid frame (0..4). */
+int driver_board_sync_idle(void)
+{
+    host_SMS_t frame;
+    SMS_host_t rx;
+    int answered = 0;
+
+    DB_LOCK();
+    for (int i = 0; i < 12; i++) {
+        fb_fresh[i] = false;
+    }
+    for (int i = 0; i < 4; i++) {
+        const int b = i * 3;
+        frame.start = START_FIELD;
+        frame.mode  = MODE_FIELD;
+        servo_cmd_sub_t *sub[3] = { &frame.s1, &frame.s2, &frame.s3 };
+        for (int j = 0; j < 3; j++) {
+            const int idx = b + j;
+            sub[j]->mode     = DB_MODE_IDLE;
+            sub[j]->position = sh_posdd[idx];
+            sub[j]->torque   = 0;
+            sub[j]->kp = 0;
+            sub[j]->kd = 0;
+            sh_mode[idx] = DB_MODE_IDLE;
+            sh_cur[idx]  = 0;
+        }
+        frame.check_sum = 0;
+        if (spi_xfer((uint8_t)i, sizeof(host_SMS_t), (uint8_t *)&frame, (uint8_t *)&rx) == ESP_OK
+            && fb_frame_valid(&rx)) {
+            fb_store(b, &rx);
+            answered++;
+        }
+    }
+    DB_UNLOCK();
+    return answered;
+}
+
 /* ---- AT32 sms_config parameter access (config frames, start 0xC0DE) ---- */
 /* START_CONFIG is defined near the top, next to the other wire constants */
 #define CFG_OP_NOP      0
@@ -376,6 +430,7 @@ static const char *param_names[DB_PARAM_COUNT] = {
     "reverse_position_sensor", "min_position_adc", "max_position_adc",
     "range_position_deg", "reverse_motor", "kp_position", "kd_position",
     "kp_current", "kff_current", "max_pwm_duty_cycle",
+    "ki_position", "control_mode", "pwm_scale",
 };
 
 const char *driver_board_param_name(int param_id)
@@ -519,6 +574,8 @@ static bool cfg_request(uint8_t board, uint16_t op, uint16_t servo_index,
         }
     }
 
+    if (board < CFG_BOARDS) raw_skip[board] = true;   /* see raw_skip */
+
     SMS_host_t rx;
     if (!cfg_xfer(board, op, servo_index, param_id, value, NULL)) {
         if (board < CFG_BOARDS) s_cfg_last_us[board] = esp_timer_get_time();
@@ -601,7 +658,7 @@ bool driver_board_get_param(int servo, int param_id, float *out)
 
 bool driver_board_get_live(int servo, int live_id, float *out)
 {
-    if (servo < 1 || servo > 12 || live_id < 0 || live_id >= DB_LIVE_COUNT)
+    if (servo < 1 || servo > 12 || live_id < 0 || live_id > DB_LIVE_SUPPLY_CURRENT_MA)
         return false;
     int p = db_phys(servo) - 1;                 /* logical -> physical */
     DB_LOCK();
@@ -744,10 +801,134 @@ bool driver_board_commit(void)
     return ok;
 }
 
+/* ---- raw host link (see driver_board.h) ---- */
+void driver_board_sync_raw(const uint16_t mode[12], const uint16_t pos_dd[12],
+                           const int16_t cur_mA[12], uint8_t *answered, uint8_t *fresh)
+{
+    host_SMS_t frame;
+    SMS_host_t rx;
+    uint8_t ans_phys = 0, fresh_phys = 0;
+    const uint16_t top = (uint16_t)db_scale_dd;
+
+    DB_LOCK();
+    for (int i = 0; i < 4; i++) {
+        const int b = i * 3;   /* first PHYSICAL channel of this board */
+        frame.start = START_FIELD;
+        frame.mode  = MODE_FIELD;
+        servo_cmd_sub_t *sub[3] = { &frame.s1, &frame.s2, &frame.s3 };
+        for (int j = 0; j < 3; j++) {
+            const int idx = b + j;
+            const int L   = db_phys_inv(idx + 1) - 1;   /* logical servo on this channel */
+            if (mode[L] == DB_MODE_HOLD) {
+                /* Hold means "keep a position the gait or Studio set". A
+                 * skill's torque command, or its per-frame gains, are not a
+                 * pose: replayed here they would run unguarded for the whole
+                 * session. Anything but a position goes limp instead. */
+                if (sh_mode[idx] != DB_MODE_POSITION) {
+                    sh_mode[idx] = DB_MODE_IDLE;
+                    sh_cur[idx]  = 0;
+                }
+                sh_fkp[idx] = 0;
+                sh_fkd[idx] = 0;
+            } else {
+                uint16_t p = pos_dd[L];
+                if (p > top) p = top;
+                sh_mode[idx]  = mode[L];
+                sh_posdd[idx] = p;
+                sh_cur[idx]   = (mode[L] == DB_MODE_IDLE) ? 0 : cur_mA[L];
+                sh_fkp[idx]   = 0;   /* gains come from sms_config, as in mp4-link */
+                sh_fkd[idx]   = 0;
+            }
+            sub[j]->mode     = sh_mode[idx];
+            sub[j]->position = sh_posdd[idx];
+            sub[j]->torque   = sh_cur[idx];
+            sub[j]->kp       = sh_fkp[idx];
+            sub[j]->kd       = sh_fkd[idx];
+        }
+        frame.check_sum = 0;
+
+        const bool ok = spi_xfer((uint8_t)i, sizeof(host_SMS_t), (uint8_t *)&frame,
+                                 (uint8_t *)&rx) == ESP_OK
+                        && rx.start == FB_START_FIELD;
+        if (!ok) {                       /* absent: MISO reads all ones */
+            for (int j = 0; j < 3; j++) raw_valid[b + j] = false;
+            continue;
+        }
+        ans_phys |= (uint8_t)(1u << i);
+        if (rx.status == START_CONFIG) { /* a config reply: its echo comes next */
+            raw_skip[i] = true;
+            continue;
+        }
+        if (raw_skip[i]) {               /* the echo of a config exchange */
+            raw_skip[i] = false;
+            continue;
+        }
+        fb_store(b, &rx);                /* the gait-scale caches */
+        const servo_fb_sub_t *fb[3] = { &rx.s1, &rx.s2, &rx.s3 };
+        for (int j = 0; j < 3; j++) {
+            raw_posdd[b + j]   = fb[j]->position;
+            raw_cur[b + j]     = fb[j]->torque;
+            raw_temp_dc[b + j] = (int16_t)fb[j]->res1;
+            raw_status[b + j]  = rx.status;
+            raw_valid[b + j]   = true;
+        }
+        fresh_phys |= (uint8_t)(1u << i);
+    }
+    DB_UNLOCK();
+
+    /* physical boards -> logical legs: every variant keeps a leg on one board */
+    uint8_t a = 0, f = 0;
+    for (int L = 0; L < 4; L++) {
+        const int pb = (db_phys(3 * L + 1) - 1) / 3;
+        if (ans_phys   >> pb & 1u) a |= (uint8_t)(1u << L);
+        if (fresh_phys >> pb & 1u) f |= (uint8_t)(1u << L);
+    }
+    if (answered) *answered = a;
+    if (fresh)    *fresh    = f;
+}
+
+void driver_board_raw_invalidate(void)
+{
+    DB_LOCK();
+    for (int i = 0; i < 12; i++) raw_valid[i] = false;
+    DB_UNLOCK();
+}
+
+bool driver_board_raw_feedback(int servo, uint16_t *pos_dd, int16_t *cur_mA,
+                               int16_t *temp_dc, uint16_t *status)
+{
+    bool v = false;
+    uint16_t p = 0, st = 0;
+    int16_t  c = 0, t = 0;
+    if (servo >= 1 && servo <= 12) {
+        const int idx = db_phys(servo) - 1;
+        DB_LOCK();
+        v = raw_valid[idx];
+        if (v) {
+            p  = raw_posdd[idx];
+            c  = raw_cur[idx];
+            t  = raw_temp_dc[idx];
+            st = raw_status[idx];
+        }
+        DB_UNLOCK();
+    }
+    if (pos_dd)  *pos_dd  = p;
+    if (cur_mA)  *cur_mA  = c;
+    if (temp_dc) *temp_dc = t;
+    if (status)  *status  = st;
+    return v;
+}
+
 int16_t driver_board_present_current(int ch)
 {
     if (ch < 1 || ch > 12) return 0;
     return fb_current[db_phys(ch) - 1];
+}
+
+bool driver_board_present_fresh(int ch)
+{
+    if (ch < 1 || ch > 12) return false;
+    return fb_fresh[db_phys(ch) - 1];
 }
 
 uint16_t driver_board_present_position(int ch)

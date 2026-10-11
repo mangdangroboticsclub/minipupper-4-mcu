@@ -6,9 +6,9 @@
  * which is expressed RELATIVE to the resting stance so that servo-centre ==
  * the calibrated "Ini" pose (no horn re-flash, no dip at gait start).
  *
- * Difference vs the minipupperesp reference: this robot drives the Feetech
- * serial-bus servos DIRECTLY (no AT32 driver boards), so there is no
- * db_phys() connector remap - servo ids are used as-is.
+ * Same file as the minipupperesp reference (the build whose movement is
+ * verified on this robot). The AT32 driver boards' connector / channel remap
+ * lives in driver_board.h (db_phys), so the ids here are LOGICAL servo ids.
  */
 #include "stanford_kinematics.h"
 #include <math.h>
@@ -42,20 +42,27 @@ static const int sk_servo_id[3][4] = {
  * BUT Stanford's IK measures theta with atan2(-x, ...), i.e. its hip/knee
  * angle deltas are sign-INVERTED relative to this firmware's servo-write
  * polarity (which matches the reference minipupperesp firmware and its
- * proven fRIK/fLIK/rRIK/rLIK walk). So the working signs are the BSP
- * multipliers negated on every row:
- *     abduction : [-1, -1,  1,  1]
- *     hip       : [ 1, -1,  1, -1]
- *     knee      : [ 1, -1,  1, -1]
- * Hip & knee match the legacy forward-walk servo polarity in robot.cc
- * (front_right_ik writes -(th1), +th2; front_left_ik +th1, -(th2); etc. -
- * identical to the reference fRIK/fLIK/rRIK/rLIK). Abduction is not
- * exercised by forward walk (it stays at neutral, y=0); confirm its
- * direction on the robot when you first strafe/turn, and flip the abduction
- * row here if a hip yaws the wrong way. This is the ONLY hardware knob.
+ * proven fRIK/fLIK/rRIK/rLIK walk). So the working signs for THIS firmware
+ * are:
+ *     abduction : [ 1,  1, -1, -1]   = the BSP value, unchanged
+ *     hip       : [ 1, -1,  1, -1]   = BSP negated (the atan2(-x) above)
+ *     knee      : [ 1, -1,  1, -1]   = BSP negated
+ *
+ * ABDUCTION ROW = the original BSP multipliers [1, 1, -1, -1], exactly as in
+ * minipupperesp, where it was CONFIRMED on this robot (2026-09-28, the Hip
+ * test, robot in the air, seen from BEHIND): +10 deg on a FRONT hip swings
+ * the foot to the robot's LEFT, on a REAR hip to its RIGHT.
+ *
+ * This file used to carry the row negated ({-1,-1,+1,+1}, never tested).
+ * That mirrors every sideways foot motion while leaving fore/aft alone, so a
+ * strafe went the wrong way and a turn or a yaw/roll look became a shear (the
+ * fore/aft half of the rotation one way, the sideways half the other: the
+ * feet scrub and the body barely turns). Two sign hacks in robot.cc
+ * (SG_MIRROR_LR and an inverted strafe) papered over parts of it; both are
+ * gone now that the row is right.
  * ---------------------------------------------------------------------- */
 static const float SK_SIGN[3][4] = {
-    { -1.0f, -1.0f, +1.0f, +1.0f },   /* abduction */
+    { +1.0f, +1.0f, -1.0f, -1.0f },   /* abduction = BSP [1,1,-1,-1] */
     { +1.0f, -1.0f, +1.0f, -1.0f },   /* hip       */
     { +1.0f, -1.0f, +1.0f, -1.0f },   /* knee      */
 };
@@ -162,7 +169,6 @@ void stanford_kinematics_servo_deg(const sg_foot_t feet[4], float servo_deg[13])
         for (int axis = 0; axis < 3; axis++) {
             float dev_rad = jr[axis] - sk_neutral[leg][axis];
             float deg = dev_rad * SK_RAD2DEG * SK_SIGN[axis][leg];
-            /* Direct Feetech bus: servo id == bus id, no remap needed. */
             servo_deg[ sk_servo_id[axis][leg] ] = deg;
         }
     }

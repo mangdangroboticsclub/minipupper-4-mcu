@@ -83,10 +83,10 @@ constexpr float NEUTRAL_Z = 70.0f;
 // Config.py; the reference web default was 100 which is too fast
 // for this robot, so the default here is 50.
 constexpr float SG_SPEED_MAX_MM_S = 200.0f;   // full joystick stick
-// The reference robot's leg roles are mirrored left<->right vs the
-// physical legs, so lateral/yaw commands are flipped there.  Keep
-// the same default; set to false if strafe/turn comes out mirrored.
-constexpr bool  SG_MIRROR_LR = true;
+// Sign convention of every velocity in this firmware (joystick, Pi, voice):
+// vx + = forward, vy + = LEFT, wz + = turn LEFT - the same as REP-103 and as
+// the minipupperesp /js handler. No left/right mirror anywhere: the abduction
+// row in stanford_kinematics.cc is the hardware-verified one.
 
 // ── Web joystick (mini_pupper_web_controller style) ──────────
 // Left pad: forward/strafe, right pad: turn.  Values -1..1, scaled
@@ -96,6 +96,12 @@ constexpr float JOY_VY_MAX     = 200.0f;   // mm/s strafe at full stick
 constexpr float JOY_WZ_MAX     = 2.0f;     // rad/s yaw at full stick
 constexpr uint32_t JOY_TIMEOUT_MS = 600;
 
+// ── Raspberry Pi (ROS) velocity input ────────────────────────
+// A cmd_vel from the Pi is good for this long. After it the walk steps in
+// place - a ROS node that keeps heartbeating but stops publishing does not
+// get a robot that keeps walking. ROS teleop/nav publish at >= 10 Hz.
+constexpr uint32_t PI_VEL_TIMEOUT_MS = 500;
+
 // ── Body geometry for attitude (look) poses ──────────────────
 // NOTE: superseded — the look/imported-move poses now use the exact
 // Stanford geometry (SG_ORIGIN_X/SG_ORIGIN_Y in stanford_gait.h).
@@ -103,12 +109,9 @@ constexpr uint32_t JOY_TIMEOUT_MS = 600;
 constexpr float BODY_LX = 50.0f;   // half fore-aft hip spacing (mm)
 constexpr float BODY_LY = 35.0f;   // half left-right hip spacing (mm)
 
-// Direction sign flips for the look poses.  If the robot looks the
-// OPPOSITE way to what a command says, flip that axis sign.
-// (Verified in simulation: PITCH_SIGN = -1 makes LookUp raise the nose.)
-constexpr float PITCH_SIGN = -1.0f; // LookUp raises the nose
-constexpr float YAW_SIGN   =  1.0f; // LookRight aims head right (flip if reversed)
-constexpr float ROLL_SIGN  =  1.0f; // positive roll leans right (flip if reversed)
+// Attitude convention used by every look / body pose in this firmware
+// (sg_attitude_feet in robot.cc, the same rotation as minipupperesp's
+// look_write()):  roll + = lean RIGHT,  pitch + = nose UP,  yaw + = head RIGHT.
 
 // Default look amplitudes (degrees), matching StanfordQuadruped.
 constexpr float LOOK_PITCH_DEG = 20.0f;
@@ -185,7 +188,32 @@ enum class GaitCmd : uint8_t {
     // Direct SDK-controlled body attitude. Kept last so existing numeric
     // GaitCmd values remain backward compatible.
     BodyAttitude,   // Hold caller-provided roll, pitch and yaw angles
+
+    // Raspberry Pi (ROS) foot targets: the Pi sends four body-frame foot
+    // positions, the ESP runs the exact Stanford IK. Only reachable through
+    // robot::master - see pi/pi_link.h.
+    FootTargets,
+
+    // ── minipupperesp moves (robot/moves_mpe.inc) ────────────────
+    // Appended, so every value above keeps its number.
+    Mate,           // front legs tall, rear thrusts up/down (continuous)
+    LongJump,       // Lite 3 style long jump, sim-optimised table (one-shot)
+    FarJump,        // the sim-optimised jump that goes furthest (one-shot)
+    CharShow,       // every Character move, one after the other (one-shot)
+    Alive,          // IMU reflexes: picked up -> runs in the air, push reflex (continuous)
+    HipTest,        // each hip alone +/-deg, to check hip directions (one-shot)
+    LookPad,        // continuous look pad: glides to look_input() yaw/pitch
 };
+
+// Table-driven moves are numbered by range rather than one enumerator each,
+// so the tables can be regenerated without touching this enum:
+//   GaitCmd(GAIT_BF_BASE + k)  backflip / frame preset k   (robot.cc BF_PRESETS)
+//   GaitCmd(GAIT_TJ_BASE + k)  trajopt table k             (trajopt_jump.h)
+// gait_from_name() / gait_to_name() know both ranges by name.
+constexpr uint8_t GAIT_BF_BASE = 96;
+constexpr uint8_t GAIT_BF_MAX  = 16;
+constexpr uint8_t GAIT_TJ_BASE = 128;
+constexpr uint8_t GAIT_TJ_MAX  = 64;
 
 // ── Robot configuration ──────────────────────────────────────
 struct Config {
@@ -280,6 +308,14 @@ void send_gait_cmd(GaitCmd cmd);
  */
 GaitCmd current_gait_cmd();
 
+/**
+ * @brief The move the legs are playing right now, for the face: the gait's
+ *        name, or inside the Character show the table playing. NULL when
+ *        idle. `seq` (optional) changes every time a move starts.
+ *        Safe from any task.
+ */
+const char *playing_move(uint32_t *seq);
+
 /* ── The one gait name table ─────────────────────────────────────────────
  *
  * This mapping used to exist in three hand-maintained copies - the SDK's host
@@ -307,6 +343,57 @@ const char *gait_to_name(GaitCmd cmd);
  */
 int         gait_name_count();
 const char *gait_name_at(int index);
+
+/**
+ * @brief Human description of a named gait (the minipupperesp button note),
+ *        or "" when there is none. For the move list and the voice tools.
+ */
+const char *gait_note(const char *name);
+
+/**
+ * @brief True for moves that run until something else is commanded
+ *        (walks, twerk, mate, alive, held poses) rather than ending by
+ *        themselves.
+ */
+bool gait_is_continuous(GaitCmd cmd);
+
+/**
+ * @brief Look pad (minipupperesp /look): yaw -30 (left) .. +30 (right),
+ *        pitch -20 (down) .. +20 (up), degrees. The head glides there at
+ *        MovementGroups' speed; 0/0 glides back and ends the look.
+ */
+void look_input(float yaw_deg, float pitch_deg);
+
+/**
+ * @brief Hip test (minipupperesp /hiptest): each hip alone, +deg then -deg.
+ *        deg is clamped to 3..20.
+ */
+void hiptest_start(int deg);
+/** @brief {"on":..,"step":..,"msg":".."} into buf. Returns length. */
+int  hiptest_status_json(char *buf, int n);
+
+/**
+ * @brief Speed of the slow parts of Long Jump / Far Jump, percent (25..200,
+ *        lower = slower). Kept in NVS ("ljspeed"), default 70.
+ */
+void set_lj_speed(int pct);
+int  get_lj_speed();
+
+/**
+ * @brief Servo gain preset in use: -1 = the boards' own (power-on) gains,
+ *        0 = Strong (backflip), 1 = Normal, 2 = PWM (silent).
+ *        Moves that need Strong switch to it by themselves and back after.
+ */
+int         servo_gains_active();
+const char *servo_gains_name(int k);
+
+/**
+ * @brief Called with true when an external master (the Raspberry Pi) takes
+ *        the robot and false when it lets go - from the Pi link task, so the
+ *        callback must not block. main.cc points it at the display badge and
+ *        the voice off-switch.
+ */
+void set_master_observer(void (*cb)(bool active));
 
 /**
  * @brief Web-joystick input (mini_pupper_web_controller style).
@@ -587,6 +674,17 @@ uint16_t get_servo_current(int servo_id);
  */
 void flush();
 
+// ── Servo power (robot.cc, by flush()) ───────────────────────
+// Soft start at boot, and rest after a while unused: the body lowers to a
+// crouch and the servos switch off; any movement request wakes them, gliding
+// from where the legs are.
+void        set_rest_after(uint32_t seconds);   // 0 = never; saved
+uint32_t    rest_after();
+const char *power_state_name();
+bool        servos_resting();
+void        rest_now();
+void        wake_servos();
+
 // ── Per‑leg IK helpers ───────────────────────────────────────
 
 /**
@@ -605,5 +703,127 @@ void front_right_ik(float x, float th0, float z);
 void front_left_ik(float x, float th0, float z);
 void rear_right_ik(float x, float th0, float z);
 void rear_left_ik(float x, float th0, float z);
+
+// ── Telemetry for an external host ──────────────────────────
+
+/**
+ * @brief All twelve servo angles in the firmware's own terms.
+ *
+ * Centidegrees from the stand pose, calibration offset REMOVED, servo id
+ * order 1..12 (index 0 = servo 1). This is the angle the IK asked for -
+ * exactly the number servo_map.yaml on the Pi turns into a URDF joint angle.
+ *
+ * @param cmd_cdeg   commanded (goal buffer + overlay - offset)
+ * @param meas_cdeg  measured by the driver boards (- offset), or
+ *                   PI_CDEG_INVALID (-32768) for a servo that never answered
+ */
+void servo_snapshot(int16_t cmd_cdeg[12], int16_t meas_cdeg[12]);
+
+/**
+ * @brief The body velocity the gait is executing right now, REP-103 frame
+ *        (x forward m/s, y left m/s, z counter-clockwise rad/s).
+ *
+ * Zero whenever the Stanford walk is not running. This is the COMMAND after
+ * clamping, not a measurement - the Pi scales it into odom/raw.
+ */
+void executed_velocity(float &vx_m_s, float &vy_m_s, float &wz_rad_s);
+
+// ── External master (Raspberry Pi over UART) ────────────────
+//
+// While a master is active the robot belongs to it. Every public motion entry
+// point above - send_gait_cmd(), joy_input(), set_body_attitude(),
+// set_overlay(), set_offset(), set_studio_mode(true), servo_lock(), and
+// set_servo_angle()/flush() from any task other than the gait - turns into a
+// no-op, so the PWA, Lua and WASM skills can still READ everything but can no
+// longer move a servo. The master drives the robot through robot::master::*.
+
+/** True while an external master (the Pi) owns all motion. */
+bool master_active();
+
+namespace master {
+
+/** Take control: park Studio/skills, clear overlays, stand. */
+void begin();
+
+/** Give control back: stop walking, stand, re-enable the local controls. */
+void end();
+
+/** Same as robot::send_gait_cmd(), but allowed while the master is active. */
+void send_gait_cmd(GaitCmd cmd);
+
+/**
+ * @brief Walk velocity, REP-103 (m/s, m/s, rad/s).
+ *
+ * Clamped to SG_SPEED_MAX_MM_S / JOY_WZ_MAX. A non-zero command starts the
+ * Stanford walk if it is not already running; the command expires after
+ * PI_VEL_TIMEOUT_MS, after which the walk steps in place.
+ */
+void set_velocity(float vx_m_s, float vy_m_s, float wz_rad_s);
+
+/**
+ * @brief Standing body attitude, REP-103 radians
+ *        (roll + right side down, pitch + nose down, yaw + head left).
+ *
+ * Converted to this firmware's attitude convention and held through
+ * GaitCmd::BodyAttitude. Same clamps as set_body_attitude().
+ */
+void set_body_attitude(float roll_rad, float pitch_rad, float yaw_rad);
+
+/**
+ * @brief Body height (hip to foot) in mm. Persisted like the PWA slider, so
+ *        it is only written when it actually changes by a millimetre or more.
+ */
+void set_height_mm(float h_mm);
+
+/**
+ * @brief Four body-frame foot positions in metres (Stanford axes, z negative
+ *        below the body, legs FR FL RR RL). Holds them via
+ *        GaitCmd::FootTargets; the ESP runs the IK.
+ */
+void set_foot_targets(const float xyz_m[4][3]);
+
+}  // namespace master
+
+// ── Raw host (the Pi's RL policy, mpx_pi_link rl_link.cc) ───
+//
+// The policy drives every joint itself at 200 Hz over the J-PI link, in raw
+// AT32 units, with mp4-link's protocol. It is a master too - master_active()
+// is true and every local motion entry point is fenced exactly as above - but
+// it drives the servo boards directly (driver_board_sync_raw), so the gait
+// parks and flush() writes nothing while it holds them.
+
+namespace host {
+
+/**
+ * Take the robot for the raw host. Fails only while the ROS bridge (a
+ * robot::master::begin() master) holds it. Takes the bus from Servo Studio or
+ * a skill the way master::begin() does, stops the gait where it is and tells
+ * the master observer (voice off, ROS on the screen). The servos keep the
+ * last pose they were sent until the host commands them. Reads the servo
+ * gains (about 0.2 s) so end() can put them back.
+ */
+bool begin();
+
+/**
+ * Hand the robot back: the servo gains begin() read are written back (the
+ * policy's own were only ever in the boards' RAM), local controls return and
+ * the legs glide from wherever they are into the stand, as when waking from
+ * rest.
+ */
+void end();
+
+/** True between begin() and end(). */
+bool active();
+
+/**
+ * Store a calibration offset (degrees, the gait's offset[]): into this
+ * firmware's NVS, as set_offset() would, and into the "parameter" namespace
+ * mp4-link and minipupperesp read, so every firmware on this robot keeps
+ * one calibration. Allowed while the host holds the robot. False if either
+ * NVS write failed (the offset is in use either way).
+ */
+bool store_offset(int servo_id, float deg);
+
+}  // namespace host
 
 }  // namespace robot

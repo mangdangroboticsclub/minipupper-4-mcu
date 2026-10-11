@@ -1,5 +1,7 @@
 #include "network/http_server.h"
 #include "network/chat_ws.h"
+#include "network/http_display.h"
+#include "network/http_voice.h"
 #include "network/marketplace_proxy.h"
 #include "network/wifi_ap.h"
 #include "network/wifi_sta.h"
@@ -8,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <cerrno>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -19,14 +22,17 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 
 #include "fs/littlefs_manager.h"
 #include "lua/lua_vm.h"
+#include "pi/pi_link.h"
 #include "sdkconfig.h"
 #include "robot/robot.h"
 #include "robot/driver_board.h"
 #include "util/trace_ring.h"
+#include "wasm/registry.h"
 #include "wasm/wasm_sandbox.h"
 
 #include "lwip/sockets.h"
@@ -93,13 +99,9 @@ std::string uri_to_path(const char *uri)
         return std::string(WWW_ROOT) + "/index.html";
     }
 
-    // Map favicon.ico to the design-appropriate SVG icon
+    // Map favicon.ico to the app's SVG icon
     if (std::strcmp(uri, "/favicon.ico") == 0) {
-#ifdef CONFIG_PWA_DESIGN_REDESIGN
         return std::string(WWW_ROOT) + "/md.svg";
-#else
-        return std::string(WWW_ROOT) + "/icon.svg";
-#endif
     }
 
     std::string path = std::string(WWW_ROOT) + uri;
@@ -212,9 +214,14 @@ esp_err_t static_handler(httpd_req_t *req)
     const std::string mime = get_mime_type(fs_path.c_str());
     const bool gzip = accepts_gzip(req);
 
-    // Try gzipped first, then uncompressed
+    // Try gzipped first, then uncompressed. The claw design ships its large
+    // files as .gz only (see main/CMakeLists.txt), so as a last resort the
+    // .gz goes out even to a client that did not advertise gzip: every
+    // browser decodes it anyway, and the alternative is the SPA fallback
+    // handing index.html to a request for m.js.
     if ((gzip && try_serve(req, fs_path + ".gz", mime.c_str(), true)) ||
-        try_serve(req, fs_path, mime.c_str(), false)) {
+        try_serve(req, fs_path, mime.c_str(), false) ||
+        (!gzip && try_serve(req, fs_path + ".gz", mime.c_str(), true))) {
         return ESP_OK;
     }
 
@@ -278,6 +285,8 @@ static bool is_www_path(const std::string &path)
     return path.compare(0, 5, "/www/") == 0 || path == "/www";
 }
 
+static std::string json_escape(const std::string &s);
+
 /* GET /v1/skills/list — list .wasm files (excluding www) */
 static esp_err_t api_skills_list(httpd_req_t *req)
 {
@@ -316,6 +325,9 @@ static esp_err_t api_skills_list(httpd_req_t *req)
  * immediately, so httpd stays responsive while the skill runs.
  */
 static volatile bool s_skill_running = false;
+// Name of the skill running now, for GET /v1/skills/status. A fixed buffer
+// rather than std::string because the run task and httpd both touch it.
+static char s_skill_name[64] = "";
 
 struct SkillRunArgs { std::string path; std::string name; std::string params; };
 
@@ -338,8 +350,100 @@ static void skill_run_task(void *arg)
     ESP_LOGI(TAG, "Skill '%s' completed with result=%d",
              a->name.c_str(), static_cast<int>(result));
     delete a;
+    s_skill_name[0] = 0;
     s_skill_running = false;
     vTaskDelete(nullptr);
+}
+
+/* Launch a skill on its own task. Shared by POST /v1/skills/run and by
+ * POST /v1/robot/gait when the name belongs to a skill's provides_gait.
+ * Returns an HTTP status string on failure ("409 Conflict" or "500 ..."). */
+static const char *start_skill_async(const std::string &path,
+                                     const std::string &name,
+                                     const std::string &params)
+{
+    // ── Reject if a skill is already running (single WASM instance) ──
+    if (s_skill_running) return "409 Conflict";
+
+    s_skill_running = true;
+    std::strncpy(s_skill_name, name.c_str(), sizeof(s_skill_name) - 1);
+    s_skill_name[sizeof(s_skill_name) - 1] = 0;
+    auto *args = new SkillRunArgs{ path, name, params };
+    // No core affinity: the scheduler keeps httpd (core 0) responsive while the
+    // skill yields during its robot_delay_ms calls.  8 KB task stack is enough;
+    // the WASM operand stack is allocated separately inside load_and_run.
+    BaseType_t created = xTaskCreate(skill_run_task, "skill_run", 8192,
+                                     args, 4, nullptr);
+    if (created != pdPASS) {
+        s_skill_running = false;
+        s_skill_name[0] = 0;
+        delete args;
+        return "500 Internal Server Error";
+    }
+    ESP_LOGI(TAG, "Skill '%s' started (async)", name.c_str());
+    return nullptr;
+}
+
+/* Turn what a client calls a skill into a file path and a display name.
+ *
+ * The old apps send the file name ("moonwalk.wasm"); the mpv2 app sends the
+ * registry slug ("moonwalk") when the skill declares one. Both must land on
+ * the same file, and the name reported by /v1/skills/status must be the one
+ * the app compares against, which is the slug when there is one. */
+static void resolve_skill_name(const std::string &given, std::string &path,
+                               std::string &name)
+{
+    path = (given[0] == '/') ? given : "/" + given;
+    name = given;
+    if (const skills::Entry *e = skills::by_slug(given.c_str())) {
+        path = e->file;
+        name = e->slug;
+        return;
+    }
+    for (const skills::Entry &e : skills::all()) {
+        if (e.file == path) {
+            if (!e.slug.empty()) name = e.slug;
+            return;
+        }
+    }
+    if (!fs::file_exists(path.c_str()) && fs::file_exists((path + ".wasm").c_str())) {
+        path += ".wasm";
+    }
+}
+
+/* The public face of the three helpers above (http_server.h), for the voice
+ * tools. Same rules as the HTTP handlers; only the error reporting differs
+ * (a reason string rather than a status line). */
+const char *skill_start(const std::string &given, const std::string &params,
+                        std::string *resolved)
+{
+    if (given.empty()) return "no such skill";
+    std::string path, name;
+    resolve_skill_name(given, path, name);
+    if (!fs::file_exists(path.c_str())) return "no such skill";
+    const char *fail = start_skill_async(path, name, params);
+    if (fail) return fail[0] == '4' ? "a skill is already running" : "failed to start skill task";
+    if (resolved) *resolved = name;
+    return nullptr;
+}
+
+const char *skill_start_for_movement(const char *movement, std::string *resolved)
+{
+    const skills::Entry *e = movement ? skills::by_gait(movement) : nullptr;
+    if (!e) return "no such movement";
+    const char *fail = start_skill_async(e->file, e->slug, "");
+    if (fail) return fail[0] == '4' ? "a skill is already running" : "failed to start skill task";
+    if (resolved) *resolved = e->slug;
+    return nullptr;
+}
+
+bool skill_running() { return s_skill_running; }
+
+const char *skill_running_name() { return s_skill_running ? s_skill_name : ""; }
+
+void skill_stop()
+{
+    if (s_skill_running) wasm::request_stop();
 }
 
 /* POST /v1/skills/run — execute a .wasm skill via WAMR (async) */
@@ -367,8 +471,17 @@ static esp_err_t api_skills_run(httpd_req_t *req)
     val += std::strlen(key);
     std::string skill_name;
     while (*val && *val != '"') skill_name += *val++;
+    if (skill_name.empty()) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "missing skill name", -1);
+        return ESP_OK;
+    }
 
-    std::string path = "/" + skill_name;
+    std::string path;
+    {
+        const std::string given = skill_name;
+        resolve_skill_name(given, path, skill_name);
+    }
 
     /* Optional "params":"name=value;name=value" for mpx_param_f()/i().
      *
@@ -388,34 +501,59 @@ static esp_err_t api_skills_run(httpd_req_t *req)
         }
     }
 
-    // ── Reject if a skill is already running (single WASM instance) ──
-    if (s_skill_running) {
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"output\":\"a skill is already running\"}", -1);
-        return ESP_OK;
-    }
-
     // ── Launch the skill on its own task and return immediately ──
-    s_skill_running = true;
-    auto *args = new SkillRunArgs{ path, skill_name, params };
-    // No core affinity: the scheduler keeps httpd (core 0) responsive while the
-    // skill yields during its robot_delay_ms calls.  8 KB task stack is enough;
-    // the WASM operand stack is allocated separately inside load_and_run.
-    BaseType_t created = xTaskCreate(skill_run_task, "skill_run", 8192,
-                                     args, 4, nullptr);
-    if (created != pdPASS) {
-        s_skill_running = false;
-        delete args;
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"output\":\"failed to start skill task\"}", -1);
+    const char *fail = start_skill_async(path, skill_name, params);
+    httpd_resp_set_type(req, "application/json");
+    if (fail) {
+        httpd_resp_set_status(req, fail);
+        httpd_resp_send(req, fail[0] == '4'
+                             ? "{\"output\":\"a skill is already running\"}"
+                             : "{\"output\":\"failed to start skill task\"}", -1);
         return ESP_OK;
     }
-
-    ESP_LOGI(TAG, "Skill '%s' started (async)", skill_name.c_str());
-    httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"output\":\"started\"}", -1);
+    return ESP_OK;
+}
+
+/* GET /v1/skills/status — {"running":bool,"name":"...","safe_mode":false}
+ *
+ * safe_mode is mpv2-claw's "a skill crashed the robot at boot, autorun is
+ * suspended" flag. Autorun is not ported yet, so it is always false here;
+ * the key stays so the app's Skills tab reads the same JSON on both. */
+static esp_err_t api_skills_status(httpd_req_t *req)
+{
+    std::string json = std::string("{\"running\":") + (s_skill_running ? "true" : "false");
+    if (s_skill_running && s_skill_name[0]) {
+        json += ",\"name\":\"" + json_escape(s_skill_name) + "\"";
+    }
+    json += ",\"safe_mode\":false}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json.c_str(), json.size());
+    return ESP_OK;
+}
+
+/* POST /v1/skills/stop — ask the running skill to stop.
+ *
+ * Cooperative: the sandbox sets its stop flag and the skill's next host call
+ * returns it. A skill that never calls the host keeps running until its
+ * watchdog expires, which is the same contract mpv2-claw has. */
+static esp_err_t api_skills_stop(httpd_req_t *req)
+{
+    const bool was_running = s_skill_running;
+    if (was_running) wasm::request_stop();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, was_running ? "{\"ok\":true,\"stopping\":true}"
+                                     : "{\"ok\":true,\"stopping\":false}", -1);
+    return ESP_OK;
+}
+
+/* GET /v1/skills/registry — what the installed skills declare about
+ * themselves (embedded "mpx" manifest sections). See wasm/registry.h. */
+static esp_err_t api_skills_registry(httpd_req_t *req)
+{
+    const std::string json = skills::to_json();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json.c_str(), json.size());
     return ESP_OK;
 }
 
@@ -597,6 +735,7 @@ static esp_err_t api_fs_delete(httpd_req_t *req)
     }
 
     if (fs::delete_file(file_path.c_str())) {
+        skills::rescan();          // a gait it provided is gone with it
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, "{\"ok\":true}", -1);
     } else {
@@ -651,6 +790,7 @@ static esp_err_t api_skills_upload(httpd_req_t *req)
     std::string fs_path = "/" + filename;
     if (fs::write_file(fs_path.c_str(), data, total_read)) {
         ESP_LOGI(TAG, "Uploaded %s (%zu bytes)", filename.c_str(), total_read);
+        skills::rescan();          // pick up its manifest (provides_gait etc.)
         std::string resp = "{\"ok\":true,\"path\":\"" + filename + "\"}";
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, resp.c_str(), resp.size());
@@ -740,17 +880,23 @@ static float json_get_float(const char *body, const char *key, float def)
  * SDK's robot_gait() - three hand-maintained tables that had already drifted,
  * so a name the SDK accepted could be one the HTTP layer rejected.
  *
- * There is one table, in robot.cc. If you add a gait, add it there. */
-static robot::GaitCmd gait_name_to_cmd(const std::string &name)
-{
-    robot::GaitCmd cmd = robot::GaitCmd::None;
-    robot::gait_from_name(name.c_str(), cmd);
-    return cmd;
-}
-
+ * There is one table, in robot.cc. If you add a gait, add it there.
+ * (api_robot_gait calls robot::gait_from_name() directly now, because it
+ * needs to know whether the name was found before trying the skill registry.) */
 static const char *gait_cmd_to_name(robot::GaitCmd cmd)
 {
     return robot::gait_to_name(cmd);
+}
+
+/* 423 while the Raspberry Pi (ROS) drives the robot. robot.cc fences local
+ * motion off anyway (robot::master_active()); a clear answer beats a move that
+ * never happens. Same body as mpv2-claw, which the PWA already understands. */
+static esp_err_t send_pi_in_control(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "423 Locked");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, R"({"ok":false,"error":"pi_in_control","detail":"The Raspberry Pi (ROS) is controlling the robot"})", -1);
+    return ESP_OK;
 }
 
 /* POST /v1/robot/gait — set gait mode */
@@ -772,9 +918,30 @@ static esp_err_t api_robot_gait(httpd_req_t *req)
         return ESP_OK;
     }
 
-    robot::GaitCmd cmd = gait_name_to_cmd(mode);
-
     ESP_LOGI(TAG, "POST /v1/robot/gait  mode=%s", mode.c_str());
+    if (robot::master_active()) return send_pi_in_control(req);
+
+    robot::GaitCmd cmd = robot::GaitCmd::None;
+    if (!robot::gait_from_name(mode.c_str(), cmd)) {
+        // Not a built-in: a skill may provide a movement by this name
+        // (its embedded manifest's provides_gait). Start it like
+        // POST /v1/skills/run would, so the app's move grid can mix both.
+        if (const skills::Entry *e = skills::by_gait(mode.c_str())) {
+            const char *fail = start_skill_async(e->file, e->slug, "");
+            httpd_resp_set_type(req, "application/json");
+            if (fail) {
+                httpd_resp_set_status(req, fail);
+                httpd_resp_send(req, "{\"ok\":false,\"error\":\"a skill is already running\"}", -1);
+                return ESP_OK;
+            }
+            const std::string resp = "{\"ok\":true,\"mode\":\"" + json_escape(mode)
+                                   + "\",\"skill\":\"" + json_escape(e->slug) + "\"}";
+            httpd_resp_send(req, resp.c_str(), resp.size());
+            return ESP_OK;
+        }
+        // Unknown name falls through as `none`, which the older apps rely
+        // on getting a 200 for (mpv2-claw answers 404 here instead).
+    }
 
     robot::send_gait_cmd(cmd);
 
@@ -783,6 +950,120 @@ static esp_err_t api_robot_gait(httpd_req_t *req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, -1);
+    return ESP_OK;
+}
+
+/* GET /v1/robot/moves — every movement the robot knows, built-in and
+ * skill-provided: {"moves":[{"name":"advance","continuous":true},...]}
+ *
+ * `continuous` tells the app whether releasing a button should send `none`
+ * (walks, pose holds) or leave the move to finish on its own (jump, roll).
+ * Skill moves are one-shots: the skill ends itself. */
+static esp_err_t api_robot_moves(httpd_req_t *req)
+{
+    std::string json = "{\"moves\":[";
+    bool first = true;
+    for (int i = 0; i < robot::gait_name_count(); ++i) {
+        const char *name = robot::gait_name_at(i);
+        robot::GaitCmd cmd = robot::GaitCmd::None;
+        robot::gait_from_name(name, cmd);
+        if (cmd == robot::GaitCmd::None) continue;      // not a move
+        if (!first) json += ',';
+        first = false;
+        const char *note = robot::gait_note(name);
+        json += std::string("{\"name\":\"") + name + "\",\"note\":\""
+              + json_escape(note ? note : "") + "\",\"continuous\":"
+              + (robot::gait_is_continuous(cmd) ? "true" : "false") + "}";
+    }
+    for (const skills::Entry &e : skills::all()) {
+        if (e.provides_gait.empty()) continue;
+        if (!first) json += ',';
+        first = false;
+        json += "{\"name\":\"" + json_escape(e.provides_gait)
+              + "\",\"continuous\":false,\"skill\":\"" + json_escape(e.slug) + "\"}";
+    }
+    json += "]}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json.c_str(), json.size());
+    return ESP_OK;
+}
+
+/* GET /v1/robot/look?yaw=-30..30&pitch=-20..20 — analog head look.
+ *
+ * GET with query parameters, not POST, because the app fires it from a
+ * thumbstick at ~12 Hz and a GET is one packet with no body to read. */
+static esp_err_t api_robot_look(httpd_req_t *req)
+{
+    float yaw = 0.0f, pitch = 0.0f;
+    char query[96] = {};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[16];
+        if (httpd_query_key_value(query, "yaw", val, sizeof(val)) == ESP_OK) {
+            yaw = std::strtof(val, nullptr);
+        }
+        if (httpd_query_key_value(query, "pitch", val, sizeof(val)) == ESP_OK) {
+            pitch = std::strtof(val, nullptr);
+        }
+    }
+    if (robot::master_active()) return send_pi_in_control(req);
+    robot::look_input(yaw, pitch);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, R"({"ok":true})", -1);
+    return ESP_OK;
+}
+
+/* /v1/robot/power — rest when unused (same JSON as mpv2-claw).
+ *
+ * GET  -> {"ok":true,"rest_after_s":300,"state":"holding","resting":false}
+ * POST {"rest_after_s":N}   0 = never rest; saved on the robot
+ * POST {"action":"rest"}    lie down and switch the servos off now
+ * POST {"action":"wake"}    stand back up */
+static void send_power_json(httpd_req_t *req)
+{
+    char resp[160];
+    std::snprintf(resp, sizeof(resp),
+                  R"({"ok":true,"rest_after_s":%lu,"state":"%s","resting":%s})",
+                  static_cast<unsigned long>(robot::rest_after()),
+                  robot::power_state_name(),
+                  robot::servos_resting() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, -1);
+}
+
+static esp_err_t api_robot_power_get(httpd_req_t *req)
+{
+    send_power_json(req);
+    return ESP_OK;
+}
+
+static esp_err_t api_robot_power_post(httpd_req_t *req)
+{
+    char buf[128] = {};
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "empty body", -1);
+        return ESP_OK;
+    }
+    buf[len] = 0;
+
+    const std::string action = json_get_str(buf, "action");
+    const int rest_after = json_get_int(buf, "rest_after_s", -1);
+
+    if (action == "rest") {
+        robot::rest_now();
+    } else if (action == "wake") {
+        robot::wake_servos();
+    } else if (rest_after >= 0) {
+        robot::set_rest_after(static_cast<uint32_t>(rest_after));
+    } else {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "expected rest_after_s or action rest|wake", -1);
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "POST /v1/robot/power  action=%s rest_after_s=%d",
+             action.c_str(), rest_after);
+    send_power_json(req);
     return ESP_OK;
 }
 
@@ -806,6 +1087,7 @@ static esp_err_t api_robot_joy(httpd_req_t *req)
     const float s = json_get_float(buf, "s", 0.0f);
     const float t = json_get_float(buf, "t", 0.0f);
 
+    if (robot::master_active()) return send_pi_in_control(req);
     robot::joy_input(f, s, t);
 
     httpd_resp_set_type(req, "application/json");
@@ -833,10 +1115,28 @@ static esp_err_t api_robot_status(httpd_req_t *req)
         n += std::snprintf(resp + n, sizeof(resp) - n, "%.1f%s",
                            robot::get_offset(i), (i < 12) ? "," : "");
     }
-    n += std::snprintf(resp + n, sizeof(resp) - n, "]}");
+    /* mpv2's field: "standalone", "monitor" or "slave" (the Raspberry Pi link). */
+    n += std::snprintf(resp + n, sizeof(resp) - n, R"(],"pi_link":"%s"})",
+                       pi_link::state_str());
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, -1);
+    return ESP_OK;
+}
+
+/* GET /v1/pi/status — the Raspberry Pi link, for the app and for debugging
+ * the wiring: host_pin shows the yellow wire (IO3), heartbeat the UART. Same
+ * fields as mpv2 / mpv2-claw. */
+static esp_err_t api_pi_status(httpd_req_t *req)
+{
+    char buf[1024];   // with the "rl" object (pi/rl_link.cc)
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (pi_link::status_json(buf, sizeof(buf)) < 0) {
+        httpd_resp_send(req, R"({"state":"standalone","in_control":false,"error":"pi link unavailable"})", -1);
+        return ESP_OK;
+    }
+    httpd_resp_send(req, buf, -1);
     return ESP_OK;
 }
 
@@ -1403,18 +1703,53 @@ static esp_err_t api_wifi_status(httpd_req_t *req)
         case StaState::Failed:       sta_state_str = "failed";       break;
     }
 
+    /* "pi": {"ip": "..."} -- empty when no Pi has reported in the last 6 s.
+     * The PWA shows a Pi section in Settings when this object is present. */
+    char pi_ip[16] = "";
+    (void)pi_link::ip(pi_ip, sizeof(pi_ip));
+
     char resp[512];
     std::snprintf(resp, sizeof(resp),
         R"({"ap":{"ssid":"%s","ip":"%s"})"
-        R"(,"sta":{"state":"%s","ssid":"%s","ip":"%s"}})",
+        R"(,"sta":{"state":"%s","ssid":"%s","ip":"%s"})"
+        R"(,"pi":{"ip":"%s"}})",
         wifi_ap_get_ssid(), AP_IP_ADDR,
-        sta_state_str, sta_ssid.c_str(), sta_ip.c_str());
+        sta_state_str, sta_ssid.c_str(), sta_ip.c_str(), pi_ip);
 
     ESP_LOGI(TAG, "GET  /v1/wifi/status  ap_ssid=%s sta=%s ssid=%s ip=%s",
              wifi_ap_get_ssid(), sta_state_str, sta_ssid.c_str(), sta_ip.c_str());
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, -1);
+    return ESP_OK;
+}
+
+/* GET /v1/wifi/scan — networks the robot can hear, strongest first.
+ *
+ * {"ok":true,"networks":[{"ssid","rssi","bars":1..3,"secure":bool},...]}
+ * or {"ok":false,"error":"busy"} while the STA is mid-join (the app retries).
+ * Blocks this request for about a second; see wifi_sta_scan(). */
+static esp_err_t api_wifi_scan(httpd_req_t *req)
+{
+    std::vector<ScanResult> nets;
+    const esp_err_t err = wifi_sta_scan(nets);
+    httpd_resp_set_type(req, "application/json");
+    if (err != ESP_OK) {
+        const std::string resp = std::string("{\"ok\":false,\"error\":\"")
+            + (err == ESP_ERR_WIFI_STATE ? "busy" : esp_err_to_name(err)) + "\"}";
+        httpd_resp_send(req, resp.c_str(), resp.size());
+        return ESP_OK;
+    }
+    std::string json = "{\"ok\":true,\"networks\":[";
+    for (std::size_t i = 0; i < nets.size(); ++i) {
+        if (i) json += ',';
+        json += "{\"ssid\":\"" + json_escape(nets[i].ssid)
+              + "\",\"rssi\":" + std::to_string(nets[i].rssi)
+              + ",\"bars\":" + std::to_string(nets[i].bars)
+              + ",\"secure\":" + (nets[i].secure ? "true" : "false") + "}";
+    }
+    json += "]}";
+    httpd_resp_send(req, json.c_str(), json.size());
     return ESP_OK;
 }
 
@@ -1627,9 +1962,11 @@ static esp_err_t api_lua_run(httpd_req_t *req)
     }
     output[0] = '\0';
 
+    // Saved files are routines (walk, dance) and get the chat worker's
+    // minute; inline snippets keep 5 s. Both are now enforced.
     esp_err_t err;
     if (!path.empty()) {
-        err = lua_run_file(path.c_str(), output, 2048, 5000);
+        err = lua_run_file(path.c_str(), output, 2048, 60000);
     } else {
         err = lua_run_string(script.c_str(), output, 2048, 5000);
     }
@@ -2088,10 +2425,13 @@ bool start_http_server()
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    // 41 register_api() + 6 register_static() + 2 websockets + 4 marketplace
-    // wildcard methods = 53. See the note on register_uri() - this number is
-    // load-bearing, and being one short deletes a route without saying so.
-    config.max_uri_handlers = 64;
+    // 51 register_api() + up to 12 register_static() + 2 websockets + 4
+    // marketplace wildcard methods + 5 display routes (http_display.cc) + 6
+    // voice routes (http_voice.cc) = 80.
+    // See the note on register_uri() - this number is load-bearing, and being
+    // one short deletes a route without saying so. Each slot is a pointer, so
+    // the headroom is cheap.
+    config.max_uri_handlers = 96;
     // LWIP has CONFIG_LWIP_MAX_SOCKETS (16) total.  HTTPD also reserves 3
     // internal sockets on top of max_open_sockets.  At 5, HTTPD uses at most
     // 5+3=8, GUARANTEEING ~8 sockets stay free for OUTBOUND use (upstream cloud
@@ -2122,7 +2462,8 @@ bool start_http_server()
 
     // Start the dead-connection reaper so leaked port-80 sockets can't
     // accumulate and exhaust the pool.
-    xTaskCreate(socket_reaper_task, "sock_reaper", 3072, nullptr, 3, nullptr);
+    xTaskCreateWithCaps(socket_reaper_task, "sock_reaper", 3072, nullptr, 3, nullptr,
+                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);   // internal RAM is for DMA
 
     // ── Helper to register a static file handler ──
     auto register_static = [&](const char *uri) {
@@ -2146,13 +2487,11 @@ bool start_http_server()
     register_static("/manifest.json");
     register_static("/sw.js");
     register_static("/favicon.ico");
-#ifdef CONFIG_PWA_DESIGN_REDESIGN
     register_static("/md.svg");
     register_static("/eye-open.svg");
     register_static("/eye-close.svg");
-#else
-    register_static("/icon.svg");
-#endif
+    register_static("/m-pupper3d.js");         // lazily loaded three.js viewer
+    register_static("/pupper_model.json");     // three.js calibration model
 
     // ── Register WebSocket endpoint (telemetry) ──
     httpd_uri_t ws_uri = {
@@ -2186,11 +2525,20 @@ bool start_http_server()
     register_api(s_server, "GET",  "/v1/fs/read",       HTTP_GET,  api_fs_read);
     register_api(s_server, "POST", "/v1/fs/delete",     HTTP_POST, api_fs_delete);
     register_api(s_server, "POST", "/v1/skills/upload", HTTP_POST, api_skills_upload);
+    // ── Ported from mpv2-claw (see .cursor/PORT_NOTES.md) ──
+    register_api(s_server, "GET",  "/v1/skills/status",   HTTP_GET,  api_skills_status);
+    register_api(s_server, "POST", "/v1/skills/stop",     HTTP_POST, api_skills_stop);
+    register_api(s_server, "GET",  "/v1/skills/registry", HTTP_GET,  api_skills_registry);
 
     // ── Register robot control API endpoints ──
     register_api(s_server, "POST", "/v1/robot/gait",           HTTP_POST, api_robot_gait);
     register_api(s_server, "POST", "/v1/robot/joy",            HTTP_POST, api_robot_joy);
     register_api(s_server, "GET",  "/v1/robot/status",         HTTP_GET,  api_robot_status);
+    // ── Ported from mpv2-claw (see .cursor/PORT_NOTES.md) ──
+    register_api(s_server, "GET",  "/v1/robot/moves",          HTTP_GET,  api_robot_moves);
+    register_api(s_server, "GET",  "/v1/robot/look",           HTTP_GET,  api_robot_look);
+    register_api(s_server, "GET",  "/v1/robot/power",          HTTP_GET,  api_robot_power_get);
+    register_api(s_server, "POST", "/v1/robot/power",          HTTP_POST, api_robot_power_post);
     register_api(s_server, "POST", "/v1/robot/config",         HTTP_POST, api_robot_config);
     register_api(s_server, "GET",  "/v1/robot/config",         HTTP_GET,  api_robot_get_config);
     register_api(s_server, "POST", "/v1/robot/calibrate",      HTTP_POST, api_robot_calibrate);
@@ -2216,10 +2564,18 @@ bool start_http_server()
 
     // ── Register WiFi config API endpoints ──
     register_api(s_server, "GET",  "/v1/wifi/status",          HTTP_GET,  api_wifi_status);
+    register_api(s_server, "GET",  "/v1/pi/status",            HTTP_GET,  api_pi_status);
+    register_api(s_server, "GET",  "/v1/wifi/scan",            HTTP_GET,  api_wifi_scan);
     register_api(s_server, "POST", "/v1/wifi/connect",         HTTP_POST, api_wifi_connect);
     register_api(s_server, "POST", "/v1/wifi/disconnect",      HTTP_POST, api_wifi_disconnect);
     register_api(s_server, "POST", "/v1/wifi/forget",          HTTP_POST, api_wifi_forget);
     register_api(s_server, "POST", "/v1/wifi/ap-config",       HTTP_POST, api_wifi_ap_config);
+
+    // ── The screen (ported from mpv2-claw): 5 routes, in http_display.cc ──
+    network::register_display_routes(s_server, register_uri);
+
+    // ── AI & Voice (ported from mpv2-claw): up to 6 routes, in http_voice.cc ──
+    network::register_voice_routes(s_server, register_uri);
 
     // ── Register Lua async enqueue endpoint (non-blocking) ──
     register_api(s_server, "POST", "/v1/lua/enqueue",          HTTP_POST, api_lua_enqueue);

@@ -63,3 +63,8 @@ i2c_master_bus_handle_t i2c_bus() {
 }
 
 }  // namespace hal
+
+extern "C" i2c_master_bus_handle_t hal_shared_i2c_bus(void)
+{
+    return hal::i2c_bus();
+}

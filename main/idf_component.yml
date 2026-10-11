@@ -11,6 +11,43 @@ dependencies:
   joltwallet/littlefs: ^1.22.1
   espressif/lua: ^5.5.0
 
+  ## ── Audio (local-claw): ES7210 microphone ADC driver + the esp_codec_dev
+  ## framework around it. The MAX98357A needs no codec at all; audio/
+  ## mpx_audio.c writes to the I2S TX channel directly. Same version line
+  ## mpv2-claw builds with (1.6.x).
+  espressif/esp_codec_dev: ^1.6.2
+
+  ## ── Display (local-claw): ST7789 face + GIFs ────────────────
+  ## LVGL pinned to the 9.5 line mpv2-claw's face code was written against
+  ## (it uses LVGL's bundled AnimatedGIF decoder directly, whose header path
+  ## and API moved between minor versions). esp_lvgl_port does the LVGL
+  ## task, tick and esp_lcd flush; the ST7789 driver itself is in ESP-IDF.
+  ## esp_new_jpeg decodes the Raspberry Pi's camera frames (pi_video ->
+  ## cap_display_show_jpeg); without it that call answers NOT_SUPPORTED.
+  lvgl/lvgl: ">=9.5.0,<9.6.0"
+  espressif/esp_lvgl_port: ^2.6.0
+  espressif/esp_new_jpeg: ^1.0.2
+
+  ## ── Voice (local-claw): wake word, the voice gateway, music ──
+  ## Pulled in unconditionally, not gated on CONFIG_APP_VOICE_ENABLE: the
+  ## component manager evaluates `rules:` from build/config/sdkconfig.json,
+  ## which does not exist on the first configure pass, and mpv2-claw spent
+  ## a note the length of this file on the two-pass dance that follows. A
+  ## voice-off build compiles these and links none of them (main's sources
+  ## are what is gated, in CMakeLists.txt).
+  ##
+  ## esp-sr: AFE (AEC + VAD) and WakeNet ("Hi ESP"). Its models are packed
+  ## into srmodels.bin and flashed to the `model` partition (CONFIG_MODEL_IN_FLASH).
+  espressif/esp-sr: ^2.5.2
+  ## The xiaozhi author's Opus wrappers: libopus plus OpusEncoderWrapper /
+  ## OpusDecoderWrapper. The far end is a xiaozhi-protocol server that
+  ## expects exactly this framing. ~2.4.0 as mpv2-claw pins it.
+  78/esp-opus-encoder: "~2.4.0"
+  espressif/esp_websocket_client: ^1.4.0
+  ## Internet radio for cap_music: HTTP(S) in, MP3/AAC/M4A/FLAC/WAV decoded,
+  ## resampled to 16 kHz mono by its own converters (sdkconfig.defaults).
+  espressif/esp_audio_simple_player: ^0.9.6
+
   ## ── IMU: BMI270 + BMM150 ─────────────────────────────────
   ##
   ## The BMI270 will not produce a sample until an 8 KB Bosch configuration
@@ -33,3 +70,36 @@ dependencies:
   ## wrapper only tunnels register reads and never sets up the BMI270's AUX
   ## interface, which is what the magnetometer actually needs.
   tangyumei3535/bmm150_sensorapi: ^1.0.0
+
+  ## ── The on-device agent (local-claw, Phase 5): ESP-Claw ──────
+  ## third-party/esp-claw is Espressif's agent framework, vendored the way
+  ## mpv2-claw carries it (its components/ tree only; see
+  ## .cursor/PORT_NOTES.md for what was left out and why). Never edit it.
+  ## app_claw is the application shell: it pulls in the agent core, the
+  ## capability registry, the event router, sessions, memory, skills and
+  ## every capability that is switched on in sdkconfig (its own
+  ## idf_component.yml gates each one on APP_CLAW_CAP_*). The rest are the
+  ## pieces main/ calls directly, declared so they are this component's
+  ## requirements rather than something app_claw happens to bring along:
+  ##   http_reuse    claw_core REQUIRES it by name and does not depend on
+  ##                 it in its manifest; the app has to supply it.
+  ##   claw_core     claw_paths_set(): where the agent's files live.
+  ##   claw_cap      the descriptor types main/agent/agent_caps.cc fills.
+  ##   cap_im_local  the "web" chat channel the PWA's chat is bridged to.
+  ##   claw_event_router  its header, for the stack-size override in
+  ##                 main/agent/claw_overrides.c.
+  ## Declared unconditionally, like the voice stack above: `rules:` are
+  ## evaluated from sdkconfig.json, which the first configure pass does not
+  ## have, and main's REQUIRES names them.
+  app_claw:
+    path: ../third-party/esp-claw/components/common/app_claw
+  http_reuse:
+    path: ../third-party/esp-claw/components/common/http_reuse
+  claw_core:
+    path: ../third-party/esp-claw/components/claw_modules/claw_core
+  claw_cap:
+    path: ../third-party/esp-claw/components/claw_modules/claw_cap
+  cap_im_local:
+    path: ../third-party/esp-claw/components/claw_capabilities/cap_im_local
+  claw_event_router:
+    path: ../third-party/esp-claw/components/claw_modules/claw_event_router

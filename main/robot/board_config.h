@@ -15,26 +15,26 @@
  *   IO0   BOOT button (SW2)          IO21  WAKE button (SW3)
  *   IO1   I2C SDA  (1k pull-up)      IO38  I2S MCLK   -> ES7210 MCLK
  *   IO2   I2C SCL  (1k pull-up)      IO14  I2S BCLK   -> ES7210 + MAX98357
- *   IO3   PI_3 (J3 pin 5)            IO13  I2S WS     -> ES7210 + MAX98357
+ *   IO3   PI_3 host-present          IO13  I2S WS     -> ES7210 + MAX98357
  *   IO4   servo SPI CS3 (CN5)        IO12  I2S DI     <- ES7210 SDOUT
  *   IO5   servo SPI CS4 (CN6)        IO45  I2S DO     -> MAX98357 DIN
  *   IO6   servo SPI MOSI             IO39  LCD DC
  *   IO7   servo SPI CS2 (CN4)        IO40  LCD MOSI
- *   IO8   PI_2 (J3 pin 4)            IO41  LCD SCK
+ *   IO8   PI_2 UART RX               IO41  LCD SCK
  *   IO9   LCD CS                     IO42  LCD backlight (via Q2)
  *   IO10  IMU INT1 (BMI270)          IO43  U0TXD   (console)
- *   IO11  PI_4 (J3 pin 6)            IO44  U0RXD   (console)
+ *   IO11  PI_4 slave-out             IO44  U0RXD   (console)
  *   IO15  servo SPI CS1 (CN3)        IO19  TP3 (also USB D-)
  *   IO16  servo SPI CLK              IO20  TP4 (also USB D+)
  *   IO17  servo SPI MISO             IO46  unused
- *   IO18  PI_1 (J3 pin 3)            IO47/IO48 unused
+ *   IO18  PI_1 UART TX               IO47/IO48 unused
  *
  * Not on a GPIO: RESET is the module EN pin (SW1 + the CH340 DTR/RTS pair),
  * and the MAX98357A SD_MODE is strapped high through a 1 M resistor, so the
  * amplifier is always enabled and has no shutdown line.
  *
  * ── What this board is NOT ───────────────────────────────────────────────
- * The LCD, the audio codec and the Pi header above are fitted on the PCB but
+ * The LCD and the audio codec above are fitted on the PCB but
  * this firmware does not drive them: md-mpx-dog is headless and uses the PWA
  * over Wi-Fi as its UI. They are listed here because their pins are real and
  * claimed — 9, 12, 13, 14, 38, 39, 40, 41 and 45 must not be reused by the
@@ -168,21 +168,37 @@
 #define IMU_BMM150_I2C_ADDR       0x10   /* 7-bit, on the BMI270 aux bus */
 #define IMU_INT1_PIN              GPIO_NUM_10
 
-/* ───────────────────── Raspberry Pi 5 header (J3) ───────────────
- * J3 carries switched VBUS, GND and four signals. PI_1/PI_2 are a UART pair;
- * PI_3/PI_4 are spare and left as plain GPIO. Every line is ESD-clamped but
- * NOT level-shifted — the Pi 5 GPIO bank is 3V3, same as the ESP32-S3.
+/* ───────────────────── Raspberry Pi 5 header (J-PI) ───────────────
+ * Six-pin header, sheet 02 "外部接口 (PI or 多用)". Every signal line is
+ * ESD-clamped (D6/D7/D9/D10) but NOT level-shifted — the Pi 5 GPIO bank is
+ * 3V3, same as the ESP32-S3.
  *
- * The robot does not talk to a Pi in this build: there is no pi/ link layer.
- * The pins are recorded so nothing else claims them, and so a link can be
- * added later without re-deriving the map. Note PI_2 is IO8, which was the
- * servo power-enable on the old board — it is not one here.
+ *   pin  net        wire    ESP role                 Pi 5 header
+ *   1    GND        black   ground                   pin 6 / 9 (GND)
+ *   2    IO18_PI_1  blue    UART1 TX  (ESP -> Pi)    pin 10, GPIO15 RXD
+ *   3    IO8_PI_2   green   UART1 RX  (Pi -> ESP)    pin 8,  GPIO14 TXD
+ *   4    IO3_PI_3   yellow  HOST_PRESENT input       pin 11, GPIO17 (Pi drives)
+ *   5    IO11_PI_4  white   ESP_SLAVE output         pin 13, GPIO27 (Pi reads)
+ *   6    VBUS (5 V) red     5 V through C19 filter   pin 2 / 4 (5V)
+ *
+ * The link layer is pi/pi_link.cc, the wire format pi/pi_protocol.h.
+ *
+ * HOST_PRESENT is pulled down in the ESP, so an absent or unbooted Pi reads
+ * as "no host". IO3 is a strapping pin (JTAG source select), but it is only
+ * sampled when the STRAP_JTAG_SEL eFuse is burned, which it is not on this
+ * board, so a Pi holding it high at ESP reset is harmless.
+ *
+ * Note PI_2 is IO8, which was the servo power-enable on the old board — it is
+ * not one here.
  */
 #define PI_UART_PORT              UART_NUM_1
 #define PI_UART_TX_PIN            GPIO_NUM_18   /* PI_1 - ESP TX -> Pi RX */
 #define PI_UART_RX_PIN            GPIO_NUM_8    /* PI_2 - Pi TX -> ESP RX */
-#define PI_SPARE_3_PIN            GPIO_NUM_3    /* PI_3 */
-#define PI_SPARE_4_PIN            GPIO_NUM_11   /* PI_4 */
+#define PI_HOST_PRESENT_PIN       GPIO_NUM_3    /* PI_3 - Pi holds HIGH while ROS owns the robot */
+#define PI_SLAVE_OUT_PIN          GPIO_NUM_11   /* PI_4 - ESP drives HIGH while in slave mode   */
+/* Old names, kept so nothing out of tree breaks. */
+#define PI_SPARE_3_PIN            PI_HOST_PRESENT_PIN
+#define PI_SPARE_4_PIN            PI_SLAVE_OUT_PIN
 
 /* ─────────────────────── Buttons ───────────────────────
  * SW2/SW3 on the board. Nothing reads them today — the Mini Pupper 2 build
@@ -190,6 +206,25 @@
  * (hold WAKE at reset) has a pin to use. Note IO0 is a strapping pin: it must
  * read high at boot, which the button's pull-up provides.
  */
+/* ── Display: ST7789 2.0" 240x320 on J4 (mp4-claw boards/mp4_esp32_core) ──
+ * SPI3, not SPI2: SPI2 carries the servo boards and needs its six CS lines. */
+#define LCD_SPI_HOST              SPI3_HOST
+#define LCD_SPI_MOSI_PIN          GPIO_NUM_40   /* IO40_LCD_MOSI */
+#define LCD_SPI_SCK_PIN           GPIO_NUM_41   /* IO41_LCD_SCK  */
+#define LCD_SPI_CS_PIN            GPIO_NUM_9    /* IO9_LCD_CS    */
+#define LCD_DC_PIN                GPIO_NUM_39   /* IO39_LCD_DC   */
+#define LCD_BACKLIGHT_PIN         GPIO_NUM_42   /* IO42_LCD_BL via Q2 (P-FET: inverted PWM) */
+/* LCD reset is the board RESET net - there is no GPIO for it. */
+
+/* ── Audio: ES7210 mic ADC (I2C 0x41) + MAX98357A amp, one duplex I2S0 ── */
+#define AUDIO_I2S_PORT            I2S_NUM_0
+#define AUDIO_I2S_MCLK_PIN        GPIO_NUM_38   /* IO38_I2S_MCK */
+#define AUDIO_I2S_BCLK_PIN        GPIO_NUM_14   /* IO14_I2S_BCK */
+#define AUDIO_I2S_WS_PIN          GPIO_NUM_13   /* IO13_I2S_WS  */
+#define AUDIO_I2S_DIN_PIN         GPIO_NUM_12   /* IO12_I2S_DI  (ES7210 -> ESP)    */
+#define AUDIO_I2S_DOUT_PIN        GPIO_NUM_45   /* IO45_I2S_DO  (ESP -> MAX98357A) */
+#define AUDIO_ES7210_ADDR_8BIT    0x82          /* = 7-bit 0x41, as mp4-claw ships */
+
 #define BOOT_BUTTON_GPIO          GPIO_NUM_0    /* SW2 */
 #define WAKE_BUTTON_GPIO          GPIO_NUM_21   /* SW3 */
 

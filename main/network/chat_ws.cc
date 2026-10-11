@@ -15,6 +15,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
@@ -27,6 +28,7 @@
 
 #include "fs/littlefs_manager.h"
 
+#include "agent/agent_runtime.h"
 #include "robot/robot.h"
 #include "lua/lua_vm.h"
 
@@ -85,6 +87,7 @@ struct PwaWsClient {
     size_t frag_len = 0;
     bool fragmenting = false;
     uint32_t reg_seq = 0;       // registration order — used to evict the oldest
+    int step_seq = 0;           // local brain: progress notes sent this turn
 };
 
 // Monotonic counter so we can identify the oldest registered client.
@@ -116,6 +119,7 @@ static constexpr size_t REPLY_TEXT_MAX = 2048;
 static PwaWsClient *get_pwa_client(httpd_req_t *req);
 static void release_pwa_client(httpd_req_t *req);
 static void broadcast_to_pwa(const char *session_id, const char *json_text);
+static void send_reply_to_pwa(const char *session_id, const char *text);
 
 /* ── WebSocket protocol helpers ───────────────────────────────
  *
@@ -466,7 +470,7 @@ static void lua_worker_task(void *arg)
         std::free(step_json);
         std::free(lua_output);
         std::free(done_json);
-        vTaskDelete(nullptr);
+        vTaskSuspend(nullptr);   // created WithCaps: never vTaskDelete
         return;
     }
 
@@ -834,42 +838,12 @@ static bool process_downstream_frame(const uint8_t *frame, size_t len)
             }
         }
 
-        // Forward full reply to PWA via broadcast — chunked
-        // to avoid large buffers and TCP send pressure.
-        //
-        // If the escaped text fits in ~2 KB, send a single chat_reply.
-        // Otherwise split into chat_reply_chunk messages (seq/total)
-        // that the PWA reassembles on the receiving end.
-        std::string escaped = json_escape(reply_text);
-        constexpr size_t SINGLE_MAX = 2048;
-        constexpr size_t CHUNK_TEXT = 1536;   // text bytes per chunk
-        constexpr size_t CHUNK_BUF = 2048;    // total JSON buffer per chunk
-
-        // Quick check: total length if sent as one message
-        size_t single_len = escaped.size() + 120;  // rough JSON overhead
-        if (single_len < SINGLE_MAX) {
-            // ── Single message — no chunking needed ─────────
-            char buf[SINGLE_MAX];
-            int n = std::snprintf(buf, sizeof(buf),
-                R"({"type":"chat_reply","text":"%s","commands":[],"session_id":"%s"})",
-                escaped.c_str(), session_id.c_str());
-            if (n > 0) broadcast_to_pwa(session_id.c_str(), buf);
-        } else {
-            // ── Chunked delivery ─────────────────────────────
-            size_t total = (escaped.size() + CHUNK_TEXT - 1) / CHUNK_TEXT;
-            ESP_LOGI(TAG, "Splitting chat_reply into %zu chunks", total);
-            for (size_t seq = 0; seq < total; ++seq) {
-                size_t off = seq * CHUNK_TEXT;
-                size_t len = std::min(CHUNK_TEXT, escaped.size() - off);
-                std::string piece = escaped.substr(off, len);
-
-                char buf[CHUNK_BUF];
-                int n = std::snprintf(buf, sizeof(buf),
-                    R"({"type":"chat_reply_chunk","text":"%s","seq":%zu,"total":%zu,"session_id":"%s"})",
-                    piece.c_str(), seq, total, session_id.c_str());
-                if (n > 0) broadcast_to_pwa(session_id.c_str(), buf);
-            }
-        }
+        // Forward the full reply to the PWA: one chat_reply, or
+        // chat_reply_chunk frames the PWA reassembles (the same sender the
+        // local brain uses, which splits on UTF-8 boundaries -- the old
+        // splitter cut the escaped text at fixed byte offsets and could end
+        // a chunk inside a \uXXXX or a multi-byte character).
+        send_reply_to_pwa(session_id.c_str(), reply_text.c_str());
     }
 
     cJSON_Delete(root);
@@ -1018,6 +992,161 @@ void broadcast_to_pwa(const char *session_id, const char *json_text)
     }
 }
 
+/* ── Replies and steps to the PWA, whichever brain they come from ──────
+ *
+ * The PWA's frames (ChatView.svelte):
+ *   {"type":"chat_reply","text","commands":[],"session_id"}       one frame
+ *   {"type":"chat_reply_chunk","text","seq","total","session_id"} or several
+ *   {"type":"step","text","seq","total","session_id"}             progress
+ *
+ * A reply longer than one WebSocket frame comfortably carries is split on
+ * UTF-8 boundaries BEFORE escaping, so no chunk ends inside a multi-byte
+ * character or an escape sequence (the PWA JSON-parses every chunk on its
+ * own, then concatenates the texts). Two passes, because the PWA allocates
+ * "total" slots on the first chunk it sees and backing off UTF-8
+ * boundaries makes chunks uneven. mpv2-claw's http_server_mpx_chat_api.c.
+ */
+static constexpr size_t REPLY_SINGLE_MAX = 1700;   /* text bytes sent as one chat_reply */
+static constexpr size_t REPLY_CHUNK_TEXT = 1200;   /* text bytes per chat_reply_chunk */
+static constexpr size_t REPLY_FRAME_BUF  = 4096;   /* escaped text + envelope */
+
+/* Longest prefix of s of at most max_len bytes that ends on a character
+ * boundary (never inside a UTF-8 sequence). */
+static size_t utf8_prefix_len(const char *s, size_t max_len)
+{
+    const size_t len = std::strlen(s);
+    if (len <= max_len) return len;
+    size_t cut = max_len;
+    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) cut--;
+    return cut;
+}
+
+static void send_reply_to_pwa(const char *session_id, const char *text)
+{
+    if (!session_id || !text) return;
+    const size_t len = std::strlen(text);
+    char *buf = static_cast<char *>(std::malloc(REPLY_FRAME_BUF));
+    if (!buf) return;
+
+    if (len <= REPLY_SINGLE_MAX) {
+        const std::string escaped = json_escape(text);
+        const int n = std::snprintf(buf, REPLY_FRAME_BUF,
+            R"({"type":"chat_reply","text":"%s","commands":[],"session_id":"%s"})",
+            escaped.c_str(), session_id);
+        if (n > 0 && static_cast<size_t>(n) < REPLY_FRAME_BUF) broadcast_to_pwa(session_id, buf);
+        std::free(buf);
+        return;
+    }
+
+    size_t total = 0;
+    for (size_t off = 0; off < len; total++) {
+        const size_t take = utf8_prefix_len(text + off, REPLY_CHUNK_TEXT);
+        if (take == 0) break;
+        off += take;
+    }
+    ESP_LOGI(TAG, "reply of %u bytes chunked into %u frames", (unsigned)len, (unsigned)total);
+    size_t seq = 0;
+    for (size_t off = 0; off < len && seq < total; seq++) {
+        const size_t take = utf8_prefix_len(text + off, REPLY_CHUNK_TEXT);
+        if (take == 0) break;
+        const std::string escaped = json_escape(std::string(text + off, take));
+        off += take;
+        const int n = std::snprintf(buf, REPLY_FRAME_BUF,
+            R"({"type":"chat_reply_chunk","text":"%s","seq":%u,"total":%u,"session_id":"%s"})",
+            escaped.c_str(), (unsigned)seq, (unsigned)total, session_id);
+        if (n > 0 && static_cast<size_t>(n) < REPLY_FRAME_BUF) broadcast_to_pwa(session_id, buf);
+    }
+    std::free(buf);
+}
+
+static void send_step_to_pwa(const char *session_id, const char *text, int seq, int total)
+{
+    if (!session_id || !text) return;
+    const std::string escaped = json_escape(text);
+    char *buf = static_cast<char *>(std::malloc(REPLY_FRAME_BUF));
+    if (!buf) return;
+    const int n = std::snprintf(buf, REPLY_FRAME_BUF,
+        R"({"type":"step","text":"%s","seq":%d,"total":%d,"session_id":"%s","ts":%lld})",
+        escaped.c_str(), seq, total, session_id,
+        static_cast<long long>(esp_timer_get_time() / 1000000LL));
+    if (n > 0 && static_cast<size_t>(n) < REPLY_FRAME_BUF) broadcast_to_pwa(session_id, buf);
+    std::free(buf);
+}
+
+/* ── The local brain: the on-device agent ──────────────────────────────
+ *
+ * Phase 5. A conversation whose frames carry "brain":"local" goes to
+ * ESP-Claw's agent on the robot (main/agent) instead of the cloud: the text
+ * is handed to agent::submit() with the conversation id as the agent's
+ * session, and everything the agent says comes back through
+ * on_agent_outbound(), on the agent's task. Progress notes become "step"
+ * frames (the running count as both seq and total: the agent decides how
+ * many rounds it needs as it goes), the answer a chat_reply, after which
+ * the step counter starts over. The brain is the PWA's per-conversation
+ * choice, fixed when the conversation starts; the robot keeps no state for
+ * it beyond this counter.
+ */
+static constexpr const char *BRAIN_LOCAL_MARK = "\"brain\":\"local\"";
+
+static bool input_wants_local_brain(const char *input)
+{
+    return input && std::strstr(input, BRAIN_LOCAL_MARK) != nullptr;
+}
+
+/* The step counter per session, kept on the connected client(s) bound to
+ * it. A session nobody is connected to counts from 1 each time. */
+static int next_step_seq(const char *session_id)
+{
+    int seq = 1;
+    if (!s_pwa_mutex) return seq;
+    xSemaphoreTake(s_pwa_mutex, portMAX_DELAY);
+    for (size_t i = 0; i < MAX_PWA_WS_CLIENTS; ++i) {
+        if (s_pwa_clients[i].fd >= 0 && std::strcmp(s_pwa_clients[i].session_id, session_id) == 0) {
+            seq = ++s_pwa_clients[i].step_seq;
+        }
+    }
+    xSemaphoreGive(s_pwa_mutex);
+    return seq;
+}
+
+static void reset_step_seq(const char *session_id)
+{
+    if (!s_pwa_mutex) return;
+    xSemaphoreTake(s_pwa_mutex, portMAX_DELAY);
+    for (size_t i = 0; i < MAX_PWA_WS_CLIENTS; ++i) {
+        if (s_pwa_clients[i].fd >= 0 && std::strcmp(s_pwa_clients[i].session_id, session_id) == 0) {
+            s_pwa_clients[i].step_seq = 0;
+        }
+    }
+    xSemaphoreGive(s_pwa_mutex);
+}
+
+static void on_agent_outbound(const char *session_id, const char *text, bool is_step)
+{
+    if (is_step) {
+        const int seq = next_step_seq(session_id);
+        send_step_to_pwa(session_id, text, seq, seq);
+        return;
+    }
+    reset_step_seq(session_id);
+    send_reply_to_pwa(session_id, text);
+}
+
+/* Why the local brain cannot take a message right now, for the PWA. */
+static const char *local_brain_refusal(esp_err_t err)
+{
+    if (!agent::available()) {
+        return "This robot's firmware has no on-device agent; start a new conversation with the cloud brain.";
+    }
+    if (!agent::running()) {
+        return "The robot's agent did not start (see the robot's log); start a new conversation with the cloud brain.";
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        return "AI is off on this robot. Turn it on in Settings > AI & Voice.";
+    }
+    return "The robot's agent did not accept the message.";
+}
+
 /* ── Upstream connection management task ─────────────────────
  *
  * Connects to the cloud ingress server via WebSocket, sends
@@ -1032,14 +1161,14 @@ static void upstream_task(void *arg)
     auto *recv_buf = static_cast<uint8_t *>(std::malloc(4096));
     if (!recv_buf) {
         ESP_LOGE(TAG, "OOM for recv buffer");
-        vTaskDelete(nullptr);
+        vTaskSuspend(nullptr);   // created WithCaps: never vTaskDelete
         return;
     }
 
     if (IS_ECHO_MODE()) {
         ESP_LOGI(TAG, "Upstream task: echo mode — no cloud connection needed");
         std::free(recv_buf);
-        vTaskDelete(nullptr);
+        vTaskSuspend(nullptr);   // created WithCaps: never vTaskDelete
         return;
     }
 
@@ -1254,6 +1383,11 @@ static void upstream_task(void *arg)
 
 bool init_chat_pipeline()
 {
+    // Bind the local agent before allocating any optional chat-pipeline
+    // resources. If a later allocation fails, the agent must not silently
+    // fall back to logging replies instead of delivering them to the PWA.
+    agent::set_outbound(on_agent_outbound);
+
     // ── Create socket mutex ────────────────────────────────────
     s_sock_mutex = xSemaphoreCreateMutex();
     if (!s_sock_mutex) {
@@ -1307,16 +1441,22 @@ bool init_chat_pipeline()
     }
 
     // ── Spawn Lua worker task ──────────────────────────────────
-    BaseType_t rv = xTaskCreatePinnedToCore(
-        lua_worker_task, "chat_lua", 8192, nullptr, 8, nullptr, 0);
+    // Both chat tasks on PSRAM stacks (XIP is on, and the agent already does
+    // TLS from PSRAM stacks): 16 KB of internal RAM back for the microphone.
+    // They never vTaskDelete() themselves (a WithCaps task must not): the
+    // early exits suspend instead.
+    BaseType_t rv = xTaskCreatePinnedToCoreWithCaps(
+        lua_worker_task, "chat_lua", 8192, nullptr, 8, nullptr, 0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (rv != pdPASS) {
         ESP_LOGE(TAG, "Failed to create Lua worker task");
         return false;
     }
 
     // ── Spawn upstream connection task ─────────────────────────
-    rv = xTaskCreatePinnedToCore(
-        upstream_task, "chat_upstream", 8192, nullptr, 8, nullptr, 0);
+    rv = xTaskCreatePinnedToCoreWithCaps(
+        upstream_task, "chat_upstream", 8192, nullptr, 8, nullptr, 0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (rv != pdPASS) {
         ESP_LOGE(TAG, "Failed to create upstream task");
         return false;
@@ -1684,11 +1824,16 @@ esp_err_t chat_ws_handler(httpd_req_t *req)
             client->session_id[s_idx] = 0;
         }
 
+        // Which brain this conversation uses: "brain":"local" is the
+        // on-device agent; anything else (including an older PWA that sends
+        // no brain at all) is the cloud, as before.
+        const bool local_brain = input_wants_local_brain(input);
+
         // ── Handle session_reset ─────────────────────────────
         if (std::strstr(input, "\"session_reset\"")) {
-            ESP_LOGI(TAG, "Session reset from PWA (session=%s)",
-                     client ? client->session_id : "?");
-            if (!IS_ECHO_MODE()) {
+            ESP_LOGI(TAG, "Session reset from PWA (session=%s, brain=%s)",
+                     client ? client->session_id : "?", local_brain ? "local" : "cloud");
+            if (!IS_ECHO_MODE() && !local_brain) {
                 // Forward upstream
                 size_t frame_len = 0;
                 uint8_t *frame = build_upstream_frame(
@@ -1755,6 +1900,38 @@ esp_err_t chat_ws_handler(httpd_req_t *req)
             ack_pkt.len = std::strlen(ack);
             ack_pkt.type = HTTPD_WS_TYPE_TEXT;
             httpd_ws_send_frame(req, &ack_pkt);
+            return ESP_OK;
+        }
+
+        /* ── LOCAL BRAIN: the on-device agent ─────────────────── */
+        if (local_brain) {
+            const char *session = client ? client->session_id : "";
+            char *text = nullptr;
+            if (cJSON *root = cJSON_Parse(input)) {
+                const cJSON *t = cJSON_GetObjectItem(root, "text");
+                if (cJSON_IsString(t) && t->valuestring[0]) text = strdup(t->valuestring);
+                cJSON_Delete(root);
+            }
+            const char *problem = nullptr;
+            if (!text) {
+                problem = "Nothing to send: the message has no text.";
+            } else if (!session[0]) {
+                problem = "The message has no session_id.";
+            } else {
+                if (client) client->step_seq = 0;
+                const esp_err_t err = agent::submit(session, text);
+                if (err != ESP_OK) problem = local_brain_refusal(err);
+            }
+            std::free(text);
+
+            std::string frame = problem
+                ? std::string(R"({"type":"error","text":")") + json_escape(problem) + R"("})"
+                : std::string(R"({"type":"ack","status":"sent"})");
+            httpd_ws_frame_t pkt{};
+            pkt.payload = reinterpret_cast<uint8_t *>(frame.data());
+            pkt.len = frame.size();
+            pkt.type = HTTPD_WS_TYPE_TEXT;
+            httpd_ws_send_frame(req, &pkt);
             return ESP_OK;
         }
 

@@ -2,6 +2,9 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
+
+#include "esp_err.h"
 
 namespace network {
 
@@ -66,6 +69,29 @@ std::string wifi_sta_get_ip();
  * @brief Get the SSID of the currently connected (or last-attempted) network.
  */
 std::string wifi_sta_get_ssid();
+
+/**
+ * @brief One network heard by a scan (GET /v1/wifi/scan).
+ */
+struct ScanResult {
+    std::string ssid;
+    int         rssi;
+    int         bars;     ///< 1..3 from RSSI, same thresholds as mpv2-claw
+    bool        secure;   ///< anything but WIFI_AUTH_OPEN
+};
+
+/**
+ * @brief Scan for nearby networks, strongest first, one entry per SSID.
+ *
+ * Blocks for about a second. Short active dwell times keep the AP on its own
+ * channel most of that time so a phone on the robot's hotspot stays joined.
+ * Switches to AP+STA if the robot is still AP-only (the driver cannot scan
+ * without a station interface).
+ *
+ * @return ESP_OK, ESP_ERR_WIFI_STATE while a connect is in progress ("busy"),
+ *         or the driver's error.
+ */
+esp_err_t wifi_sta_scan(std::vector<ScanResult> &out);
 
 /**
  * @brief Initialise the STA interface.

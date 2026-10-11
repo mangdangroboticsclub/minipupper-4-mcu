@@ -38,6 +38,7 @@
  * either subsystem, in either order, and before or after the scheduler
  * starts.
  */
+#ifdef __cplusplus
 namespace hal {
 
 /**
@@ -47,3 +48,13 @@ namespace hal {
 i2c_master_bus_handle_t i2c_bus();
 
 }  // namespace hal
+
+extern "C" {
+#endif
+
+/** The same handle for C callers (audio/mpx_audio.c drives the ES7210). */
+i2c_master_bus_handle_t hal_shared_i2c_bus(void);
+
+#ifdef __cplusplus
+}
+#endif

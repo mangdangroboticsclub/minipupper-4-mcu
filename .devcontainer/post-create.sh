@@ -7,7 +7,7 @@ if [[ ! -x /root/.espressif/python_env/idf5.5_py3.12_env/bin/python ]]; then
 fi
 
 # Install PWA (Svelte + Vite + Tailwind) dependencies
-PWA_DIR="${PWD}/pwa"
+PWA_DIR="${PWD}/pwa-claw"
 if [[ -f "${PWA_DIR}/package.json" ]]; then
 	echo "Installing PWA dependencies..."
 	cd "${PWA_DIR}"
