@@ -7,6 +7,13 @@ cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(MPX-Dog)
 
+add_custom_target(mpx_build_pwa ALL
+    COMMAND npm run build
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/pwa-claw"
+    VERBATIM
+)
+add_dependencies(__idf_main mpx_build_pwa)
+
 # ── esp-sr on Windows (local-claw) ───────────────────────────────────────────
 #
 # esp-sr's model packer (model/movemodel.py) prints a box-drawing rule in its
