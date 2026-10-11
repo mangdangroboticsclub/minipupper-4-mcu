@@ -524,11 +524,22 @@ esp_err_t cap_display_show_jpeg(const uint8_t *jpeg, size_t len)
 /* ── Free drawing (see cap_display.h) ──────────────────────────────────────
  *
  * One screen with one canvas whose 150 KB RGB565 buffer is taken from PSRAM
- * the first time something is drawn and kept. Every call repaints the whole
- * canvas: the agent describes a picture, not edits to the last one. */
+ * the first time something is drawn and kept. Two painters share it:
+ * cap_display_draw() repaints the whole canvas from a list of shapes (the
+ * agent describes a picture, not edits to the last one), and Lua's `display`
+ * module paints it one primitive at a time, then shows it.
+ *
+ * mpv2-claw's Lua drew with LVGL widgets that lived as long as the script,
+ * run as an async job. mpx-dog's VM runs one blocking script at a time on
+ * the caller's task, so a script that had to stay alive to keep its picture
+ * up would hold the VM (and the chat, and /v1/lua/run). Here the picture
+ * outlives the script: it paints, calls show(hold_ms) and returns. */
 
 #define CAP_DRAW_W 320
 #define CAP_DRAW_H 240
+
+#define DRAW_COORD_MAX  4096   /* anything further out is off the panel anyway */
+#define DRAW_WIDTH_MAX  64     /* line / border / arc thickness */
 
 static lv_obj_t   *s_draw_screen;
 static lv_obj_t   *s_draw_canvas;
@@ -543,6 +554,63 @@ static void draw_expired_cb(lv_timer_t *timer)
     if (lv_screen_active() == s_draw_screen) {
         (void)show_face_locked();
     }
+}
+
+/* Create the buffer, screen and canvas once. Caller holds the LVGL lock. */
+static esp_err_t ensure_draw_canvas_locked(void)
+{
+    if (s_draw_canvas) {
+        return ESP_OK;
+    }
+    if (!s_draw_buf) {
+        s_draw_buf = heap_caps_malloc(CAP_DRAW_W * CAP_DRAW_H * sizeof(uint16_t),
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_draw_buf) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (!s_draw_screen) {
+        s_draw_screen = lv_obj_create(NULL);
+        if (!s_draw_screen) {
+            return ESP_ERR_NO_MEM;
+        }
+        lv_obj_set_style_bg_color(s_draw_screen, lv_color_black(), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(s_draw_screen, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(s_draw_screen, 0, LV_PART_MAIN);
+        lv_obj_remove_flag(s_draw_screen, LV_OBJ_FLAG_SCROLLABLE);
+    }
+    s_draw_canvas = lv_canvas_create(s_draw_screen);
+    if (!s_draw_canvas) {
+        return ESP_ERR_NO_MEM;
+    }
+    lv_canvas_set_buffer(s_draw_canvas, s_draw_buf, CAP_DRAW_W, CAP_DRAW_H,
+                         LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_pos(s_draw_canvas, 0, 0);
+    return ESP_OK;
+}
+
+/* Put the canvas on the panel and arm the hand-back to the face (none for
+ * hold_ms 0). Caller holds the LVGL lock. */
+static esp_err_t show_drawing_locked(uint32_t hold_ms)
+{
+    cancel_text_locked();
+    if (s_draw_timer) {
+        lv_timer_delete(s_draw_timer);
+        s_draw_timer = NULL;
+    }
+    /* Lua's pixel/fill/blit write the buffer behind LVGL's back. */
+    lv_obj_invalidate(s_draw_canvas);
+    esp_err_t err = ESP_OK;
+    if (lv_screen_active() != s_draw_screen) {
+        err = load_screen_locked(s_draw_screen);
+    }
+    if (err == ESP_OK && hold_ms) {
+        s_draw_timer = lv_timer_create(draw_expired_cb, hold_ms, NULL);
+        if (s_draw_timer) {
+            lv_timer_set_repeat_count(s_draw_timer, 1);
+        }
+    }
+    return err;
 }
 
 static const lv_font_t *draw_font(uint8_t size)
@@ -665,52 +733,285 @@ esp_err_t cap_display_draw(const cap_draw_shape_t *shapes, size_t count,
     if (count > CAP_DRAW_MAX_SHAPES || (count && !shapes)) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!s_draw_buf) {
-        s_draw_buf = heap_caps_malloc(CAP_DRAW_W * CAP_DRAW_H * sizeof(uint16_t),
-                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s_draw_buf) {
-            return ESP_ERR_NO_MEM;
+    if (display_hw_lock() != ESP_OK) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t err = ensure_draw_canvas_locked();
+    if (err == ESP_OK) {
+        lv_canvas_fill_bg(s_draw_canvas, lv_color_hex(background_rgb), LV_OPA_COVER);
+        lv_layer_t layer;
+        lv_canvas_init_layer(s_draw_canvas, &layer);
+        for (size_t i = 0; i < count; i++) {
+            draw_shape_locked(&layer, &shapes[i]);
         }
+        lv_canvas_finish_layer(s_draw_canvas, &layer);
+        err = show_drawing_locked(hold_ms);
+    }
+    display_hw_unlock();
+    return err;
+}
+
+/* ── The same canvas, one primitive at a time (Lua's `display` module) ──
+ *
+ * Shapes and text go through LVGL's software renderer under the LVGL lock.
+ * Pixels, fills and blits write the buffer directly with no lock: the
+ * buffer never moves once allocated, and LVGL reading a half-written frame
+ * is at worst one frame of tearing. Nothing reaches the glass until
+ * cap_display_draw_show() invalidates the canvas. */
+
+static int draw_clamp(int v, int lo, int hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static inline uint16_t draw_rgb565(uint32_t rgb)
+{
+    return lv_color_to_u16(lv_color_hex(rgb & 0xFFFFFF));
+}
+
+/* The lock held and the canvas there, or an error with the lock released. */
+static esp_err_t draw_begin(void)
+{
+    if (!display_hw_available()) {
+        return ESP_ERR_INVALID_STATE;
     }
     if (display_hw_lock() != ESP_OK) {
         return ESP_ERR_TIMEOUT;
     }
-    if (!s_draw_screen) {
-        s_draw_screen = lv_obj_create(NULL);
-        if (!s_draw_screen) {
-            display_hw_unlock();
-            return ESP_ERR_NO_MEM;
-        }
-        lv_obj_set_style_bg_color(s_draw_screen, lv_color_black(), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(s_draw_screen, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(s_draw_screen, 0, LV_PART_MAIN);
-        lv_obj_remove_flag(s_draw_screen, LV_OBJ_FLAG_SCROLLABLE);
-        s_draw_canvas = lv_canvas_create(s_draw_screen);
-        lv_canvas_set_buffer(s_draw_canvas, s_draw_buf, CAP_DRAW_W, CAP_DRAW_H,
-                             LV_COLOR_FORMAT_RGB565);
-        lv_obj_set_pos(s_draw_canvas, 0, 0);
+    const esp_err_t err = ensure_draw_canvas_locked();
+    if (err != ESP_OK) {
+        display_hw_unlock();
     }
+    return err;
+}
 
-    lv_canvas_fill_bg(s_draw_canvas, lv_color_hex(background_rgb), LV_OPA_COVER);
+/* For the lock-free writes: make sure the buffer exists, then let go. */
+static esp_err_t draw_ensure_buffer(void)
+{
+    if (s_draw_canvas) {
+        return ESP_OK;
+    }
+    const esp_err_t err = draw_begin();
+    if (err == ESP_OK) {
+        display_hw_unlock();
+    }
+    return err;
+}
+
+int cap_display_draw_width(void)
+{
+    return draw_ensure_buffer() == ESP_OK ? CAP_DRAW_W : 0;
+}
+
+int cap_display_draw_height(void)
+{
+    return draw_ensure_buffer() == ESP_OK ? CAP_DRAW_H : 0;
+}
+
+esp_err_t cap_display_draw_fill(uint32_t rgb)
+{
+    const esp_err_t err = draw_ensure_buffer();
+    if (err != ESP_OK) {
+        return err;
+    }
+    const uint16_t c = draw_rgb565(rgb);
+    for (size_t i = 0; i < (size_t)CAP_DRAW_W * CAP_DRAW_H; i++) {
+        s_draw_buf[i] = c;
+    }
+    return ESP_OK;
+}
+
+esp_err_t cap_display_draw_pixel(int x, int y, uint32_t rgb)
+{
+    const esp_err_t err = draw_ensure_buffer();
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (x >= 0 && y >= 0 && x < CAP_DRAW_W && y < CAP_DRAW_H) {
+        s_draw_buf[(size_t)y * CAP_DRAW_W + x] = draw_rgb565(rgb);
+    }
+    return ESP_OK;
+}
+
+esp_err_t cap_display_draw_blit(int x, int y, int w, int h, const uint8_t *rgb565_le, size_t len)
+{
+    if (!rgb565_le || w <= 0 || h <= 0 || len < (size_t)w * h * 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const esp_err_t err = draw_ensure_buffer();
+    if (err != ESP_OK) {
+        return err;
+    }
+    const int x0 = draw_clamp(x, 0, CAP_DRAW_W), x1 = draw_clamp(x + w, 0, CAP_DRAW_W);
+    const int y0 = draw_clamp(y, 0, CAP_DRAW_H), y1 = draw_clamp(y + h, 0, CAP_DRAW_H);
+    if (x0 >= x1) {
+        return ESP_OK;
+    }
+    for (int row = y0; row < y1; row++) {
+        const uint8_t *src = rgb565_le + ((size_t)(row - y) * w + (x0 - x)) * 2;
+        memcpy(&s_draw_buf[(size_t)row * CAP_DRAW_W + x0], src, (size_t)(x1 - x0) * 2);
+    }
+    return ESP_OK;
+}
+
+esp_err_t cap_display_draw_rect(int x, int y, int w, int h, uint32_t rgb, int radius, int border)
+{
+    if (w <= 0 || h <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    x = draw_clamp(x, -DRAW_COORD_MAX, DRAW_COORD_MAX);
+    y = draw_clamp(y, -DRAW_COORD_MAX, DRAW_COORD_MAX);
+    w = draw_clamp(w, 1, DRAW_COORD_MAX);
+    h = draw_clamp(h, 1, DRAW_COORD_MAX);
+
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.radius = radius < 0 ? LV_RADIUS_CIRCLE : draw_clamp(radius, 0, DRAW_COORD_MAX);
+    if (border > 0) {
+        dsc.bg_opa = LV_OPA_TRANSP;
+        dsc.border_color = lv_color_hex(rgb & 0xFFFFFF);
+        dsc.border_width = draw_clamp(border, 1, DRAW_WIDTH_MAX);
+        dsc.border_opa = LV_OPA_COVER;
+    } else {
+        dsc.bg_color = lv_color_hex(rgb & 0xFFFFFF);
+        dsc.bg_opa = LV_OPA_COVER;
+        dsc.border_width = 0;
+    }
+    const lv_area_t area = { .x1 = x, .y1 = y, .x2 = x + w - 1, .y2 = y + h - 1 };
+
+    const esp_err_t err = draw_begin();
+    if (err != ESP_OK) {
+        return err;
+    }
     lv_layer_t layer;
     lv_canvas_init_layer(s_draw_canvas, &layer);
-    for (size_t i = 0; i < count; i++) {
-        draw_shape_locked(&layer, &shapes[i]);
-    }
+    lv_draw_rect(&layer, &dsc, &area);
     lv_canvas_finish_layer(s_draw_canvas, &layer);
+    display_hw_unlock();
+    return ESP_OK;
+}
 
-    cancel_text_locked();
-    if (s_draw_timer) {
-        lv_timer_delete(s_draw_timer);
-        s_draw_timer = NULL;
+esp_err_t cap_display_draw_circle(int cx, int cy, int r, uint32_t rgb, int border)
+{
+    if (r <= 0) {
+        return ESP_ERR_INVALID_ARG;
     }
-    const esp_err_t err = load_screen_locked(s_draw_screen);
-    if (err == ESP_OK && hold_ms) {
-        s_draw_timer = lv_timer_create(draw_expired_cb, hold_ms, NULL);
-        if (s_draw_timer) {
-            lv_timer_set_repeat_count(s_draw_timer, 1);
-        }
+    r = draw_clamp(r, 1, DRAW_COORD_MAX);
+    return cap_display_draw_rect(cx - r, cy - r, 2 * r + 1, 2 * r + 1, rgb, -1, border);
+}
+
+esp_err_t cap_display_draw_line(int x1, int y1, int x2, int y2, uint32_t rgb, int width)
+{
+    lv_draw_line_dsc_t dsc;
+    lv_draw_line_dsc_init(&dsc);
+    dsc.p1.x = draw_clamp(x1, -DRAW_COORD_MAX, DRAW_COORD_MAX);
+    dsc.p1.y = draw_clamp(y1, -DRAW_COORD_MAX, DRAW_COORD_MAX);
+    dsc.p2.x = draw_clamp(x2, -DRAW_COORD_MAX, DRAW_COORD_MAX);
+    dsc.p2.y = draw_clamp(y2, -DRAW_COORD_MAX, DRAW_COORD_MAX);
+    dsc.color = lv_color_hex(rgb & 0xFFFFFF);
+    dsc.width = draw_clamp(width, 1, DRAW_WIDTH_MAX);
+    dsc.opa = LV_OPA_COVER;
+    dsc.round_start = 1;
+    dsc.round_end = 1;
+
+    const esp_err_t err = draw_begin();
+    if (err != ESP_OK) {
+        return err;
     }
+    lv_layer_t layer;
+    lv_canvas_init_layer(s_draw_canvas, &layer);
+    lv_draw_line(&layer, &dsc);
+    lv_canvas_finish_layer(s_draw_canvas, &layer);
+    display_hw_unlock();
+    return ESP_OK;
+}
+
+esp_err_t cap_display_draw_arc(int cx, int cy, int r, int start_deg, int end_deg, uint32_t rgb, int width)
+{
+    if (r <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    lv_draw_arc_dsc_t dsc;
+    lv_draw_arc_dsc_init(&dsc);
+    dsc.center.x = draw_clamp(cx, -DRAW_COORD_MAX, DRAW_COORD_MAX);
+    dsc.center.y = draw_clamp(cy, -DRAW_COORD_MAX, DRAW_COORD_MAX);
+    dsc.radius = (uint16_t)draw_clamp(r, 1, DRAW_COORD_MAX);
+    /* LVGL draws nothing for start == end and a ring only for end == start
+     * + 360, so a sweep of a whole turn (or more) is spelled that way. */
+    const int span = end_deg - start_deg;
+    if (span == 0) {
+        return ESP_OK;
+    }
+    if (span >= 360 || span <= -360 || span % 360 == 0) {
+        dsc.start_angle = 0;
+        dsc.end_angle = 360;
+    } else {
+        dsc.start_angle = ((start_deg % 360) + 360) % 360;
+        dsc.end_angle = ((end_deg % 360) + 360) % 360;
+    }
+    dsc.color = lv_color_hex(rgb & 0xFFFFFF);
+    dsc.width = draw_clamp(width, 1, DRAW_WIDTH_MAX);
+    dsc.opa = LV_OPA_COVER;
+    dsc.rounded = 1;
+
+    const esp_err_t err = draw_begin();
+    if (err != ESP_OK) {
+        return err;
+    }
+    lv_layer_t layer;
+    lv_canvas_init_layer(s_draw_canvas, &layer);
+    lv_draw_arc(&layer, &dsc);
+    lv_canvas_finish_layer(s_draw_canvas, &layer);
+    display_hw_unlock();
+    return ESP_OK;
+}
+
+esp_err_t cap_display_draw_text(int x, int y, const char *text, uint32_t rgb, int size, int align, int max_w)
+{
+    if (!text) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!text[0]) {
+        return ESP_OK;
+    }
+    x = draw_clamp(x, -DRAW_COORD_MAX, DRAW_COORD_MAX);
+    y = draw_clamp(y, -DRAW_COORD_MAX, DRAW_COORD_MAX);
+    if (max_w <= 0) {
+        max_w = CAP_DRAW_W - x;
+    }
+    if (max_w <= 0 || y >= CAP_DRAW_H) {
+        return ESP_OK;
+    }
+
+    lv_draw_label_dsc_t dsc;
+    lv_draw_label_dsc_init(&dsc);
+    dsc.text = text;
+    /* Pixel sizes onto the built-in fonts: 14, 28, 48. */
+    dsc.font = draw_font(size >= 38 ? 2 : (size >= 21 ? 1 : 0));
+    dsc.color = lv_color_hex(rgb & 0xFFFFFF);
+    dsc.opa = LV_OPA_COVER;
+    dsc.align = align < 0 ? LV_TEXT_ALIGN_LEFT : (align > 0 ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_CENTER);
+    const lv_area_t area = { .x1 = x, .y1 = y, .x2 = x + max_w - 1, .y2 = CAP_DRAW_H - 1 };
+
+    const esp_err_t err = draw_begin();
+    if (err != ESP_OK) {
+        return err;
+    }
+    lv_layer_t layer;
+    lv_canvas_init_layer(s_draw_canvas, &layer);
+    lv_draw_label(&layer, &dsc, &area);
+    lv_canvas_finish_layer(s_draw_canvas, &layer);
+    display_hw_unlock();
+    return ESP_OK;
+}
+
+esp_err_t cap_display_draw_show(uint32_t hold_ms)
+{
+    esp_err_t err = draw_begin();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = show_drawing_locked(hold_ms);
     display_hw_unlock();
     return err;
 }

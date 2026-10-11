@@ -197,7 +197,8 @@ CONFIG_LV_USE_LINE=y
 CONFIG_LV_USE_IMAGE=y
 CONFIG_LV_USE_LABEL=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
-# Medium and large text for display_draw (main/skills/mpx_display_draw).
+# Medium and large text for display_draw (main/skills/mpx_display_draw) and
+# Lua's display.text() sizes.
 CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_48=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y

@@ -51,6 +51,7 @@ set(sources
     "util/trace_ring.cc"
     "lua/lua_vm.cc"
     "lua/lua_bindings.cc"
+    "lua/lua_display.cc"
     # The on-device agent (Phase 5). The owner's AI mode and the robot's
     # tool table exist in every build (the voice server's MCP and /v1/ai use
     # them); agent_runtime.cc compiles to stubs when the agent is off.

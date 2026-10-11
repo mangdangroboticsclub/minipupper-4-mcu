@@ -201,6 +201,9 @@ esp_err_t lua_init(void)
     /* Register fs bindings (file I/O with user permission) */
     lua_register_fs_bindings(g_L);
 
+    /* Register display bindings (drawing on the screen's canvas) */
+    lua_register_display_bindings(g_L);
+
     /* Override print to use our capture mechanism */
     /* We push our custom print function as _G.print */
     lua_pushcfunction(g_L, lua_print_writer);

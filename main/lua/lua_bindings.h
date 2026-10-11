@@ -94,3 +94,27 @@ void lua_register_wasm_bindings(lua_State *L);
  */
 void lua_register_fs_bindings(lua_State *L);
 void lua_register_crypto_bindings(lua_State *L);
+
+/**
+ * @brief Register the `display` module (lua_display.cc): draw on the screen.
+ *
+ * Paint a canvas, then show it; the face comes back after the hold.
+ * Colours are 0xRRGGBB or a string ("red", "#ff8800"). Coordinates are
+ * pixels from the top left (320x240 on the MP4), clipped at the edges.
+ *
+ *   display.width(), display.height()       → canvas size (0: no screen)
+ *   display.rgb(r, g, b)                    → 0xRRGGBB
+ *   display.clear([color])                  — fill (default black)
+ *   display.pixel(x, y, color)
+ *   display.rect(x, y, w, h, color [, {radius=, outline=}])  radius -1 = pill
+ *   display.circle(cx, cy, r, color [, {outline=}])
+ *   display.line(x1, y1, x2, y2, color [, width=2])
+ *   display.arc(cx, cy, r, start, end, color [, width=4])  0° = 3 o'clock, clockwise
+ *   display.text(x, y, str, color [, {size=14|28|48, align="left|center|right", w=}])
+ *   display.blit(x, y, w, h, data)          — RGB565 little-endian bytes
+ *   display.show([hold_ms=15000])           — 0 = until replaced
+ *   display.face()                          — back to the eyes now
+ *
+ * Errors (no screen, bad size) are raised as Lua errors.
+ */
+void lua_register_display_bindings(lua_State *L);

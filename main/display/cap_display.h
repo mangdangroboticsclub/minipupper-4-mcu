@@ -104,6 +104,38 @@ typedef struct {
 esp_err_t cap_display_draw(const cap_draw_shape_t *shapes, size_t count,
                            uint32_t background_rgb, uint32_t hold_ms);
 
+/* Painting the same canvas one primitive at a time, for Lua's `display`
+ * module (lua/lua_display.cc): paint it, then show it. Colours are
+ * 0xRRGGBB, coordinates are pixels from the top left, anything off the
+ * canvas is clipped. Painting does not change what is on the panel;
+ * cap_display_draw_show() does. The canvas keeps its contents between
+ * drawings (cap_display_draw() repaints all of it), so start one with a
+ * fill.
+ *
+ * Every call: ESP_ERR_INVALID_STATE with no panel, ESP_ERR_TIMEOUT if the
+ * LVGL lock could not be had, ESP_ERR_INVALID_ARG for a size <= 0. Call
+ * from a task, not from inside LVGL. */
+int       cap_display_draw_width(void);    /*!< 0 with no panel */
+int       cap_display_draw_height(void);
+esp_err_t cap_display_draw_fill(uint32_t rgb);
+esp_err_t cap_display_draw_pixel(int x, int y, uint32_t rgb);
+/** radius < 0 = fully round ends; border > 0 = outline that thick, 0 = filled. */
+esp_err_t cap_display_draw_rect(int x, int y, int w, int h, uint32_t rgb, int radius, int border);
+esp_err_t cap_display_draw_circle(int cx, int cy, int r, uint32_t rgb, int border);
+esp_err_t cap_display_draw_line(int x1, int y1, int x2, int y2, uint32_t rgb, int width);
+/** Degrees, 0 = three o'clock, increasing clockwise; end < start wraps. */
+esp_err_t cap_display_draw_arc(int cx, int cy, int r, int start_deg, int end_deg, uint32_t rgb, int width);
+/** Text with its box's top-left at x,y, wrapped to max_w (<= 0: to the right
+ *  edge). size picks the nearest built-in font: 14, 28 or 48. align is
+ *  -1 left, 0 centred, 1 right within the box. */
+esp_err_t cap_display_draw_text(int x, int y, const char *text, uint32_t rgb, int size, int align, int max_w);
+/** w*h RGB565 pixels, little-endian (2 bytes each, row by row). */
+esp_err_t cap_display_draw_blit(int x, int y, int w, int h, const uint8_t *rgb565_le, size_t len);
+/** Put the canvas on the panel, as cap_display_draw() does: the face comes
+ *  back after hold_ms unless something else has taken the screen by then;
+ *  0 holds until something does. Calling it again restarts the hold. */
+esp_err_t cap_display_draw_show(uint32_t hold_ms);
+
 /** @brief The conversation on the face -- targets for mpx_voice_set_ui_hooks().
  *
  *  heard/saying put a one-line subtitle under the eyes (the network line
