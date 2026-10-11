@@ -24,6 +24,7 @@ Phases:
 | 4 | Audio + voice (esp-sr wake word, MangDang voice gateway, music, voice tools), `/v1/ai` (mangdang/off), `/v1/voice` | this branch (builds, 0 warnings; bench checks owed) |
 | 5 | On-device agent (ESP-Claw, vendored), `/v1/ai` "own" mode, chat answered locally behind a per-conversation Pupper / Cloud toggle | this branch (builds, 0 warnings; bench checks owed) |
 | 6 | Catch-up with mpv2-claw `ede0804` ("new pi link and RL"): RL host link on the Pi UART, Pi link UART/HOST_INFO fixes, raw servo path in the robot core, IMU at 200 Hz / +-16 g, `pi_announce`, PWA updates | this branch (not built here; PWA builds; bench checks owed) |
+| 7 | Lua: run lock, enforced timeouts, runtime errors reported; a `display` module on `display_draw`'s canvas | this branch (bench checks owed) |
 
 ## Phase 1 changes
 
@@ -839,6 +840,58 @@ What it cannot do that Lua could: animate (one call is one still picture).
 - `pi_announce` running alone: the Pi's IP under the eyes, robot stays
   `standalone`.
 - IMU at +-16 g: picked-up / push reflexes still trigger as before.
+
+## Phase 7 changes (Lua: the VM's lock and timeouts, drawing)
+
+### The VM (`main/lua/lua_vm.cc`)
+
+Problems that predated this phase: nothing serialised the shared
+`lua_State` between `/v1/lua/run` (httpd) and the chat worker; the timeout
+every caller passed was ignored (a `while true do end` held the httpd task
+forever); and runtime errors never reached the output, only compile errors.
+Runs now take a mutex (10 s wait, then a "busy" error), a count hook
+enforces the deadline (also checked per `robot.delay_ms` chunk; permission
+prompts in `fs.write`/`fs.delete` do not count), and the error message is
+appended to the output. `/v1/lua/run` gives a saved file 60 s like the chat
+worker; inline scripts keep 5 s. **Behaviour change**: a PWA script that
+ran longer than its timeout used to finish; now it is stopped and reports
+"script timed out".
+
+### A `display` module for Lua
+
+mpv2-claw's Lua drew through ESP-Claw's `lua_module_lvgl`: a script built
+LVGL widgets on a screen it held exclusively, and the drawing lived exactly
+as long as the script, run as an async job. mpx-dog's VM runs one blocking
+script at a time on the caller's task -- a script that had to stay alive to
+keep its picture up would hold the VM, and with it the chat worker and
+`/v1/lua/run`. So the picture outlives the script instead:
+
+- **One canvas.** Lua paints the same 320x240 PSRAM canvas as Phase 6's
+  `display_draw` (`display/cap_display.c`). Canvas creation and "show it,
+  then hand back to the face" are split out of `cap_display_draw()` so both
+  painters use them: one 150 KB buffer, one hold timer, and a text message
+  is cancelled by either.
+- **Primitives:** `cap_display_draw_fill/pixel/rect/circle/line/arc/text/
+  blit/show`. Shapes and text go through LVGL's renderer under the lock;
+  pixels, fills and blits write the buffer directly. `show()` invalidates
+  the canvas, so redrawing a picture that is already up is seen.
+- **The module** (`lua/lua_display.cc`): `display.clear/pixel/rect/circle/
+  line/arc/text/blit/show/face/width/height/rgb`. Colours are 0xRRGGBB,
+  `"#rrggbb"` or a name; coordinates accept floats. Text sizes 14/28/48 use
+  the Montserrat fonts Phase 6 enabled.
+- **Not an agent tool.** The agent keeps `display_draw` (JSON shapes); a
+  second drawing tool taking Lua would leave the model choosing between two
+  ways to do the same thing. The module is for scripts from the app and the
+  chat worker -- including animation, which `display_draw` cannot do.
+
+### Bench checks owed
+
+- `POST /v1/lua/run {"script":"while true do end"}` answers "script timed
+  out" after 5 s instead of hanging the app.
+- `POST /v1/lua/run {"script":"display.clear('navy') display.circle(160,120,60,'gold') display.text(0,190,'hello',0xFFFFFF,{size=28,align='center',w=320}) display.show(5000)"}`:
+  the picture for 5 s, then the eyes.
+- A `display_draw` from the agent, then a Lua drawing while it is up: one
+  canvas, the second picture replaces the first, the face comes back once.
 
 ## Design decisions
 

@@ -131,7 +131,7 @@ subsystems down:
 7. `network::start_http_server()` - port 80, core 0, prio 6. Fatal.
 8. `network::init_chat_pipeline()` - AES key, queues, Lua worker + upstream task.
 9. `wasm::init_sandbox()` - WAMR runtime in PSRAM, registers host ABI. Fatal.
-10. `lua_init()` - Lua state in PSRAM, registers `robot`, `fs`, `wasm`, `crypto`.
+10. `lua_init()` - Lua state in PSRAM, registers `robot`, `fs`, `wasm`, `crypto`, `display`.
 
 ---
 
@@ -432,7 +432,7 @@ Lua:
 
 | Method + path | Input | Response |
 |---|---|---|
-| `POST /v1/lua/run` | B `{"script"}` or `{"path"}` | `{"ok":true,"output"}` / `{"ok":false,"error"}` - synchronous, 5 s timeout, 2 KB output |
+| `POST /v1/lua/run` | B `{"script"}` or `{"path"}` | `{"ok":true,"output"}` / `{"ok":false,"error"}` - synchronous, 5 s timeout (60 s for `path`), 2 KB output |
 | `POST /v1/lua/enqueue` | B `{"script"}` | `{"ok":true}`; written to `/lua/_deploy_N.lua` and run by the chat Lua worker (60 s), results arrive on the chat WS |
 | `GET /v1/lua/list` | - | `{"ok":true,"files":[...]}` (under `/lua`) |
 | `GET /v1/lua/read` | Q `name` | `{"ok":true,"name","code"}` |
@@ -568,7 +568,18 @@ Lua 5.5, one global state with a PSRAM allocator, `luaL_openlibs` plus:
 - `fs.read/write/delete/exists/list/info` (write and delete ask the PWA for
   permission), `wasm.run(path, fn?)`, `wasm.run_bytes(data, fn?)`,
   `crypto.base64_encode/decode`.
-- `print` is redirected into the caller's output buffer.
+- `display.clear/pixel/rect/circle/line/arc/text/blit/show/face/width/height/rgb`
+  (`lua/lua_display.cc` over `display/cap_display.c`): paint the full-screen
+  canvas the agent's `display_draw` tool uses, `show(hold_ms)`, and the face
+  returns after the hold. The API is documented in `lua_bindings.h`.
+- `print` is redirected into the caller's output buffer; a runtime error's
+  message is appended to it too.
+- Runs are serialised (one mutex; a second caller waits up to 10 s, then
+  gets a "busy" error) and the caller's timeout is enforced by a count hook
+  every 1000 instructions plus a check in each `robot.delay_ms` chunk;
+  `fs.write`/`fs.delete` add the permission-prompt wait back onto the
+  deadline. A timeout returns `ESP_ERR_TIMEOUT`. Callers: `/v1/lua/run`
+  (5 s inline, 60 s for a saved file) and the chat worker (5 s / 60 s).
 
 ### 9.2 WASM skills (`wasm/wasm_sandbox.cc`, `wasm/wasm_decrypt.cc`, `sdk/`)
 
