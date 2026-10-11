@@ -4,10 +4,11 @@
   /**
    * Controller — the yellow gamepad on Home.
    *
-   * Portrait ("tall"): shoulder Turn buttons + Stop on top, the body d-pad and
+   * Portrait ("tall"): shoulder Turn buttons + Power on top, the body d-pad and
    * the four move buttons in the middle, Move / Look sticks underneath, like
    * holding a PS4 pad upright. Landscape ("wide", mp4 style): d-pad left, the
-   * sticks in the middle under Stop, move buttons right, Turn on the shoulders.
+   * sticks in the middle under Power, move buttons right, Turn on the shoulders.
+   * While Power is off, no control sends anything to the robot.
    *
    * @prop assignments   slot id → gait id (from the action editor)
    * @prop catalog       [{ id, label }] used to name assigned actions
@@ -159,7 +160,7 @@
 
   function stickDown(e, which) {
     const s = stickOf(which);
-    if (s.active) return;
+    if (!powered || s.active) return;
     e.preventDefault();
     const rect = e.currentTarget.getBoundingClientRect();
     s.cx = rect.left + rect.width / 2;
@@ -269,7 +270,7 @@
   const isContinuous = (g) => !continuousGaits || continuousGaits.has(g);
 
   function press(id) {
-    if (pressed.has(id)) return;
+    if (!powered || pressed.has(id)) return;
     pressed = new Set(pressed).add(id);
     const gait = gaitFor(id);
     if (gait) {
@@ -293,6 +294,21 @@
     joyStopIfIdle();
     sendGait("none");
     if (navigator.vibrate) { try { navigator.vibrate(20); } catch {} }
+  }
+
+  // Power gates every control. Off by default so a stray touch on a freshly
+  // opened page cannot move the robot.
+  let powered = $state(false);
+  function togglePower() {
+    if (powered) {
+      move = makeStick();
+      look = makeStick();
+      stopAll();
+      sendLook(0, 0);
+    } else if (navigator.vibrate) {
+      try { navigator.vibrate(12); } catch {}
+    }
+    powered = !powered;
   }
 
   function capture(el, pointerId) {
@@ -453,8 +469,16 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>
       </button>
     {/if}
-    <button type="button" class="stop" onclick={stopAll} aria-label="Stop all movement">
-      <span class="stop-sq" aria-hidden="true"></span>Stop
+    <button
+      type="button"
+      class="power"
+      class:on={powered}
+      onclick={togglePower}
+      aria-pressed={powered}
+      aria-label={powered ? "Power on: controls enabled. Tap to stop and disable" : "Power off: controls disabled. Tap to enable"}
+      title={powered ? "Power on" : "Power off"}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 3v8"/><path d="M6.3 7.2a7.5 7.5 0 1 0 11.4 0"/></svg>
     </button>
   </div>
 {/snippet}
@@ -483,7 +507,7 @@
 {/snippet}
 
 <div class="box" class:wide>
-  <section class="shell" class:offline={!online} aria-label="Controller">
+  <section class="shell" class:offline={!online} class:unpowered={!powered} aria-label="Controller">
     {#if wide}
       <div class="row-top">
         {@render shoulder("l")}
@@ -607,15 +631,23 @@
     display: grid; place-items: center; cursor: pointer;
   }
   .tool svg { width: 18px; height: 18px; }
-  .stop {
-    height: 44px; border-radius: 22px; border: none;
-    background: var(--ink); color: #fff;
-    display: flex; align-items: center; gap: 8px; padding: 0 16px;
-    font-size: 13px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase;
+  .power {
+    width: 44px; height: 44px; border-radius: 50%; border: none;
+    background: var(--ink); color: #FF5A4F;
+    display: grid; place-items: center;
     cursor: pointer;
+    transition: color var(--dur-fast), box-shadow var(--dur-fast);
   }
-  .stop:active { transform: translateY(1px); }
-  .stop-sq { width: 10px; height: 10px; border-radius: 2px; background: #FF5A4F; }
+  .power svg { width: 22px; height: 22px; }
+  .power.on { color: #2ECC71; box-shadow: 0 0 0 3px rgba(46, 204, 113, 0.45), 0 0 14px rgba(46, 204, 113, 0.55); }
+  .power:active { transform: translateY(1px); }
+
+  .unpowered :is(.dpad, .faces, .well, .shoulder) {
+    opacity: 0.45;
+    filter: saturate(0.3);
+    cursor: not-allowed;
+    transition: opacity var(--dur-med), filter var(--dur-med);
+  }
 
   /* ── d-pad ── */
   .dpad {
