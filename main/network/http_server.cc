@@ -657,7 +657,7 @@ static esp_err_t api_fs_read(httpd_req_t *req)
     }
 
     auto data = fs::read_file(file_path.c_str());
-    if (data.empty()) {
+    if (data.empty() && !fs::file_exists(file_path.c_str())) {
         httpd_resp_set_status(req, "404 Not Found");
         httpd_resp_send(req, "file not found", -1);
         return ESP_OK;
@@ -745,6 +745,72 @@ static esp_err_t api_fs_delete(httpd_req_t *req)
     return ESP_OK;
 }
 
+static std::string json_get_str(const char *body, const char *key);
+static char *read_body(httpd_req_t *req);
+
+/* Whole JSON body, so escaping counts against it. Keep in sync with
+ * MAX_SAVE_BYTES in pwa-claw/src/lib/FileViewer.svelte. */
+static constexpr std::size_t FS_WRITE_MAX_BODY = 32 * 1024;
+
+/* POST /v1/fs/write — overwrite an existing file with text content.
+ *   Body: {"path":"/lua/walk.lua","content":"..."}
+ *   /www is never writable; the file must already exist. */
+static esp_err_t api_fs_write(httpd_req_t *req)
+{
+    if (req->content_len > FS_WRITE_MAX_BODY) {
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        httpd_resp_send(req, "file too large", -1);
+        return ESP_OK;
+    }
+
+    char *buf = read_body(req);
+    if (!buf) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "empty body", -1);
+        return ESP_OK;
+    }
+
+    const bool has_content = std::strstr(buf, "\"content\":\"") != nullptr;
+    std::string file_path = json_get_str(buf, "path");
+    std::string content   = json_get_str(buf, "content");
+    free(buf);
+
+    if (file_path.empty() || !has_content) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "need 'path' and 'content' fields", -1);
+        return ESP_OK;
+    }
+    if (file_path[0] != '/') file_path = "/" + file_path;
+
+    if (file_path.find("..") != std::string::npos) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "invalid path", -1);
+        return ESP_OK;
+    }
+    if (is_www_path(file_path)) {
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_send(req, "cannot modify www assets", -1);
+        return ESP_OK;
+    }
+    if (!fs::file_exists(file_path.c_str())) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_send(req, "file not found", -1);
+        return ESP_OK;
+    }
+
+    if (!fs::write_file(file_path.c_str(), content.data(), content.size())) {
+        httpd_resp_set_status(req, "500 Server Error");
+        httpd_resp_send(req, "write failed", -1);
+        return ESP_OK;
+    }
+
+    std::string resp = "{\"ok\":true,\"p\":\"" + json_escape(file_path)
+                     + "\",\"s\":" + std::to_string(content.size()) + "}";
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp.c_str(), resp.size());
+    return ESP_OK;
+}
+
 /* POST /v1/skills/upload — upload a .wasm file (raw body, name in query) */
 static esp_err_t api_skills_upload(httpd_req_t *req)
 {
@@ -823,6 +889,8 @@ static std::string json_get_str(const char *body, const char *key)
             else if (*p == 'n')  val += '\n';
             else if (*p == 't')  val += '\t';
             else if (*p == 'r')  val += '\r';
+            else if (*p == 'b')  val += '\b';
+            else if (*p == 'f')  val += '\f';
             else if (*p == '/')  val += '/';
             else if (*p == 'u') {
                 // Simple \\u00xx for basic ASCII range
@@ -2524,6 +2592,7 @@ bool start_http_server()
     register_api(s_server, "GET",  "/v1/fs/info",       HTTP_GET,  api_fs_info);
     register_api(s_server, "GET",  "/v1/fs/read",       HTTP_GET,  api_fs_read);
     register_api(s_server, "POST", "/v1/fs/delete",     HTTP_POST, api_fs_delete);
+    register_api(s_server, "POST", "/v1/fs/write",      HTTP_POST, api_fs_write);
     register_api(s_server, "POST", "/v1/skills/upload", HTTP_POST, api_skills_upload);
     // ── Ported from mpv2-claw (see .cursor/PORT_NOTES.md) ──
     register_api(s_server, "GET",  "/v1/skills/status",   HTTP_GET,  api_skills_status);

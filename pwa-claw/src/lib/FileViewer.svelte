@@ -9,7 +9,9 @@
   let busy = $state(null);
   let sudoMode = $state(false);
   let showHidden = $state(false);
-  let sheet = $state(null);           // { title, body } — file contents or run output
+  let sheet = $state(null);           // { title, body } — run output
+  let editor = $state(null);          // { path, name, original, text, readOnly, crlf }
+  let saving = $state(false);
   let searchQuery = $state("");
   let toast = $state(null);
   let toastTimer = null;
@@ -23,6 +25,13 @@
   function isWasm(n) { return n.endsWith(".wasm") || n.endsWith(".mpxe"); }
   function isLua(n)  { return n.endsWith(".lua"); }
   function isAllowed(n) { return isWasm(n) || isLua(n); }
+
+  const TEXT_EXTS = [".lua", ".txt", ".md", ".json", ".yaml", ".yml", ".csv", ".log",
+                     ".ini", ".cfg", ".conf", ".toml", ".xml", ".html", ".css", ".js"];
+  function isText(n) { const l = n.toLowerCase(); return TEXT_EXTS.some((e) => l.endsWith(e)); }
+
+  // Must match FS_WRITE_MAX_BODY in main/network/http_server.cc.
+  const MAX_SAVE_BYTES = 32 * 1024;
 
   function kind(n) {
     if (isWasm(n)) return "Motion skill";
@@ -53,12 +62,62 @@
     loading = false;
   }
 
-  async function viewFile(n) {
+  const dirty = $derived(!!editor && editor.text !== editor.original);
+
+  /** Close the editor, asking first if there are unsaved changes. Returns false if the user cancels. */
+  function closeEditor() {
+    if (dirty && !confirm("Discard unsaved changes to " + editor.name + "?")) return false;
+    editor = null;
+    return true;
+  }
+
+  async function openFile(f) {
+    if (!closeEditor()) return;
     try {
-      const r = await fetch("/v1/fs/read?path=" + encodeURIComponent(pathOf(n)));
-      if (r.ok) { const d = await r.json(); if (d.ok) sheet = { title: d.p, body: d.c || "(empty)" }; }
-      else say("Couldn't open " + n, "err");
+      const r = await fetch("/v1/fs/read?path=" + encodeURIComponent(pathOf(f.n)));
+      const d = r.ok ? await r.json() : null;
+      if (!d?.ok) { say("Couldn't open " + f.n, "err"); return; }
+      const raw = d.c ?? "";
+      // Textareas normalise line endings to \n, so compare and edit in \n form.
+      const text = raw.replace(/\r\n/g, "\n");
+      sheet = null;
+      editor = { path: d.p, name: f.n, original: text, text, readOnly: !!f.r, crlf: raw.includes("\r\n") };
     } catch { say("Couldn't reach the robot", "err"); }
+  }
+
+  async function saveFile() {
+    if (!editor || editor.readOnly || saving) return false;
+    if (!dirty) return true;
+    const { path, name, text, crlf } = editor;
+    const content = crlf ? text.replace(/\n/g, "\r\n") : text;
+    const body = JSON.stringify({ path, content });
+    if (new Blob([body]).size > MAX_SAVE_BYTES) { say(name + " is too large to save here", "err"); return false; }
+    saving = true;
+    let ok = false;
+    try {
+      const r = await fetch("/v1/fs/write", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body,
+      });
+      if (r.ok) {
+        const d = await r.json();
+        if (editor?.path === path) editor.original = text;
+        const f = files.find((x) => x.n === name);
+        if (f && typeof d.s === "number") f.s = d.s;
+        say(name + " saved");
+        ok = true;
+      } else say("Save failed: " + (await r.text()), "err");
+    } catch { say("Couldn't reach the robot", "err"); }
+    saving = false;
+    return ok;
+  }
+
+  async function saveAndRun() {
+    if (!editor || !(await saveFile())) return;
+    runLua(editor.name);
+  }
+
+  function onEditorKey(e) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveFile(); }
   }
 
   async function delFile(n) {
@@ -70,7 +129,11 @@
         body: JSON.stringify({ path: pathOf(n), sudo: sudoMode }),
       });
       if (!r.ok) say("Delete failed: " + (await r.text()), "err");
-      else { await fetchDir(currentDir); say(n + " deleted"); }
+      else {
+        if (editor?.name === n) editor = null;
+        await fetchDir(currentDir);
+        say(n + " deleted");
+      }
     } catch { say("Couldn't reach the robot", "err"); }
     busy = null;
   }
@@ -101,16 +164,26 @@
     busy = null;
   }
 
-  function goDir(d) { sheet = null; fetchDir(currentDir === "/" ? "/" + d : currentDir + "/" + d); }
+  function goDir(d) {
+    if (!closeEditor()) return;
+    sheet = null;
+    fetchDir(currentDir === "/" ? "/" + d : currentDir + "/" + d);
+  }
   function goUp() {
+    if (!closeEditor()) return;
     sheet = null;
     if (currentDir === "/") return;
     const p = currentDir.split("/").filter(Boolean); p.pop();
     fetchDir(p.length === 0 ? "/" : "/" + p.join("/"));
   }
   function back() {
+    if (!closeEditor()) return;
     if (currentDir !== "/") goUp();
     else onNavigate?.("home");
+  }
+  function refresh() {
+    if (!closeEditor()) return;
+    fetchDir(currentDir);
   }
 
   $effect(() => { fetchDir("/"); return () => clearTimeout(toastTimer); });
@@ -145,7 +218,7 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.1M6.6 6.6C3.8 8.4 2 12 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M3 3l18 18M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
         {/if}
       </button>
-      <button type="button" class="round" onclick={() => fetchDir(currentDir)} aria-label="Refresh">
+      <button type="button" class="round" onclick={refresh} aria-label="Refresh">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
       </button>
     </div>
@@ -201,7 +274,8 @@
 
           {#each filteredFiles as f (f.n)}
             {@const ok = isAllowed(f.n)}
-            <li class="row file" class:dim={!ok} class:busy={busy === f.n}>
+            {@const text = isText(f.n)}
+            <li class="row file" class:dim={!ok && !text} class:busy={busy === f.n}>
               <span class="ico" class:motion={isWasm(f.n)} class:lua={isLua(f.n)} aria-hidden="true">
                 {#if isWasm(f.n)}
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18c3-8 5-12 8-12s5 4 8 12"/><circle cx="12" cy="6" r="2"/></svg>
@@ -220,14 +294,16 @@
                 </span>
                 <span class="d">{fmtSize(f.s)}{kind(f.n) ? ` · ${kind(f.n)}` : ""}</span>
               </span>
-              {#if ok}
+              {#if ok || text}
                 <span class="acts">
-                  <button type="button" class="btn" disabled={busy === f.n} onclick={() => (isLua(f.n) ? runLua(f.n) : runWasm(f.n))} aria-label="Run {f.n}">Run</button>
+                  {#if ok}
+                    <button type="button" class="btn" disabled={busy === f.n} onclick={() => (isLua(f.n) ? runLua(f.n) : runWasm(f.n))} aria-label="Run {f.n}">Run</button>
+                  {/if}
                   <span class="links">
-                    {#if isLua(f.n)}
-                      <button type="button" class="link" onclick={() => viewFile(f.n)} aria-label="View {f.n}">View</button>
+                    {#if text}
+                      <button type="button" class="link" onclick={() => openFile(f)} aria-label="{f.r ? 'View' : 'Edit'} {f.n}">{f.r ? "View" : "Edit"}</button>
                     {/if}
-                    {#if !f.r}
+                    {#if ok && !f.r}
                       <button type="button" class="link del" disabled={busy === f.n} onclick={() => delFile(f.n)} aria-label="Delete {f.n}">Delete</button>
                     {/if}
                   </span>
@@ -244,6 +320,41 @@
       </button>
     </div>
   </div>
+
+  {#if editor}
+    <div class="sheet edit" role="dialog" aria-label="{editor.readOnly ? 'View' : 'Edit'} {editor.name}">
+      <div class="sheet-head">
+        <span class="sheet-title">{editor.path}</span>
+        <div class="sheet-acts">
+          {#if editor.readOnly}
+            <span class="ro">Read-only</span>
+          {:else}
+            {#if dirty}
+              <button type="button" class="link" disabled={saving} onclick={() => (editor.text = editor.original)}>Revert</button>
+            {/if}
+            {#if isLua(editor.name)}
+              <button type="button" class="link" disabled={saving || busy === editor.name} onclick={saveAndRun}>{dirty ? "Save & run" : "Run"}</button>
+            {/if}
+            <button type="button" class="btn" disabled={!dirty || saving} onclick={saveFile}>{saving ? "Saving…" : "Save"}</button>
+          {/if}
+          <button type="button" class="round sm" onclick={closeEditor} aria-label="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+      </div>
+      <textarea
+        class="sheet-body editor"
+        bind:value={editor.text}
+        readonly={editor.readOnly}
+        onkeydown={onEditorKey}
+        aria-label="Contents of {editor.name}"
+        spellcheck="false"
+        autocomplete="off"
+        autocapitalize="off"
+        wrap="off"
+      ></textarea>
+    </div>
+  {/if}
 
   {#if sheet}
     <div class="sheet" role="dialog" aria-label={sheet.title}>
@@ -349,6 +460,12 @@
     flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 12px 14px; border-radius: 14px;
     background: var(--ground); font-family: var(--mono); font-size: 13px; line-height: 1.5; white-space: pre-wrap; color: var(--ink);
   }
+  .sheet.edit { top: calc(72px + var(--safe-top)); max-height: none; z-index: 29; }
+  .sheet-acts { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .ro { font-size: 13px; font-weight: 700; color: var(--sub); padding: 0 6px; }
+  /* 16px keeps iOS Safari from zooming in on focus. */
+  .editor { width: 100%; border: none; resize: none; outline: none; font-size: 16px; white-space: pre; tab-size: 2; }
+  .editor:focus-visible { outline: 3px solid var(--ink); outline-offset: -3px; }
 
   .toast {
     position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 40;
