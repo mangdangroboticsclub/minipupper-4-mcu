@@ -132,7 +132,7 @@
 {:else if page === "display"}
   <DisplayPage onBack={back} />
 {:else if page === "upload"}
-  <div class="sub-wrap"><UploadView onBack={back} /></div>
+  <UploadView onBack={back} />
 {:else if page === "files"}
   <FileViewer onNavigate={(v) => { if (v === "upload") page = "upload"; else page = null; }} />
 {:else}
@@ -259,6 +259,4 @@
   .rest-actions { display: flex; }
   .act { height: 44px; border-radius: 22px; border: none; background: var(--ink); color: #fff; padding: 0 18px; font-size: 14px; font-weight: 700; cursor: pointer; }
   .act:disabled, .seg button:disabled { opacity: 0.6; }
-  .note { font-size: 13px; line-height: 1.45; color: var(--sub); }
-  .sub-wrap { position: absolute; inset: 0; overflow-y: auto; background: #fff; }
-</style>
+  .note { font-size: 13px; line-height: 1.45; color: var(--sub); }</style>

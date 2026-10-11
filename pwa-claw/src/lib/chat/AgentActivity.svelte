@@ -73,43 +73,44 @@
   .activity {
     margin: 2px 16px;
     max-width: 85%;
-    border-radius: var(--r-md);
-    background: var(--mpx-surface);
-    border: 1px solid var(--mpx-line);
+    border-radius: 18px;
+    background: #fff;
+    border: 1px solid var(--line);
     overflow: hidden;
     transition: border-color var(--dur-med);
   }
-  .activity.active { border-color: color-mix(in srgb, var(--mpx-yellow) 70%, #fff); box-shadow: 0 0 0 3px var(--mpx-yellow-tint); }
+  .activity.active { border-color: var(--mpx-yellow); box-shadow: 0 0 0 3px var(--mpx-yellow-tint); }
 
   .activity-head {
     width: 100%;
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 9px 12px;
+    padding: 10px 12px;
     background: none;
     border: none;
     cursor: pointer;
     text-align: left;
-    color: var(--mpx-ink-soft);
+    color: var(--ink);
   }
+  .activity-head:focus-visible { outline: 3px solid var(--ink); outline-offset: -3px; }
   .head-icon {
     width: 22px; height: 22px;
     border-radius: 50%;
     display: grid; place-items: center;
     background: var(--mpx-yellow);
-    color: var(--mpx-ink);
+    color: var(--ink);
     flex-shrink: 0;
   }
-  .activity:not(.active) .head-icon { background: #ecfdf3; color: #15803d; }
+  .activity:not(.active) .head-icon { background: var(--ink); color: var(--mpx-yellow); }
 
   .head-text { flex: 1; min-width: 0; display: flex; }
   .head-title {
-    font-size: 0.76rem; font-weight: 700;
+    font-size: 14px; font-weight: 700;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .head-count { font-size: 0.66rem; font-weight: 700; color: var(--mpx-muted); font-variant-numeric: tabular-nums; }
-  .chev { color: var(--mpx-muted-2); transition: transform var(--dur-med) var(--ease-spring); flex-shrink: 0; }
+  .head-count { font-size: 12px; font-weight: 700; color: var(--sub); font-variant-numeric: tabular-nums; }
+  .chev { color: #A39F96; transition: transform var(--dur-med) var(--ease-spring); flex-shrink: 0; }
   .activity.open .chev { transform: rotate(180deg); }
 
   /* orbiting dots while active */
@@ -134,12 +135,12 @@
   .node {
     width: 10px; height: 10px; border-radius: 50%;
     margin-top: 5px;
-    background: var(--mpx-surface-3);
-    border: 2px solid var(--mpx-muted-2);
+    background: var(--ground);
+    border: 2px solid var(--hair);
     box-sizing: border-box;
     flex-shrink: 0;
   }
-  .step.done .node { background: var(--mpx-ink); border-color: var(--mpx-ink); }
+  .step.done .node { background: var(--ink); border-color: var(--ink); }
   .step.current .node {
     background: var(--mpx-yellow);
     border-color: var(--mpx-yellow);
@@ -149,15 +150,15 @@
     0%, 100% { box-shadow: 0 0 0 0 rgba(255, 230, 5, 0.6); }
     50% { box-shadow: 0 0 0 5px rgba(255, 230, 5, 0); }
   }
-  .line { flex: 1; width: 2px; background: var(--mpx-line); margin: 2px 0; min-height: 8px; }
-  .step.done .line { background: color-mix(in srgb, var(--mpx-ink) 25%, #fff); }
+  .line { flex: 1; width: 2px; background: var(--line); margin: 2px 0; min-height: 8px; }
+  .step.done .line { background: color-mix(in srgb, var(--ink) 25%, #fff); }
 
   .step-body { flex: 1; min-width: 0; padding-bottom: 8px; }
   .step:last-child .step-body { padding-bottom: 0; }
   .step-row { display: flex; align-items: baseline; gap: 8px; }
-  .step-seq { font-size: 0.62rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; color: var(--mpx-muted); }
-  .step.current .step-seq { color: #8a7c00; }
-  .step-time { font-size: 0.6rem; color: var(--mpx-muted-2); margin-left: auto; font-variant-numeric: tabular-nums; }
-  .step-text { font-size: 0.8rem; color: var(--mpx-ink-soft); line-height: 1.4; margin-top: 1px; }
-  .step.current .step-text { color: var(--mpx-ink); font-weight: 600; }
+  .step-seq { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; color: var(--sub); }
+  .step.current .step-seq { color: #5B4E00; }
+  .step-time { font-size: 11px; color: var(--sub); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .step-text { font-size: 14px; color: #4F4C46; line-height: 1.4; margin-top: 1px; }
+  .step.current .step-text { color: var(--ink); font-weight: 600; }
 </style>

@@ -1,10 +1,8 @@
 <script>
-  import { colors } from "./colors.js";
+  import WifiPicker from "./WifiPicker.svelte";
 
   /** @type {{ onNavigate?: (view: string) => void, network?: object }} */
   let { onNavigate, network } = $props();
-
-  const YELLOW = colors.mpx.primary;
 
   // ── State ──────────────────────────────────────────────────
   let loading = $state(true);
@@ -19,19 +17,15 @@
   let staSsid = $state(network?.staSsid || "");
   let staIp = $state(network?.staIp || "");
 
-  // Connect form
+  // Hidden-network form
+  let showManual = $state(false);
   let inputSsid = $state("");
   let inputPassword = $state("");
   let connecting = $state(false);
   let reconnecting = $state(false);
   let connectError = $state("");
 
-  // Poll timer for reconnection
-  let pollTimer = $state(null);
-
-  // ── Derived ─────────────────────────────────────────────────
-  let wifiOn = $derived(staState !== "disconnected");
-  let showConnectForm = $state(false);
+  let pollTimer = null;
 
   // ── API helpers ────────────────────────────────────────────
 
@@ -49,16 +43,16 @@
         staIp = data.sta?.ip ?? "";
         if (reconnecting) reconnecting = false;
       } else if (!reconnecting) {
-        error = `Status fetch failed (${res.status})`;
+        error = `The robot answered with an error (${res.status}).`;
       }
-    } catch (e) {
-      if (!reconnecting) error = `Cannot reach robot: ${e.message}`;
+    } catch {
+      if (!reconnecting) error = "Couldn't reach the robot.";
     }
     loading = false;
   }
 
   function startReconnectPoller() {
-    if (pollTimer) clearTimeout(pollTimer);
+    clearTimeout(pollTimer);
     async function poll() {
       try {
         const res = await fetch("/v1/wifi/status");
@@ -80,7 +74,8 @@
     poll();
   }
 
-  async function doConnect() {
+  async function doConnect(e) {
+    e?.preventDefault();
     const ssid = inputSsid.trim();
     if (!ssid) return;
     connecting = true;
@@ -101,7 +96,7 @@
         startReconnectPoller();
       } else {
         const text = await res.text();
-        connectError = text || `Connect failed (${res.status})`;
+        connectError = text || `Couldn't start joining (${res.status}).`;
         connecting = false;
       }
     } catch (e) {
@@ -117,13 +112,19 @@
     }
   }
 
+  function cancelReconnect() {
+    clearTimeout(pollTimer);
+    reconnecting = false;
+    connecting = false;
+    fetchStatus();
+  }
+
   async function doDisconnect() {
     try {
       await fetch("/v1/wifi/disconnect", { method: "POST" });
       staState = "disconnected";
       staSsid = "";
       staIp = "";
-      showConnectForm = false;
     } catch (e) {
       console.error("Disconnect failed:", e);
     }
@@ -135,17 +136,8 @@
       staState = "disconnected";
       staSsid = "";
       staIp = "";
-      showConnectForm = false;
     } catch (e) {
       console.error("Forget failed:", e);
-    }
-  }
-
-  function toggleWifi() {
-    if (wifiOn) {
-      doDisconnect();
-    } else {
-      showConnectForm = true;
     }
   }
 
@@ -156,624 +148,177 @@
   // ── Init ───────────────────────────────────────────────────
   $effect(() => {
     fetchStatus();
-    return () => { if (pollTimer) clearTimeout(pollTimer); };
+    return () => clearTimeout(pollTimer);
   });
+
+  const connected = $derived(staState === "connected");
+  const statusLine = $derived(
+    connected ? staIp
+    : staState === "connecting" ? `Joining ${staSsid || "Wi‑Fi"}…`
+    : staState === "failed" ? `Couldn't join ${staSsid || "the network"}`
+    : "Pick a network below"
+  );
 </script>
 
-<div class="wifi-root">
-  <!-- ═══ Header ═══ -->
-  <div class="header">
-    <button class="back-btn" onclick={goBack} aria-label="Back">
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M19 12H5M12 19l-7-7 7-7"/>
-      </svg>
+<div class="page">
+  <header class="bar">
+    <button type="button" class="round" onclick={goBack} aria-label="Back to settings">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
     </button>
-    <h1 class="header-title">WiFi</h1>
-    <button onclick={fetchStatus} class="refresh-btn" aria-label="Refresh">↻</button>
+    <h1>ESP Wi‑Fi</h1>
+    <button type="button" class="round" onclick={fetchStatus} aria-label="Refresh">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+    </button>
+  </header>
+
+  <div class="scroll">
+    <div class="inner">
+      {#if reconnecting}
+        <section class="card center" role="status">
+          <span class="big-ico pulse" aria-hidden="true">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M2 8.5a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1.2" fill="currentColor"/></svg>
+          </span>
+          <h2 class="card-title">Joining {staSsid}</h2>
+          <p class="desc">The robot is restarting its network. If this page stops answering, join the <b>{apSsid}</b> hotspot again.</p>
+          <button type="button" class="pill" onclick={cancelReconnect}>Cancel</button>
+        </section>
+      {:else if loading && !staSsid}
+        <div class="card sk" aria-hidden="true"><span class="ico"></span><span class="sk-line"></span></div>
+      {:else if error}
+        <section class="card center">
+          <h2 class="card-title">Can't read the Wi‑Fi status</h2>
+          <p class="desc">{error}</p>
+          <button type="button" class="pill dark" onclick={fetchStatus}>Try again</button>
+        </section>
+      {:else}
+        <section class="card">
+          <div class="card-head">
+            <span class="ico" class:on={connected}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M2 8.5a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1.2" fill="currentColor"/></svg>
+            </span>
+            <span class="txt">
+              <span class="t">{connected ? staSsid : staState === "connecting" ? staSsid : "Not on Wi‑Fi"}</span>
+              <span class="d" class:mono={connected} class:err={staState === "failed"}>{statusLine}</span>
+            </span>
+            {#if connected}<span class="status">On</span>{/if}
+          </div>
+          {#if staState !== "disconnected"}
+            <div class="acts">
+              <button type="button" class="pill" onclick={doDisconnect}>Disconnect</button>
+              <button type="button" class="pill danger" onclick={doForget}>Forget network</button>
+            </div>
+          {/if}
+        </section>
+
+        <div class="facts">
+          <div class="fact"><span class="fact-k">Hotspot</span><span class="fact-v">{apSsid}</span></div>
+          <div class="fact"><span class="fact-k">Hotspot IP</span><span class="fact-v">{apIp}</span></div>
+        </div>
+      {/if}
+
+      {#if !reconnecting}
+        <h2 class="section">Networks nearby</h2>
+        <div class="card">
+          <WifiPicker {network} onJoined={fetchStatus} />
+        </div>
+
+        <div class="group">
+          <button type="button" class="row" onclick={() => (showManual = !showManual)} aria-expanded={showManual}>
+            <span class="txt">
+              <span class="t">Join a hidden network</span>
+              <span class="d">Type the name and password yourself</span>
+            </span>
+            <svg class="chev" class:down={showManual} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+          </button>
+          {#if showManual}
+            <form class="manual" onsubmit={doConnect}>
+              <label class="field">
+                <span class="field-k">Network name</span>
+                <input type="text" bind:value={inputSsid} placeholder="SSID" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span class="field-k">Password</span>
+                <input type="password" bind:value={inputPassword} placeholder="Leave empty if open" />
+              </label>
+              {#if connectError}<p class="note err" role="alert">{connectError}</p>{/if}
+              <button type="submit" class="primary" disabled={connecting || !inputSsid.trim()}>
+                {connecting ? "Joining…" : "Join"}
+              </button>
+            </form>
+          {/if}
+        </div>
+      {/if}
+    </div>
   </div>
-
-  <!-- ═══ Loading ═══ -->
-  {#if loading && !reconnecting}
-    <div class="scanning">
-      <span class="spinner"></span>
-      <span>Loading status…</span>
-    </div>
-  {:else if reconnecting}
-    <!-- ═══ Reconfiguring ═══ -->
-    <div class="reconnecting">
-      <div class="recon-icon">📡</div>
-      <h3 class="recon-title">Reconfiguring Network</h3>
-      <p class="recon-desc">
-        The robot is restarting its network to connect to <strong>{staSsid}</strong>.
-      </p>
-      <p class="recon-hint">
-        Your device may have disconnected. Reconnect to <strong>MPX-Dog</strong> WiFi if needed.
-      </p>
-      <button class="cancel-btn" onclick={() => { if (pollTimer) clearTimeout(pollTimer); reconnecting = false; connecting = false; fetchStatus(); }}>
-        Cancel
-      </button>
-    </div>
-  {:else if error}
-    <div class="scanning" style="color: #d00">{error}</div>
-    <button class="retry-btn" onclick={fetchStatus}>Retry</button>
-  {:else}
-    <!-- ═══ AP Info ═══ -->
-    <div class="info-card">
-      <div class="info-row">
-        <span class="info-label">🔵 AP Mode</span>
-        <span class="info-value">{apSsid} · {apIp}</span>
-      </div>
-    </div>
-
-    <!-- ═══ STA Status ═══ -->
-    <div class="info-card">
-      <div class="info-row">
-        <span class="info-label">📡 Station Mode</span>
-        <span class="info-value">
-          {#if staState === "connected"}
-            <span class="status-dot status-ok"></span> {staSsid} · {staIp}
-          {:else if staState === "connecting"}
-            <span class="status-dot status-busy"></span> Connecting to {staSsid}…
-          {:else if staState === "failed"}
-            <span class="status-dot status-err"></span> Failed
-          {:else}
-            <span class="status-dot status-off"></span> Disconnected
-          {/if}
-        </span>
-      </div>
-    </div>
-
-    <!-- ═══ Toggle & Actions ═══ -->
-    <div class="wifi-toggle-card">
-      <div class="toggle-row">
-        <div class="toggle-label">
-          <svg class="toggle-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
-            <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
-            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
-            <circle cx="12" cy="20" r="1" fill="currentColor"/>
-          </svg>
-          <span>Wi‑Fi</span>
-        </div>
-        <button
-          class="toggle-switch"
-          class:active={wifiOn}
-          onclick={toggleWifi}
-          role="switch"
-          aria-checked={wifiOn}
-          aria-label={wifiOn ? "Disable Wi-Fi" : "Enable Wi-Fi"}
-        >
-          <span class="toggle-knob"></span>
-        </button>
-      </div>
-    </div>
-
-    {#if wifiOn}
-      <button class="action-btn" onclick={doForget}>Forget Network</button>
-    {/if}
-
-    <!-- ═══ Connect Form ═══ -->
-    {#if showConnectForm || !wifiOn}
-      <div class="connect-form">
-        <p class="form-hint">Connect to a Wi‑Fi network to give your robot internet access.</p>
-
-        <div class="field">
-          <label class="field-label" for="wifi-ssid">Network Name (SSID)</label>
-          <input
-            id="wifi-ssid"
-            class="field-input"
-            type="text"
-            bind:value={inputSsid}
-            placeholder="Enter network name"
-          />
-        </div>
-
-        <div class="field">
-          <label class="field-label" for="wifi-password">Password</label>
-          <input
-            id="wifi-password"
-            class="field-input"
-            type="password"
-            bind:value={inputPassword}
-            placeholder="Enter password"
-          />
-        </div>
-
-        <button
-          class="join-btn"
-          onclick={doConnect}
-          disabled={connecting || !inputSsid.trim()}
-        >
-          {#if connecting}
-            <span class="spinner"></span>
-          {:else}
-            Connect
-          {/if}
-        </button>
-      </div>
-    {/if}
-
-    <!-- ═══ Error Toast ═══ -->
-    {#if connectError}
-      <div class="error-toast">
-        <span>{connectError}</span>
-        <button class="error-ok" onclick={() => connectError = ""}>Ok</button>
-      </div>
-    {/if}
-  {/if}
 </div>
 
 <style>
-  .wifi-root {
-    position: absolute;
-    inset: 0;
-    background: #fff;
-    display: flex;
-    flex-direction: column;
-    padding: 0 20px;
-    overflow-y: auto;
+  .page { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--page); color: var(--ink); }
+  .bar {
+    flex-shrink: 0; height: calc(64px + var(--safe-top)); padding: calc(10px + var(--safe-top)) 16px 0;
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: var(--page-max); width: 100%; margin: 0 auto;
+  }
+  .bar h1 { font-size: 18px; font-weight: 800; }
+  .round {
+    width: 44px; height: 44px; border-radius: 22px; border: none; background: var(--ground); color: var(--ink);
+    display: grid; place-items: center; cursor: pointer;
   }
 
-  /* ── Header ─────────────────────────────── */
-  .header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 16px 0 8px;
-  }
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; }
+  .inner { max-width: var(--page-max); margin: 0 auto; padding: 8px 16px calc(24px + var(--safe-bottom)); display: flex; flex-direction: column; gap: 12px; }
 
-  .back-btn {
-    width: 36px;
-    height: 36px;
-    border: none;
-    background: transparent;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    color: #000;
-    flex-shrink: 0;
-  }
-  .back-btn:hover {
-    background: rgba(0,0,0,0.05);
-  }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 22px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .card.center { align-items: center; text-align: center; padding: 24px 20px; gap: 8px; }
+  .card-head { display: flex; align-items: center; gap: 12px; }
+  .card-title { font-size: 17px; font-weight: 800; }
+  .desc { font-size: 14px; line-height: 1.45; color: var(--sub); max-width: 320px; }
+  .desc b { color: var(--ink); }
+  .ico { width: 40px; height: 40px; border-radius: 12px; flex-shrink: 0; display: grid; place-items: center; background: var(--mpx-yellow); color: var(--ink); }
+  .ico.on { background: var(--ink); color: var(--mpx-yellow); }
+  .big-ico { width: 56px; height: 56px; border-radius: 16px; display: grid; place-items: center; background: var(--mpx-yellow); margin-bottom: 4px; }
+  .pulse { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+  .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .t { font-size: 17px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .d { font-size: 13px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .d.err { color: #9B2C20; font-weight: 600; }
+  .mono { font-family: var(--mono); }
+  .status { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: #1E7B34; }
+  .status::before { content: ""; width: 8px; height: 8px; border-radius: 4px; background: #23A047; }
+  .acts { display: flex; gap: 8px; flex-wrap: wrap; }
 
-  .header-title {
-    font-size: 1.25rem;
-    font-weight: 700;
-    color: #000;
-  }
+  .pill { height: 40px; border-radius: 20px; border: none; background: var(--ground); padding: 0 16px; font-size: 14px; font-weight: 700; color: var(--ink); cursor: pointer; }
+  .pill.dark { background: var(--ink); color: #fff; }
+  .pill.danger { color: #9B2C20; }
 
-  /* ── Toggle Card ────────────────────────── */
-  .wifi-toggle-card {
-    background: #f5f5f5;
-    border-radius: 14px;
-    padding: 12px 16px;
-    margin: 8px 0 12px;
-  }
+  .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .fact { background: var(--ground); border-radius: 14px; padding: 9px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .fact-k { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sub); }
+  .fact-v { font-family: var(--mono); font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  .toggle-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
+  .section { margin: 8px 4px 0; font-size: 12px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); }
 
-  .toggle-label {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 1rem;
-    font-weight: 600;
-    color: #000;
-  }
+  .group { background: #fff; border: 1px solid var(--line); border-radius: 20px; overflow: hidden; }
+  .row { width: 100%; border: none; background: transparent; color: var(--ink); display: flex; align-items: center; gap: 14px; padding: 14px 16px; text-align: left; cursor: pointer; }
+  .row .t { font-size: 16px; }
+  .chev { color: #A39F96; flex-shrink: 0; transition: transform var(--dur-fast); }
+  .chev.down { transform: rotate(90deg); }
+  .manual { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .field { display: flex; flex-direction: column; gap: 4px; background: var(--ground); border-radius: 16px; padding: 8px 14px; }
+  .field:focus-within { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .field-k { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sub); }
+  .field input { border: none; background: transparent; font-size: 16px; color: var(--ink); outline: none; padding: 2px 0; }
+  .field input::placeholder { color: var(--sub); }
+  .note { font-size: 13px; background: var(--ground); border-radius: 14px; padding: 10px 12px; }
+  .note.err { color: #9B2C20; font-weight: 600; }
+  .primary { height: 52px; border-radius: 26px; border: none; background: var(--ink); color: #fff; font-size: 16px; font-weight: 700; cursor: pointer; }
+  .primary:disabled { opacity: 0.35; cursor: default; }
 
-  .toggle-icon {
-    color: #000;
-  }
+  .sk { flex-direction: row; align-items: center; height: 74px; }
+  .sk .ico, .sk-line { background: var(--hair); }
+  .sk-line { height: 14px; width: 50%; border-radius: 7px; }
 
-  .toggle-switch {
-    width: 48px;
-    height: 28px;
-    border-radius: 14px;
-    border: none;
-    background: #ccc;
-    cursor: pointer;
-    position: relative;
-    transition: background 0.2s ease;
-    padding: 0;
-  }
-  .toggle-switch.active {
-    background: #000;
-  }
-
-  .toggle-knob {
-    position: absolute;
-    top: 3px;
-    left: 3px;
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    background: #fff;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-    transition: transform 0.2s ease;
-  }
-  .toggle-switch.active .toggle-knob {
-    transform: translateX(20px);
-  }
-
-  /* ── Scanning ───────────────────────────── */
-  .scanning {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 20px 0;
-    font-size: 0.9rem;
-    color: #666;
-  }
-
-  .spinner {
-    width: 18px;
-    height: 18px;
-    border: 2.5px solid #ccc;
-    border-top-color: #000;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    display: inline-block;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-  /* ── Section Label ──────────────────────── */
-  .section-label {
-    font-size: 0.85rem;
-    font-weight: 700;
-    color: #000;
-    margin: 12px 0 8px;
-  }
-
-  /* ── Network List ───────────────────────── */
-  .network-list {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .network-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px 16px;
-    background: #f5f5f5;
-    border: none;
-    border-radius: 12px;
-    cursor: pointer;
-    text-align: left;
-    transition: background 0.15s;
-  }
-  .network-item:hover {
-    background: #eee;
-  }
-  .network-item:active {
-    background: #e5e5e5;
-  }
-
-  .net-info {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .net-icon {
-    color: #000;
-    flex-shrink: 0;
-  }
-
-  .net-ssid {
-    font-size: 1rem;
-    font-weight: 500;
-    color: #000;
-  }
-
-  .net-meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .lock-icon {
-    color: #999;
-  }
-
-  .signal-bars {
-    display: flex;
-    align-items: flex-end;
-    gap: 2px;
-    height: 14px;
-  }
-
-  .signal-bar {
-    width: 4px;
-    border-radius: 2px;
-    background: #ddd;
-  }
-  .signal-bar:nth-child(1) { height: 5px; }
-  .signal-bar:nth-child(2) { height: 8px; }
-  .signal-bar:nth-child(3) { height: 11px; }
-  .signal-bar:nth-child(4) { height: 14px; }
-  .signal-bar.active {
-    background: #000;
-  }
-
-  /* ── Connect Form ───────────────────────── */
-  .connect-form {
-    margin-top: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
-  .form-hint {
-    font-size: 0.85rem;
-    color: #666;
-    line-height: 1.5;
-  }
-
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .field-label {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: #000;
-  }
-
-  .field-input {
-    width: 100%;
-    padding: 12px 14px;
-    border: 1.5px solid #ddd;
-    border-radius: 10px;
-    font-size: 1rem;
-    color: #000;
-    background: #fff;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-  .field-input:focus {
-    border-color: #000;
-  }
-  .field-input::placeholder {
-    color: #bbb;
-  }
-
-  .join-btn {
-    align-self: flex-end;
-    width: 48px;
-    height: 48px;
-    border-radius: 50%;
-    border: none;
-    background: #000;
-    color: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: background 0.15s, transform 0.1s;
-    margin-top: 8px;
-  }
-  .join-btn:hover {
-    background: #222;
-  }
-  .join-btn:active {
-    transform: scale(0.95);
-  }
-  .join-btn:disabled {
-    background: #ccc;
-    cursor: not-allowed;
-  }
-
-  /* ── Error Toast ────────────────────────── */
-  .error-toast {
-    position: fixed;
-    bottom: 24px;
-    left: 20px;
-    right: 20px;
-    background: #fff;
-    border-radius: 14px;
-    padding: 16px 20px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    box-shadow: 0 4px 24px rgba(0,0,0,0.15);
-    font-size: 0.9rem;
-    color: #000;
-    z-index: 100;
-    animation: slideUp 0.3s ease;
-  }
-
-  @keyframes slideUp {
-    from { transform: translateY(20px); opacity: 0; }
-    to { transform: translateY(0); opacity: 1; }
-  }
-
-  .error-ok {
-    padding: 6px 16px;
-    border: none;
-    border-radius: 8px;
-    background: #000;
-    color: #fff;
-    font-weight: 600;
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-
-  /* ── Status dots ────────────────────────── */
-  .status-dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    margin-right: 4px;
-  }
-  .status-ok { background: #22c55e; }
-  .status-busy { background: #eab308; animation: pulse 1s infinite; }
-  .status-err { background: #ef4444; }
-  .status-off { background: #999; }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
-
-  /* ── Info cards ─────────────────────────── */
-  .info-card {
-    background: #f5f5f5;
-    border-radius: 14px;
-    padding: 12px 16px;
-    margin: 4px 0;
-  }
-
-  .info-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .info-label {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: #000;
-    flex-shrink: 0;
-  }
-
-  .info-value {
-    font-size: 0.8rem;
-    color: #666;
-    text-align: right;
-    word-break: break-all;
-  }
-
-  /* ── Refresh / Retry / Action buttons ──── */
-  .refresh-btn {
-    background: none;
-    border: none;
-    font-size: 1.2rem;
-    cursor: pointer;
-    color: #666;
-    padding: 4px 8px;
-    border-radius: 6px;
-  }
-  .refresh-btn:hover { background: #eee; }
-
-  .retry-btn {
-    display: block;
-    margin: 8px auto;
-    padding: 8px 24px;
-    border: none;
-    border-radius: 10px;
-    background: #000;
-    color: #fff;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .action-btn {
-    display: block;
-    width: 100%;
-    padding: 10px;
-    margin-top: 6px;
-    border: none;
-    border-radius: 10px;
-    background: #f5f5f5;
-    color: #d00;
-    font-weight: 600;
-    font-size: 0.9rem;
-    cursor: pointer;
-  }
-  .action-btn:hover { background: #fee; }
-
-  .cancel-btn {
-    display: block;
-    margin: 8px auto;
-    padding: 6px 20px;
-    border: 1px solid #ccc;
-    border-radius: 8px;
-    background: #fff;
-    color: #666;
-    font-size: 0.85rem;
-    cursor: pointer;
-  }
-
-  /* ── Reconnecting state ─────────────────── */
-  .reconnecting {
-    text-align: center;
-    padding: 30px 16px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .recon-icon {
-    font-size: 2.5rem;
-    animation: pulse 1.5s infinite;
-  }
-
-  .recon-title {
-    font-size: 1.1rem;
-    font-weight: 700;
-    color: #000;
-  }
-
-  .recon-desc {
-    font-size: 0.85rem;
-    color: #666;
-    line-height: 1.5;
-  }
-
-  .recon-hint {
-    font-size: 0.8rem;
-    color: #999;
-    background: #f9f9f9;
-    padding: 10px 14px;
-    border-radius: 10px;
-    line-height: 1.5;
-  }
-
-  /* ── Join button (wider) ────────────────── */
-  .join-btn {
-    align-self: stretch;
-    width: auto;
-    height: auto;
-    padding: 12px;
-    border-radius: 12px;
-    border: none;
-    background: #000;
-    color: #fff;
-    font-weight: 700;
-    font-size: 1rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    cursor: pointer;
-    transition: background 0.15s, transform 0.1s;
-    margin-top: 8px;
-  }
-  .join-btn:hover {
-    background: #222;
-  }
-  .join-btn:active {
-    transform: scale(0.98);
-  }
-  .join-btn:disabled {
-    background: #ccc;
-    cursor: not-allowed;
-  }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .row:focus-visible { outline-offset: -3px; }
 </style>

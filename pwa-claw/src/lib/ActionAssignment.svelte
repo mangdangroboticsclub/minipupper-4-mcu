@@ -12,10 +12,10 @@
   } = $props();
 
   const buttonPositions = [
-    { id: 'action-top',    label: 'Top',    color: colors.mpx.action_green,  icon: 'triangle' },
-    { id: 'action-right',  label: 'Right',  color: colors.mpx.action_red,    icon: 'circle' },
-    { id: 'action-bottom', label: 'Bottom', color: colors.mpx.action_blue,   icon: 'pentagon' },
-    { id: 'action-left',   label: 'Left',   color: colors.mpx.action_purple, icon: 'square' },
+    { id: 'action-top',    label: 'Top',    icon: 'triangle' },
+    { id: 'action-right',  label: 'Right',  icon: 'circle' },
+    { id: 'action-bottom', label: 'Bottom', icon: 'pentagon' },
+    { id: 'action-left',   label: 'Left',   icon: 'square' },
   ];
 
   // ── Built-in actions with emoji + category ───────────────
@@ -144,525 +144,185 @@
   }
 </script>
 
-<div class="action-assignment-page">
-  <!-- Header bar with back + title -->
-  <header class="top-bar" style="background: {colors.mpx.primary}">
-    <button class="back-btn" onclick={onBack} aria-label="Back">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="19" y1="12" x2="5" y2="12"/>
-        <polyline points="12 19 5 12 12 5"/>
-      </svg>
+{#snippet shape(icon)}
+  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round" aria-hidden="true">
+    {#if icon === "triangle"}<path d="M12 4l9 16H3z"/>
+    {:else if icon === "circle"}<circle cx="12" cy="12" r="8"/>
+    {:else if icon === "square"}<rect x="4.5" y="4.5" width="15" height="15" rx="1"/>
+    {:else}<path d="M12 3l9 6.5-3.4 10.5H6.4L3 9.5z"/>{/if}
+  </svg>
+{/snippet}
+
+{#snippet tile(action, isCustom)}
+  {@const isAssigned = localAssignments[selectedPosition] === action.id}
+  <li class="tile">
+    <button type="button" class="run" class:on={isAssigned} aria-pressed={isAssigned} onclick={() => assignAction(action.id)}>
+      <span class="ico"><ActionIcon id={action.id} emoji={action.emoji} /></span>
+      <span class="lbl">{action.label}</span>
     </button>
-    <h1 class="top-bar-title">Button Assignment</h1>
-    <div style="width:32px"></div>
+    {#if isAssigned}
+      <span class="check" aria-hidden="true">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>
+      </span>
+    {/if}
+    {#if isCustom}
+      <button type="button" class="del" onclick={() => onDeleteAction?.(action.id)} aria-label="Delete {action.label}">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    {/if}
+  </li>
+{/snippet}
+
+<div class="page">
+  <header class="bar">
+    <button type="button" class="round" onclick={onBack} aria-label="Back">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+    <h1>Controller buttons</h1>
+    <span class="spacer"></span>
   </header>
 
-  <!-- ═══ Action Buttons Bar ═══ -->
-  <div class="buttons-bar">
-    {#each buttonPositions as pos}
-      {@const assigned = getAssignedAction(pos.id)}
-      <button
-        class="btn-selector"
-        class:selected={selectedPosition === pos.id}
-        style="--btn-color: {pos.color}"
-        onclick={() => selectPosition(pos.id)}
-        aria-label="Select {pos.label} button"
-      >
-        <div class="btn-selector-icon">
-          {#if pos.icon === "triangle"}
-            <svg viewBox="0 0 50 50">
-              <path d="M25 6 L40 34.5 L10 34.5 Z" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round"/>
-            </svg>
-          {:else if pos.icon === "circle"}
-            <svg viewBox="0 0 50 50">
-              <circle cx="25" cy="25" r="15" fill="none" stroke="currentColor" stroke-width="5"/>
-            </svg>
-          {:else if pos.icon === "pentagon"}
-            <svg viewBox="0 0 50 50">
-              <polygon points="25,10 39.3,20.4 33.8,37.1 16.2,37.1 10.7,20.4" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round"/>
-            </svg>
-          {:else if pos.icon === "square"}
-            <svg viewBox="0 0 50 50">
-              <rect x="13" y="13" width="24" height="24" rx="3" fill="none" stroke="currentColor" stroke-width="5"/>
-            </svg>
-          {/if}
-        </div>
-        <span class="btn-selector-label" class:unset={!assigned}>
-          {assigned ? assigned.label : "—"}
-        </span>
-      </button>
-    {/each}
+  <div class="slots-wrap">
+    <div class="slots" role="tablist" aria-label="Controller button">
+      {#each buttonPositions as pos}
+        {@const assigned = getAssignedAction(pos.id)}
+        <button
+          type="button"
+          role="tab"
+          class="slot"
+          class:on={selectedPosition === pos.id}
+          aria-selected={selectedPosition === pos.id}
+          aria-label="{pos.label} button: {assigned ? assigned.label : 'not set'}"
+          onclick={() => selectPosition(pos.id)}
+        >
+          {@render shape(pos.icon)}
+          <span class="slot-lbl" class:unset={!assigned}>{assigned ? assigned.label : "Not set"}</span>
+        </button>
+      {/each}
+    </div>
   </div>
 
-  <!-- ═══ Action Picker ═══ -->
-  <div class="picker-section">
-    <!-- Search bar -->
-    <div class="search-bar">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="11" cy="11" r="8"/>
-        <line x1="21" y1="21" x2="16.65" y2="16.65"/>
-      </svg>
-      <input
-        type="text"
-        class="search-input"
-        placeholder="Search actions..."
-        bind:value={searchQuery}
-      />
-    </div>
+  <div class="scroll">
+    <div class="inner">
+      <label class="search">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+        <span class="sr">Search moves</span>
+        <input type="search" bind:value={searchQuery} placeholder="Search moves" />
+      </label>
 
-    <!-- Assigning hint -->
-    <div class="assign-hint" style="color: {selectedPos.color}">
-      Tap an action to assign to <strong>{selectedPos.label}</strong>
-      {#if getAssignedAction(selectedPosition)}
-        <button class="clear-btn" onclick={() => clearAssignment(selectedPosition)}>
-          Clear
+      <div class="hint-row">
+        <p class="hint">Tap a move to put it on the <b>{selectedPos.label.toLowerCase()}</b> button.</p>
+        {#if getAssignedAction(selectedPosition)}
+          <button type="button" class="link" onclick={() => clearAssignment(selectedPosition)}>Clear</button>
+        {/if}
+      </div>
+
+      {#if skillActions.length > 0}
+        <h2>Your moves</h2>
+        <ul class="grid">
+          {#each skillActions as action (action.id)}
+            {@render tile(action, action.category === "skill" || action.category === "custom")}
+          {/each}
+        </ul>
+      {/if}
+
+      {#if gaitActions.length > 0}
+        <button type="button" class="sec-head" onclick={() => (showGaitSection = !showGaitSection)} aria-expanded={showGaitSection}>
+          <h2>Built in</h2>
+          <svg class="chev" class:down={showGaitSection} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
         </button>
+        {#if showGaitSection}
+          <ul class="grid">
+            {#each gaitActions as action (action.id)}
+              {@render tile(action, false)}
+            {/each}
+          </ul>
+        {/if}
       {/if}
-    </div>
 
-    <!-- ═══ Gait Section (collapsible) ═══ -->
-    {#if gaitActions.length > 0}
-      <button class="category-header collapsible" onclick={() => showGaitSection = !showGaitSection}>
-        <span class="category-label">🚶 Gait</span>
-        <svg class="collapse-chevron" class:collapsed={!showGaitSection} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="6 9 12 15 18 9"/>
-        </svg>
+      {#if filteredActions.length === 0}
+        <p class="hint center">No move called “{searchQuery}”.</p>
+      {/if}
+
+      <button type="button" class="add" onclick={() => onAddAction?.()}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        <span>Add a move from a file</span>
       </button>
-      {#if showGaitSection}
-      <div class="actions-grid">
-        {#each gaitActions as action}
-          {@const isAssigned = localAssignments[selectedPosition] === action.id}
-          <button
-            class="action-item"
-            class:selected={isAssigned}
-            style="--action-color: {action.color}"
-            onclick={() => assignAction(action.id)}
-          >
-            <div class="action-icon" style="background: {action.color}">
-              <ActionIcon id={action.id} emoji={action.emoji} />
-            </div>
-            <span class="action-label">{action.label}</span>
-            {#if isAssigned}
-              <div class="action-check" style="background: {action.color}">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="20 6 9 17 4 12"/>
-                </svg>
-              </div>
-            {/if}
-          </button>
-        {/each}
-      </div>
-      {/if}
-    {/if}
-
-    <!-- ═══ Skill Section ═══ -->
-    {#if skillActions.length > 0}
-      <div class="category-header">
-        <span class="category-label">🎯 Skill</span>
-      </div>
-      <div class="actions-grid">
-        {#each skillActions as action}
-          {@const isAssigned = localAssignments[selectedPosition] === action.id}
-          {@const isCustom = action.category === "skill" || action.category === "custom"}
-          <div
-            class="action-item"
-            class:selected={isAssigned}
-            style="--action-color: {action.color}"
-            role="button"
-            tabindex="0"
-            onclick={() => assignAction(action.id)}
-          >
-            <div class="action-icon" style="background: {action.color}">
-              <ActionIcon id={action.id} emoji={action.emoji} />
-            </div>
-            <span class="action-label">{action.label}</span>
-            {#if isAssigned}
-              <div class="action-check" style="background: {action.color}">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="20 6 9 17 4 12"/>
-                </svg>
-              </div>
-            {/if}
-            {#if isCustom}
-            <button
-              class="delete-action-item-btn"
-              onclick={(e) => {
-                e.stopPropagation();
-                onDeleteAction?.(action.id);
-              }}
-              aria-label="Delete {action.label}"
-            >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="3 6 5 6 21 6"/>
-                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-              </svg>
-            </button>
-            {/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
-
-    <!-- ═══ Add Action Button ═══ -->
-    <button class="add-action-btn" onclick={() => onAddAction?.()}>
-      <span class="add-icon">➕</span>
-      <span class="add-label">Add Custom Action</span>
-    </button>
-
-    {#if filteredActions.length === 0}
-      <div class="no-results">No actions found</div>
-    {/if}
+    </div>
   </div>
 </div>
 
 <style>
-  .action-assignment-page {
-    position: absolute;
-    inset: 0;
-    background: #fff;
-    display: flex;
-    flex-direction: column;
-    z-index: 50;
+  .page { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; background: var(--page); color: var(--ink); }
+  .bar {
+    flex-shrink: 0; height: calc(64px + var(--safe-top)); padding: calc(10px + var(--safe-top)) 16px 0;
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: var(--page-max); width: 100%; margin: 0 auto;
+  }
+  .bar h1 { font-size: 18px; font-weight: 800; }
+  .spacer { width: 44px; }
+  .round {
+    width: 44px; height: 44px; border-radius: 22px; border: none; background: var(--ground); color: var(--ink);
+    display: grid; place-items: center; cursor: pointer;
   }
 
-  .top-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    flex-shrink: 0;
+  .slots-wrap { flex-shrink: 0; width: 100%; max-width: var(--page-max); margin: 0 auto; padding: 8px 16px 6px; }
+  .slots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .slot {
+    height: 72px; border-radius: 18px; border: 1.5px solid #E2DDD1; background: #fff; color: var(--ink);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 0 6px;
+    cursor: pointer; transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
+  }
+  .slot.on { background: var(--ink); border-color: var(--ink); color: var(--mpx-yellow); }
+  .slot-lbl { font-size: 12px; font-weight: 700; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slot.on .slot-lbl { color: #fff; }
+  .slot-lbl.unset { color: var(--sub); font-weight: 600; }
+  .slot.on .slot-lbl.unset { color: rgba(255, 255, 255, 0.6); }
+
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; }
+  .inner { max-width: var(--page-max); margin: 0 auto; padding: 8px 16px calc(24px + var(--safe-bottom)); display: flex; flex-direction: column; gap: 10px; }
+
+  .search { display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 14px; border-radius: 23px; background: var(--ground); color: var(--sub); }
+  .search input { flex: 1; min-width: 0; border: none; background: transparent; font-size: 16px; color: var(--ink); outline: none; }
+  .search input::placeholder { color: var(--sub); }
+  .search:focus-within { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+  .hint-row { display: flex; align-items: center; gap: 8px; min-height: 32px; }
+  .hint { flex: 1; font-size: 13px; color: var(--sub); padding: 0 4px; }
+  .hint b { color: var(--ink); }
+  .hint.center { text-align: center; padding: 12px 4px; }
+  .link { height: 32px; border: none; background: var(--ground); border-radius: 16px; padding: 0 12px; color: var(--ink); font-size: 13px; font-weight: 700; cursor: pointer; }
+
+  h2 { margin: 8px 4px 0; font-size: 12px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); }
+  .sec-head { display: flex; align-items: center; justify-content: space-between; border: none; background: none; padding: 0 4px 0 0; cursor: pointer; }
+  .sec-head h2 { margin-top: 8px; }
+  .chev { color: #A39F96; margin-top: 8px; transition: transform var(--dur-fast); }
+  .chev.down { transform: rotate(90deg); }
+
+  .grid { list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+  .tile { position: relative; }
+  .run {
+    width: 100%; min-height: 96px; border: 1px solid var(--line); border-radius: 18px; background: #fff; color: var(--ink);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    padding: 12px 6px; cursor: pointer; transition: transform var(--dur-fast), background var(--dur-fast);
+  }
+  .run:active { transform: scale(0.97); }
+  .run.on { background: var(--mpx-yellow); border-color: var(--mpx-yellow); }
+  .ico { font-size: 24px; line-height: 1; }
+  .lbl { font-size: 13px; font-weight: 700; text-align: center; line-height: 1.2; }
+  .check {
+    position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 11px;
+    background: var(--ink); color: var(--mpx-yellow); display: grid; place-items: center; pointer-events: none;
+  }
+  .del {
+    position: absolute; top: 4px; left: 4px; width: 32px; height: 32px; border-radius: 16px; border: none;
+    background: transparent; color: #B4402F; display: grid; place-items: center; cursor: pointer;
   }
 
-  .back-btn {
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    background: rgba(0,0,0,0.15);
-    border-radius: 50%;
-    cursor: pointer;
-    color: #000;
-    transition: background 0.15s;
+  .add {
+    margin-top: 6px; height: 56px; border-radius: 18px; border: 1.5px dashed #CFC9BB; background: #fff; color: var(--ink);
+    display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 15px; font-weight: 700; cursor: pointer;
   }
-  .back-btn:hover { background: rgba(0,0,0,0.25); }
-
-  .top-bar-title {
-    font-size: 1rem;
-    font-weight: 700;
-    color: #000;
-    margin: 0;
-  }
-
-  /* ════════════════════════════════════════
-     BUTTONS BAR
-     ════════════════════════════════════════ */
-  .buttons-bar {
-    display: flex;
-    justify-content: center;
-    gap: 8px;
-    padding: 12px 14px;
-    background: #f8f8f8;
-    flex-shrink: 0;
-  }
-
-  .btn-selector {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-    padding: 8px 10px;
-    border: 2px solid transparent;
-    border-radius: 12px;
-    background: #fff;
-    cursor: pointer;
-    transition: all 0.15s;
-    min-width: 0;
-    flex: 1;
-    max-width: 80px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-  }
-  .btn-selector:hover {
-    background: #f5f5f5;
-  }
-  .btn-selector.selected {
-    border-color: var(--btn-color);
-    background: #fff;
-    box-shadow: 0 0 0 1px var(--btn-color), 0 2px 8px rgba(0,0,0,0.1);
-  }
-
-  .btn-selector.selected .btn-selector-icon {
-    background: var(--btn-color);
-    border-radius: 50%;
-    color: #fff;
-  }
-
-  .btn-selector-icon {
-    width: 36px;
-    height: 36px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--btn-color);
-    transition: all 0.15s;
-  }
-
-  .btn-selector-icon svg {
-    width: 65%;
-    height: auto;
-  }
-
-  .btn-selector-label {
-    font-size: 0.65rem;
-    font-weight: 600;
-    color: #000;
-    text-align: center;
-    line-height: 1.3;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 100%;
-  }
-  .btn-selector-label.unset {
-    color: #ccc;
-  }
-
-  /* ════════════════════════════════════════
-     PICKER SECTION
-     ════════════════════════════════════════ */
-  .picker-section {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    padding: 12px 14px 24px;
-    overflow-y: auto;
-  }
-  .picker-section::-webkit-scrollbar {
-    width: 4px;
-  }
-  .picker-section::-webkit-scrollbar-thumb {
-    background: #ddd;
-    border-radius: 4px;
-  }
-
-  /* ── Search Bar ───────────────────────── */
-  .search-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 14px;
-    border-radius: 24px;
-    background: #f5f5f5;
-    border: 1.5px solid #e0e0e0;
-    margin-bottom: 10px;
-    color: #999;
-    flex-shrink: 0;
-  }
-  .search-bar:focus-within {
-    border-color: #FFE605;
-    background: #fff;
-  }
-
-  .search-input {
-    flex: 1;
-    border: none;
-    background: transparent;
-    outline: none;
-    font-size: 0.85rem;
-    color: #000;
-  }
-  .search-input::placeholder {
-    color: #bbb;
-  }
-
-  /* ── Assign hint ──────────────────────── */
-  .assign-hint {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 0.8rem;
-    margin-bottom: 8px;
-    flex-shrink: 0;
-  }
-  .assign-hint strong {
-    font-weight: 700;
-  }
-
-  .clear-btn {
-    padding: 2px 10px;
-    border: 1.5px solid #ddd;
-    border-radius: 12px;
-    background: #fff;
-    color: #999;
-    font-size: 0.7rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s;
-    margin-left: auto;
-  }
-  .clear-btn:hover {
-    border-color: #999;
-    color: #666;
-  }
-
-  /* ── Category Header ──────────────────── */
-  .category-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 2px 6px;
-    flex-shrink: 0;
-  }
-  .category-header.collapsible {
-    cursor: pointer;
-    border: none;
-    background: none;
-    width: 100%;
-    border-radius: 8px;
-    transition: background 0.15s;
-  }
-  .category-header.collapsible:hover {
-    background: rgba(0,0,0,0.04);
-  }
-
-  .collapse-chevron {
-    color: #888;
-    transition: transform 0.2s;
-    margin-left: auto;
-    flex-shrink: 0;
-  }
-  .collapse-chevron.collapsed {
-    transform: rotate(-90deg);
-  }
-  .category-label {
-    font-size: 0.75rem;
-    font-weight: 700;
-    color: #888;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  /* ── Actions Grid ─────────────────────── */
-  .actions-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 10px;
-    margin-bottom: 8px;
-  }
-
-  .action-item {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 12px 4px 10px;
-    border: 2px solid transparent;
-    border-radius: 14px;
-    background: #fafafa;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .action-item:hover {
-    background: #f0f0f0;
-  }
-  .action-item.selected {
-    border-color: var(--action-color);
-    background: #fff;
-  }
-
-  .action-icon {
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #fff;
-  }
-  .action-icon :global(.action-emoji) {
-    font-size: 1.7rem;
-  }
-  .action-label {
-    font-size: 0.65rem;
-    font-weight: 600;
-    color: #000;
-    text-align: center;
-    line-height: 1.2;
-  }
-
-  .action-check {
-    position: absolute;
-    top: -4px;
-    right: -4px;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-  }
-
-  .delete-action-item-btn {
-    position: absolute;
-    top: -6px;
-    left: -6px;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: #d14949;
-    border: 1.5px solid #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity 0.15s;
-    padding: 0;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-  }
-  .action-item:hover .delete-action-item-btn {
-    opacity: 1;
-  }
-
-  /* ── Add Action Button ────────────────── */
-  .add-action-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 12px;
-    border: 2px dashed #ccc;
-    border-radius: 14px;
-    background: #fafafa;
-    cursor: pointer;
-    transition: all 0.15s;
-    margin-top: 8px;
-    width: 100%;
-  }
-  .add-action-btn:hover {
-    background: #f0f0f0;
-    border-color: #FFE605;
-  }
-
-  .add-icon {
-    font-size: 1.1rem;
-  }
-  .add-label {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #666;
-  }
-
-  .no-results {
-    grid-column: 1 / -1;
-    text-align: center;
-    padding: 24px;
-    color: #bbb;
-    font-size: 0.85rem;
-  }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>
-
-

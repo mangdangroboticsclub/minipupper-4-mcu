@@ -49,7 +49,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    background: #fff;
+    background: var(--page);
   }
 
   .center-area {
@@ -58,31 +58,30 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 24px;
-    gap: 10px;
-    max-width: 480px;
+    padding: 24px 16px;
+    gap: 8px;
+    max-width: var(--page-max);
     margin: 0 auto;
     width: 100%;
   }
 
   .pupper-badge {
-    width: clamp(72px, 18vmin, 104px);
-    height: clamp(72px, 18vmin, 104px);
-    border-radius: var(--r-lg);
+    width: clamp(72px, 18vmin, 96px);
+    height: clamp(72px, 18vmin, 96px);
+    border-radius: 24px;
     background: var(--mpx-yellow);
     display: grid;
     place-items: center;
-    box-shadow: var(--shadow-card);
-    margin-bottom: 6px;
+    margin-bottom: 8px;
     transition: filter var(--dur-slow);
   }
   .pupper-badge.asleep { filter: saturate(0.6); }
 
-  .tagline { font-size: 1.05rem; font-weight: 800; color: var(--mpx-ink); text-align: center; }
-  .subtitle { font-size: 0.8rem; color: var(--mpx-muted); text-align: center; line-height: 1.5; max-width: 340px; }
+  .tagline { font-size: 22px; font-weight: 800; letter-spacing: -0.01em; color: var(--ink); text-align: center; }
+  .subtitle { font-size: 14px; color: var(--sub); text-align: center; line-height: 1.45; max-width: 340px; }
 
   .suggestions {
-    margin-top: 14px;
+    margin-top: 16px;
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 8px;
@@ -93,19 +92,21 @@
   .chip {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 11px 12px;
-    border: 1px solid var(--mpx-line);
-    border-radius: var(--r-md);
-    background: var(--mpx-surface);
-    color: var(--mpx-ink-soft);
-    font-size: 0.78rem;
-    font-weight: 600;
+    gap: 10px;
+    min-height: 56px;
+    padding: 10px 14px;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: #fff;
+    color: var(--ink);
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.3;
     text-align: left;
     cursor: pointer;
-    transition: border-color var(--dur-fast), transform var(--dur-fast), background var(--dur-fast);
+    transition: background var(--dur-fast), transform var(--dur-fast);
   }
-  .chip:hover:not(:disabled) { border-color: var(--mpx-yellow); background: #fffef2; }
-  .chip:active:not(:disabled) { transform: scale(0.98); }
+  .chip:active:not(:disabled) { transform: scale(0.97); background: var(--mpx-yellow); }
+  .chip:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
   .chip:disabled { opacity: 0.5; cursor: default; }
 </style>

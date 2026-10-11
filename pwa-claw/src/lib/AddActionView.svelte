@@ -1,15 +1,10 @@
 <script>
-  import { colors } from "./colors.js";
-
   let { onSave, onBack } = $props();
-
-  const YELLOW = colors.mpx.primary;
 
   // ── File-system browser state (embedded FileViewer) ──
   let files = $state([]);
   let dirs = $state([]);
   let currentDir = $state("/");
-  let fsInfo = $state({ total: 0, used: 0 });
   let loading = $state(true);
   let showHidden = $state(false);
   let searchQuery = $state("");
@@ -18,15 +13,6 @@
   function isLua(n)  { return n.endsWith(".lua"); }
   function isAllowed(n) { return isWasm(n) || isLua(n); }
 
-  function icon(n) {
-    if (isWasm(n)) return n.endsWith(".mpxe") ? "🧩" : "⚡";
-    if (isLua(n))  return "🌙";
-    if (n.endsWith(".gz")) return "📦";
-    if (n.endsWith(".json")) return "📋";
-    if (n.endsWith(".md")) return "📝";
-    return "📄";
-  }
-
   function fmtSize(b) {
     return b < 1024 ? b + " B" : (b / 1024).toFixed(1) + " KB";
   }
@@ -34,12 +20,8 @@
   async function fetchDir(dir) {
     loading = true;
     try {
-      const [lr, ir] = await Promise.all([
-        fetch("/v1/fs/list?path=" + encodeURIComponent(dir)),
-        fetch("/v1/fs/info"),
-      ]);
+      const lr = await fetch("/v1/fs/list?path=" + encodeURIComponent(dir));
       if (lr.ok) { const d = await lr.json(); files = d.f || []; dirs = d.d || []; currentDir = dir; }
-      if (ir.ok) fsInfo = await ir.json();
     } catch {
       files = [];
       dirs = [];
@@ -58,15 +40,10 @@
   $effect(() => { fetchDir("/"); });
 
   // ── Filtering ──
-  let filteredDirs = $derived(
-    searchQuery
-      ? dirs.filter(d => d.toLowerCase().includes(searchQuery.toLowerCase()))
-      : dirs
-  );
+  const q = $derived(searchQuery.trim().toLowerCase());
+  let filteredDirs = $derived(q ? dirs.filter((d) => d.toLowerCase().includes(q)) : dirs);
   let filteredFiles = $derived(
-    searchQuery
-      ? files.filter(f => f.n.toLowerCase().includes(searchQuery.toLowerCase()))
-      : files
+    (q ? files.filter((f) => f.n.toLowerCase().includes(q)) : files).filter((f) => showHidden || isAllowed(f.n))
   );
 
   // ── Selection state ──
@@ -84,12 +61,14 @@
 
   let effectiveEmoji = $derived(customEmojiInput || actionEmoji || "⚙️");
 
+  const pathOf = (n) => (currentDir === "/" ? "" : currentDir) + "/" + n;
+  const isSelected = (f) => selectedFile && selectedFile.path === pathOf(f.n);
+
   function selectFile(f) {
-    const dirPath = currentDir === "/" ? "" : currentDir;
     let fileType = "lua";
     if (isWasm(f.n)) fileType = f.n.endsWith(".mpxe") ? "mpxe" : "wasm";
     selectedFile = {
-      path: dirPath + "/" + f.n,
+      path: pathOf(f.n),
       name: f.n,
       type: fileType,
     };
@@ -117,635 +96,223 @@
     onBack?.();
   }
 
-  function isFormValid() {
-    return selectedFile && actionName.trim().length > 0;
-  }
+  const formValid = $derived(!!selectedFile && actionName.trim().length > 0);
 </script>
 
-<div class="add-action-page">
-  <!-- Header -->
-  <header class="top-bar" style="background: {YELLOW}">
-    <button class="back-btn" onclick={onBack} aria-label="Back">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="19" y1="12" x2="5" y2="12"/>
-        <polyline points="12 19 5 12 12 5"/>
-      </svg>
+<div class="page">
+  <header class="bar">
+    <button type="button" class="round" onclick={onBack} aria-label="Back">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
     </button>
-    <h1 class="top-bar-title">Add Action</h1>
-    <div style="width:32px"></div>
+    <h1>Add a move</h1>
+    <span class="spacer"></span>
   </header>
 
-  <div class="form-scroll">
-    <!-- ═══ Step 1: Browse & pick a file ═══ -->
-    <section class="form-section">
-      <h2 class="section-title">1. Browse &amp; select a file</h2>
-      <p class="section-desc">Navigate to a .wasm, .mpxe, or .lua file on the robot.</p>
+  <div class="scroll">
+    <div class="inner">
+      <!-- ═══ Step 1: Browse & pick a file ═══ -->
+      <section>
+        <h2>1 · Pick a file</h2>
+        <p class="hint">A motion skill (.wasm, .mpxe) or a Lua script on the robot.</p>
 
-      <!-- Search bar -->
-      <div class="fv-search-wrap">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="11" cy="11" r="8"/>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
-        </svg>
-        <input
-          class="fv-search-input"
-          type="text"
-          placeholder="Search files…"
-          bind:value={searchQuery}
-        />
-      </div>
+        <label class="search">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+          <span class="sr">Search files</span>
+          <input type="search" bind:value={searchQuery} placeholder="Search files" />
+        </label>
 
-      <!-- Storage bar -->
-      <div class="fv-storage-bar" style="--bar-bg: {YELLOW}">
-        <div class="fv-storage-row">
-          <span class="fv-storage-path">📁 {currentDir === "/" ? "/" : currentDir}</span>
-          <span class="fv-storage-actions">
-            <button class="fv-pill-btn fv-hidden-toggle"
-                    class:fv-hidden-active={showHidden}
-                    onclick={() => { showHidden = !showHidden; }}>
-              {showHidden ? '👁 Hidden' : '👁‍🗨'}
+        <div class="files">
+          <div class="files-head">
+            <span class="path">{currentDir}</span>
+            <button type="button" class="round sm" class:on={showHidden} onclick={() => (showHidden = !showHidden)} aria-pressed={showHidden} aria-label="Show all files" title="Show all files">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
-            <button class="fv-pill-btn" onclick={() => fetchDir(currentDir)}>↻</button>
-          </span>
-        </div>
-        <div class="fv-storage-track">
-          <div class="fv-storage-fill" style="width:{fsInfo.total ? ((fsInfo.used / fsInfo.total) * 100) : 0}%"></div>
-        </div>
-        <span class="fv-storage-pct">{fsInfo.total ? ((fsInfo.used / fsInfo.total) * 100).toFixed(0) : 0}% used</span>
-      </div>
-
-      <!-- File / dir listing -->
-      <div class="fv-list">
-        {#if loading}
-          <p class="fv-status">Loading…</p>
-        {:else}
-          {#if currentDir !== "/"}
-            <button class="fv-dir-item" onclick={goUp}>
-              <span class="fv-dir-icon">📂</span>
-              <span class="fv-dir-name">..</span>
+            <button type="button" class="round sm" onclick={() => fetchDir(currentDir)} aria-label="Refresh">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
             </button>
-          {/if}
+          </div>
 
-          {#each filteredDirs as d}
-            <button class="fv-dir-item" onclick={() => goDir(d)}>
-              <span class="fv-dir-icon">📁</span>
-              <span class="fv-dir-name">{d}</span>
-            </button>
-          {/each}
+          <ul class="list">
+            {#if loading}
+              <li class="status">Loading…</li>
+            {:else}
+              {#if currentDir !== "/"}
+                <li>
+                  <button type="button" class="row" onclick={goUp}>
+                    <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14l-4-4 4-4"/><path d="M5 10h10a4 4 0 0 1 4 4v4"/></svg></span>
+                    <span class="t">Up one folder</span>
+                  </button>
+                </li>
+              {/if}
 
-          {#each filteredFiles as f}
-            {@const ok = isAllowed(f.n)}
-            {#if showHidden || ok}
-              <button
-                class="fv-file-item"
-                class:fv-dimmed={!ok}
-                class:fv-file-selected={selectedFile && selectedFile.name === f.n && (currentDir === "/" ? "" : currentDir) + "/" + f.n === selectedFile.path}
-                onclick={() => ok ? selectFile(f) : undefined}
-                disabled={!ok}
-              >
-                <span class="fv-file-icon">{icon(f.n)}</span>
-                <div class="fv-file-meta">
-                  <span class="fv-file-name">{f.n}{#if f.r}<span class="fv-lock-indicator">🔒</span>{/if}</span>
-                  <span class="fv-file-size">{fmtSize(f.s)}</span>
-                </div>
-                {#if selectedFile && selectedFile.name === f.n && (currentDir === "/" ? "" : currentDir) + "/" + f.n === selectedFile.path}
-                  <span class="fv-file-check">✓</span>
-                {/if}
-              </button>
+              {#each filteredDirs as d (d)}
+                <li>
+                  <button type="button" class="row" onclick={() => goDir(d)}>
+                    <span class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+                    <span class="t">{d}</span>
+                    <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+                  </button>
+                </li>
+              {/each}
+
+              {#each filteredFiles as f (f.n)}
+                {@const ok = isAllowed(f.n)}
+                {@const sel = isSelected(f)}
+                <li>
+                  <button type="button" class="row" class:sel disabled={!ok} aria-pressed={sel} onclick={() => selectFile(f)}>
+                    <span class="ico" class:motion={isWasm(f.n)} class:lua={isLua(f.n)} aria-hidden="true">
+                      {#if isWasm(f.n)}
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18c3-8 5-12 8-12s5 4 8 12"/><circle cx="12" cy="6" r="2"/></svg>
+                      {:else if isLua(f.n)}
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 8l-4 4 4 4M16 8l4 4-4 4"/></svg>
+                      {:else}
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>
+                      {/if}
+                    </span>
+                    <span class="txt">
+                      <span class="t">{f.n}</span>
+                      <span class="d">{fmtSize(f.s)}</span>
+                    </span>
+                    {#if sel}
+                      <span class="check" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg></span>
+                    {/if}
+                  </button>
+                </li>
+              {/each}
+
+              {#if !filteredDirs.length && !filteredFiles.length && currentDir === "/"}
+                <li class="status">{q ? `No file called “${searchQuery}”.` : "No skill files on the robot yet."}</li>
+              {/if}
             {/if}
-          {/each}
-        {/if}
-      </div>
-    </section>
-
-    <!-- ═══ Step 2: Name ═══ -->
-    <section class="form-section">
-      <h2 class="section-title">2. Give it a name</h2>
-      <input
-        type="text"
-        class="name-input"
-        placeholder="e.g. My Cool Action"
-        bind:value={actionName}
-        maxlength="24"
-      />
-      <span class="char-count">{actionName.length}/24</span>
-    </section>
-
-    <!-- ═══ Step 3: Pick an emoji ═══ -->
-    <section class="form-section">
-      <h2 class="section-title">3. Pick an emoji</h2>
-      <p class="section-desc">Type any emoji below, or pick one from the grid.</p>
-
-      <input
-        type="text"
-        class="emoji-text-input"
-        placeholder="e.g. 🎉 or any text…"
-        bind:value={customEmojiInput}
-        maxlength="8"
-      />
-
-      <div class="emoji-grid">
-        {#each emojiSuggestions as emoji}
-          <button
-            class="emoji-item"
-            class:selected={actionEmoji === emoji && !customEmojiInput}
-            onclick={() => { actionEmoji = emoji; customEmojiInput = ""; }}
-          >
-            {emoji}
-          </button>
-        {/each}
-      </div>
-      <div class="emoji-preview">
-        Selected: <span class="emoji-preview-icon">{effectiveEmoji}</span>
-      </div>
-    </section>
-
-    <!-- ═══ Preview ═══ -->
-    {#if selectedFile}
-      <section class="form-section preview-section">
-        <h2 class="section-title">Preview</h2>
-        <div class="preview-card">
-          <div class="preview-icon" style="background: {YELLOW}">
-            <span class="preview-emoji">{effectiveEmoji}</span>
-          </div>
-          <div class="preview-info">
-            <span class="preview-name">{actionName || "Action Name"}</span>
-            <span class="preview-file">{selectedFile.name}</span>
-          </div>
+          </ul>
         </div>
       </section>
-    {/if}
+
+      <!-- ═══ Step 2: Name ═══ -->
+      <section>
+        <h2>2 · Name it</h2>
+        <label class="field">
+          <span class="sr">Move name</span>
+          <input type="text" placeholder="e.g. My cool move" bind:value={actionName} maxlength="24" />
+          <span class="count">{actionName.length}/24</span>
+        </label>
+      </section>
+
+      <!-- ═══ Step 3: Pick an emoji ═══ -->
+      <section>
+        <h2>3 · Pick an icon</h2>
+        <p class="hint">Type any emoji, or pick one below.</p>
+        <label class="field">
+          <span class="sr">Custom emoji</span>
+          <input type="text" class="emoji-in" placeholder="Type an emoji" bind:value={customEmojiInput} maxlength="8" />
+        </label>
+        <div class="emoji-grid">
+          {#each emojiSuggestions as emoji}
+            <button
+              type="button"
+              class="emoji"
+              class:on={actionEmoji === emoji && !customEmojiInput}
+              aria-pressed={actionEmoji === emoji && !customEmojiInput}
+              onclick={() => { actionEmoji = emoji; customEmojiInput = ""; }}
+            >{emoji}</button>
+          {/each}
+        </div>
+      </section>
+
+      <!-- ═══ Preview ═══ -->
+      {#if selectedFile}
+        <section>
+          <h2>Preview</h2>
+          <div class="card">
+            <span class="preview-ico" aria-hidden="true">{effectiveEmoji}</span>
+            <span class="txt">
+              <span class="name">{actionName || "Move name"}</span>
+              <span class="d">{selectedFile.name}</span>
+            </span>
+          </div>
+        </section>
+      {/if}
+    </div>
   </div>
 
-  <!-- ═══ Save Button ═══ -->
-  <div class="footer-bar">
-    <button
-      class="save-btn"
-      style="background: {YELLOW}"
-      disabled={!isFormValid()}
-      onclick={handleSave}
-    >
-      Save Action
-    </button>
+  <div class="foot">
+    <button type="button" class="primary" disabled={!formValid} onclick={handleSave}>Save move</button>
   </div>
 </div>
 
 <style>
-  .add-action-page {
-    position: absolute;
-    inset: 0;
-    background: #fff;
-    display: flex;
-    flex-direction: column;
-    z-index: 50;
+  .page { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; background: var(--page); color: var(--ink); }
+  .bar {
+    flex-shrink: 0; height: calc(64px + var(--safe-top)); padding: calc(10px + var(--safe-top)) 16px 0;
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: var(--page-max); width: 100%; margin: 0 auto;
   }
+  .bar h1 { font-size: 18px; font-weight: 800; }
+  .spacer { width: 44px; }
+  .round {
+    width: 44px; height: 44px; border-radius: 22px; border: none; background: var(--ground); color: var(--ink);
+    display: grid; place-items: center; cursor: pointer; flex-shrink: 0; transition: background var(--dur-fast);
+  }
+  .round.sm { width: 34px; height: 34px; background: #fff; }
+  .round.on { background: var(--mpx-yellow); }
 
-  .top-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    flex-shrink: 0;
-  }
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; }
+  .inner { max-width: var(--page-max); margin: 0 auto; padding: 8px 16px 20px; display: flex; flex-direction: column; gap: 22px; }
+  section { display: flex; flex-direction: column; gap: 8px; }
+  h2 { margin: 0 4px; font-size: 12px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); }
+  .hint { font-size: 13px; color: var(--sub); padding: 0 4px; margin-top: -2px; }
 
-  .back-btn {
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    background: rgba(0,0,0,0.15);
-    border-radius: 50%;
-    cursor: pointer;
-    color: #000;
-    transition: background 0.15s;
-  }
-  .back-btn:hover { background: rgba(0,0,0,0.25); }
+  .search { display: flex; align-items: center; gap: 8px; height: 46px; padding: 0 14px; border-radius: 23px; background: var(--ground); color: var(--sub); }
+  .search input { flex: 1; min-width: 0; border: none; background: transparent; font-size: 16px; color: var(--ink); outline: none; }
+  .search:focus-within, .field:focus-within { outline: 3px solid var(--ink); outline-offset: 2px; }
 
-  .top-bar-title {
-    font-size: 1rem;
-    font-weight: 700;
-    color: #000;
-    margin: 0;
+  .files { background: #fff; border: 1px solid var(--line); border-radius: 20px; overflow: hidden; }
+  .files-head { display: flex; align-items: center; gap: 6px; padding: 8px 8px 8px 16px; background: var(--ground); }
+  .path { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .list { list-style: none; max-height: 300px; overflow-y: auto; }
+  .list > * + * { border-top: 1px solid var(--hair-2); }
+  .status { padding: 20px 16px; text-align: center; font-size: 14px; color: var(--sub); }
+  .row {
+    width: 100%; border: none; background: transparent; color: var(--ink);
+    display: flex; align-items: center; gap: 12px; padding: 10px 16px; text-align: left; cursor: pointer;
+    transition: background var(--dur-fast);
   }
+  .row:disabled { opacity: 0.45; cursor: default; }
+  .row.sel { background: #FFF6B0; }
+  .row:focus-visible { outline: 3px solid var(--ink); outline-offset: -3px; }
+  .ico { width: 34px; height: 34px; border-radius: 10px; background: var(--ground); display: grid; place-items: center; flex-shrink: 0; }
+  .ico.lua { background: var(--mpx-yellow); }
+  .ico.motion { background: #CFE3FF; }
+  .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .t { flex: 1; min-width: 0; font-size: 15px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .d { font-size: 13px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chev { color: #A39F96; flex-shrink: 0; }
+  .check { width: 26px; height: 26px; border-radius: 13px; background: var(--ink); color: var(--mpx-yellow); display: grid; place-items: center; flex-shrink: 0; }
 
-  .form-scroll {
-    flex: 1;
-    overflow-y: auto;
-    padding: 16px 14px;
-  }
-  .form-scroll::-webkit-scrollbar {
-    width: 4px;
-  }
-  .form-scroll::-webkit-scrollbar-thumb {
-    background: #ddd;
-    border-radius: 4px;
-  }
+  .field { display: flex; align-items: center; gap: 8px; height: 50px; padding: 0 16px; border-radius: 16px; background: var(--ground); }
+  .field input { flex: 1; min-width: 0; border: none; background: transparent; font-size: 16px; color: var(--ink); outline: none; }
+  .field input::placeholder, .search input::placeholder { color: var(--sub); }
+  .emoji-in { text-align: center; font-size: 20px !important; }
+  .count { font-size: 12px; font-weight: 700; color: var(--sub); font-variant-numeric: tabular-nums; }
 
-  /* ── Sections ── */
-  .form-section {
-    margin-bottom: 20px;
+  .emoji-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; }
+  .emoji {
+    aspect-ratio: 1; border: none; border-radius: 12px; background: var(--ground); font-size: 20px; padding: 0;
+    display: grid; place-items: center; cursor: pointer; transition: background var(--dur-fast), transform var(--dur-fast);
   }
+  .emoji.on { background: var(--mpx-yellow); transform: scale(1.06); }
 
-  .section-title {
-    font-size: 0.85rem;
-    font-weight: 700;
-    color: #000;
-    margin: 0 0 4px;
-  }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 20px; padding: 14px; display: flex; align-items: center; gap: 14px; }
+  .preview-ico { width: 52px; height: 52px; border-radius: 15px; background: var(--mpx-yellow); display: grid; place-items: center; font-size: 26px; flex-shrink: 0; }
+  .name { font-size: 16px; font-weight: 700; }
 
-  .section-desc {
-    font-size: 0.75rem;
-    color: #999;
-    margin: 0 0 10px;
+  .foot { flex-shrink: 0; width: 100%; max-width: var(--page-max); margin: 0 auto; padding: 8px 16px calc(16px + var(--safe-bottom)); }
+  .primary {
+    width: 100%; height: 56px; border-radius: 28px; border: none; background: var(--ink); color: #fff;
+    font-size: 16px; font-weight: 700; cursor: pointer; transition: transform var(--dur-fast), opacity var(--dur-fast);
   }
-
-  /* ═══ FileViewer-inspired styles ═══ */
-
-  /* ── Search ── */
-  .fv-search-wrap {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 12px;
-    border-radius: 12px;
-    background: #f5f5f5;
-    border: 1.5px solid #e0e0e0;
-    margin-bottom: 8px;
-    color: #999;
-  }
-  .fv-search-wrap:focus-within {
-    border-color: #FFE605;
-    background: #fff;
-  }
-
-  .fv-search-input {
-    flex: 1;
-    border: none;
-    background: transparent;
-    outline: none;
-    font-size: 0.8rem;
-    color: #000;
-    font-family: inherit;
-  }
-  .fv-search-input::placeholder {
-    color: #bbb;
-  }
-
-  /* ── Storage bar ── */
-  .fv-storage-bar {
-    padding: 8px 12px;
-    background: #f5f5f5;
-    border-radius: 10px;
-    margin-bottom: 10px;
-  }
-
-  .fv-storage-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 0.7rem;
-    color: #666;
-    margin-bottom: 4px;
-  }
-
-  .fv-storage-path {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.7rem;
-    font-weight: 600;
-    color: #444;
-  }
-
-  .fv-storage-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-shrink: 0;
-    margin-left: 8px;
-  }
-
-  .fv-pill-btn {
-    padding: 2px 8px;
-    border: none;
-    border-radius: 999px;
-    background: rgba(0, 0, 0, 0.12);
-    color: #000;
-    font-size: 0.65rem;
-    font-weight: 700;
-    cursor: pointer;
-    transition: background 0.15s;
-    line-height: 1.6;
-  }
-  .fv-pill-btn:hover {
-    background: rgba(0, 0, 0, 0.22);
-  }
-
-  .fv-hidden-toggle {
-    font-size: 0.6rem;
-    white-space: nowrap;
-  }
-  .fv-hidden-active {
-    background: rgba(0,0,0,0.22);
-  }
-
-  .fv-storage-track {
-    height: 5px;
-    border-radius: 3px;
-    background: #ddd;
-    overflow: hidden;
-    margin-bottom: 3px;
-  }
-
-  .fv-storage-fill {
-    height: 100%;
-    border-radius: 3px;
-    background: var(--bar-bg, #FFE605);
-    transition: width 0.3s;
-  }
-
-  .fv-storage-pct {
-    display: block;
-    font-size: 0.6rem;
-    color: #999;
-    text-align: right;
-  }
-
-  /* ── File / dir list ── */
-  .fv-list {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    max-height: 240px;
-    overflow-y: auto;
-  }
-  .fv-list::-webkit-scrollbar {
-    width: 3px;
-  }
-  .fv-list::-webkit-scrollbar-thumb {
-    background: #ddd;
-    border-radius: 4px;
-  }
-
-  .fv-status {
-    text-align: center;
-    color: #999;
-    font-size: 0.8rem;
-    padding: 20px;
-  }
-
-  .fv-dir-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 9px 12px;
-    border-radius: 10px;
-    border: 2px solid transparent;
-    background: #fafafa;
-    cursor: pointer;
-    transition: all 0.15s;
-    text-align: left;
-    width: 100%;
-  }
-  .fv-dir-item:hover {
-    background: #f0f0f0;
-  }
-
-  .fv-dir-icon {
-    font-size: 1rem;
-    flex-shrink: 0;
-  }
-
-  .fv-dir-name {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #000;
-  }
-
-  .fv-file-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 9px 12px;
-    border-radius: 10px;
-    border: 2px solid transparent;
-    background: #fafafa;
-    cursor: pointer;
-    transition: all 0.15s;
-    text-align: left;
-    width: 100%;
-  }
-  .fv-file-item:hover {
-    background: #f0f0f0;
-  }
-  .fv-file-item:disabled {
-    cursor: default;
-    opacity: 0.5;
-  }
-  .fv-file-item:disabled:hover {
-    background: #fafafa;
-  }
-  .fv-file-item.fv-file-selected {
-    border-color: #FFE605;
-    background: #fffef0;
-  }
-
-  .fv-dimmed {
-    opacity: 0.45;
-  }
-
-  .fv-file-icon {
-    font-size: 1.1rem;
-    flex-shrink: 0;
-  }
-
-  .fv-file-meta {
-    min-width: 0;
-    flex: 1;
-  }
-
-  .fv-file-name {
-    display: block;
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #000;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .fv-lock-indicator {
-    font-size: 0.55rem;
-    margin-left: 2px;
-  }
-
-  .fv-file-size {
-    display: block;
-    font-size: 0.65rem;
-    color: #999;
-    margin-top: 1px;
-  }
-
-  .fv-file-check {
-    margin-left: auto;
-    color: #FFE605;
-    font-weight: 700;
-    font-size: 1rem;
-    flex-shrink: 0;
-  }
-
-  /* ── Name input ── */
-  .name-input {
-    width: 100%;
-    padding: 12px 14px;
-    border: 2px solid #e0e0e0;
-    border-radius: 12px;
-    font-size: 0.9rem;
-    outline: none;
-    transition: border-color 0.15s;
-    box-sizing: border-box;
-    font-family: inherit;
-  }
-  .name-input:focus {
-    border-color: #FFE605;
-  }
-
-  .char-count {
-    display: block;
-    text-align: right;
-    font-size: 0.65rem;
-    color: #bbb;
-    margin-top: 4px;
-  }
-
-  /* ── Emoji text input ── */
-  .emoji-text-input {
-    width: 100%;
-    padding: 10px 14px;
-    border: 2px solid #e0e0e0;
-    border-radius: 12px;
-    font-size: 1.2rem;
-    outline: none;
-    margin-bottom: 10px;
-    box-sizing: border-box;
-    font-family: inherit;
-    text-align: center;
-  }
-  .emoji-text-input:focus {
-    border-color: #FFE605;
-  }
-
-  /* ── Emoji picker ── */
-  .emoji-grid {
-    display: grid;
-    grid-template-columns: repeat(8, 1fr);
-    gap: 6px;
-  }
-
-  .emoji-item {
-    width: 100%;
-    aspect-ratio: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 2px solid transparent;
-    border-radius: 10px;
-    background: #f5f5f5;
-    cursor: pointer;
-    font-size: 1.2rem;
-    transition: all 0.15s;
-    padding: 0;
-  }
-  .emoji-item:hover {
-    background: #eee;
-  }
-  .emoji-item.selected {
-    border-color: #FFE605;
-    background: #fff;
-    transform: scale(1.1);
-  }
-
-  .emoji-preview {
-    font-size: 0.8rem;
-    color: #666;
-    margin-top: 8px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .emoji-preview-icon {
-    font-size: 1.5rem;
-  }
-
-  /* ── Preview ── */
-  .preview-section {
-    margin-bottom: 0;
-  }
-
-  .preview-card {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 14px;
-    border-radius: 14px;
-    background: #fafafa;
-    border: 2px solid #eee;
-  }
-
-  .preview-icon {
-    width: 52px;
-    height: 52px;
-    border-radius: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 1.6rem;
-    flex-shrink: 0;
-  }
-
-  .preview-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .preview-name {
-    font-size: 0.95rem;
-    font-weight: 700;
-    color: #000;
-  }
-
-  .preview-file {
-    font-size: 0.7rem;
-    color: #999;
-  }
-
-  /* ── Footer ── */
-  .footer-bar {
-    padding: 12px 14px;
-    border-top: 1px solid #eee;
-    flex-shrink: 0;
-  }
-
-  .save-btn {
-    width: 100%;
-    padding: 14px;
-    border: none;
-    border-radius: 14px;
-    font-size: 1rem;
-    font-weight: 700;
-    color: #000;
-    cursor: pointer;
-    transition: opacity 0.15s;
-  }
-  .save-btn:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-  .save-btn:not(:disabled):hover {
-    opacity: 0.9;
-  }
+  .primary:active:not(:disabled) { transform: scale(0.98); }
+  .primary:disabled { opacity: 0.35; cursor: default; }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>

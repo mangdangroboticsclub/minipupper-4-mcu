@@ -1,16 +1,11 @@
 <script>
-  import { colors } from "./colors.js";
-
   /** @type {{ onNavigate?: (view: string) => void, network?: object }} */
   let { onNavigate, network } = $props();
-
-  const YELLOW = colors.mpx.primary;
 
   let ssid = $state(network?.apSsid || "MPX-Dog");
   let password = $state("");
   let showPassword = $state(false);
   let saving = $state(false);
-  let saved = $state(false);
   let error = $state("");
 
   /** After a successful save the ESP restarts. Track which stage we're in. */
@@ -19,8 +14,13 @@
   // Show current AP info
   let apIp = $derived(network?.apIp || "192.168.2.1");
 
-  async function saveConfig() {
+  async function saveConfig(e) {
+    e?.preventDefault();
     if (!ssid.trim()) return;
+    if (password.length > 0 && password.length < 8) {
+      error = "Hotspot passwords are at least 8 characters.";
+      return;
+    }
     saving = true;
     error = "";
     try {
@@ -30,7 +30,6 @@
         body: JSON.stringify({ ssid: ssid.trim(), password }),
       });
       if (res.ok) {
-        saved = true;
         // ESP will restart — show the restarting screen
         phase = "restarting";
       } else {
@@ -63,437 +62,147 @@
   });
 </script>
 
-<div class="ap-root">
-  {#if phase === "restarting"}
-    <!-- ═══ RESTARTING VIEW ═══ -->
-    <div class="restart-view">
-      <div class="restart-icon">🔄</div>
-      <h2 class="restart-title">Applying Configuration</h2>
-      <p class="restart-desc">
-        The robot is saving your new AP settings and restarting…
-      </p>
-      <div class="restart-bar-track">
-        <div class="restart-bar-fill"></div>
-      </div>
-    </div>
-
-  {:else if phase === "reconnect"}
-    <!-- ═══ RECONNECT VIEW ═══ -->
-    <div class="reconnect-view">
-      <div class="reconnect-icon">📶</div>
-      <h2 class="reconnect-title">Reconnect Required</h2>
-      <p class="reconnect-desc">
-        Your robot has restarted with the new AP settings.
-      </p>
-
-      <div class="reconnect-step-list">
-        <div class="reconnect-step">
-          <span class="step-num">1</span>
-          <span class="step-text">
-            Open your device's <strong>Wi‑Fi settings</strong> and connect to
-            <strong>{ssid || "MPX-Dog"}</strong>
-            {#if password}
-              using the password you set.
-            {:else}
-              (no password required).
-            {/if}
-          </span>
-        </div>
-        <div class="reconnect-step">
-          <span class="step-num">2</span>
-          <span class="step-text">
-            Come back and <strong>refresh this page</strong>, or tap the button below.
-          </span>
-        </div>
-      </div>
-
-      <button class="reconnect-btn" style="background: {YELLOW}" onclick={onReconnected}>
-        I'm connected — Continue
+<div class="page">
+  <header class="bar">
+    {#if phase === "form"}
+      <button type="button" class="round" onclick={goBack} aria-label="Back to settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
       </button>
-    </div>
-
-  {:else}
-    <!-- ═══ FORM VIEW ═══ -->
-    <!-- Header -->
-    <div class="header">
-      <button class="back-btn" onclick={goBack} aria-label="Back">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M19 12H5M12 19l-7-7 7-7"/>
-        </svg>
-      </button>
-      <h1 class="header-title">AP Mode</h1>
-    </div>
-
-    <p class="desc">Configure the Access Point mode for your Pupper's direct hotspot connection.</p>
-
-    <!-- Current AP info -->
-    <div class="ap-info">
-      <span class="ap-info-label">Current IP:</span>
-      <span class="ap-info-value">{apIp}</span>
-    </div>
-
-    <!-- ═══ SSID Field ═══ -->
-    <div class="field">
-      <label class="field-label" for="ap-ssid">SSID</label>
-      <input
-        id="ap-ssid"
-        class="field-input"
-        type="text"
-        bind:value={ssid}
-        placeholder="Enter AP name"
-      />
-    </div>
-
-    <!-- ═══ Password Field ═══ -->
-    <div class="field">
-      <label class="field-label" for="ap-password">Password</label>
-      <div class="password-wrapper">
-        <input
-          id="ap-password"
-          class="field-input"
-          type={showPassword ? "text" : "password"}
-          bind:value={password}
-          placeholder="At least 8 characters"
-        />
-        <button
-          class="toggle-vis"
-          onclick={() => showPassword = !showPassword}
-          aria-label={showPassword ? "Hide password" : "Show password"}
-        >
-          {#if showPassword}
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19M14.12 14.12a3 3 0 1 1-4.24-4.24"/>
-              <line x1="1" y1="1" x2="23" y2="23"/>
-            </svg>
-          {:else}
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-              <circle cx="12" cy="12" r="3"/>
-            </svg>
-          {/if}
-        </button>
-      </div>
-    </div>
-
-    <!-- ═══ Save Button ═══ -->
-    <button
-      class="save-btn"
-      onclick={saveConfig}
-      disabled={saving || !ssid.trim()}
-    >
-      {#if saving}
-        <span class="spinner"></span>
-      {:else}
-        Save Configuration
-      {/if}
-    </button>
-
-    {#if error}
-      <p class="ap-error">{error}</p>
+    {:else}
+      <span class="spacer"></span>
     {/if}
-  {/if}
+    <h1>ESP hotspot</h1>
+    <span class="spacer"></span>
+  </header>
+
+  <div class="scroll">
+    <div class="inner">
+      {#if phase === "restarting"}
+        <section class="card center" role="status">
+          <span class="big-ico pulse" aria-hidden="true">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+          </span>
+          <h2 class="card-title">Saving and restarting</h2>
+          <p class="desc">The robot is saving the new hotspot settings and restarting its network.</p>
+          <div class="loading"><div></div></div>
+        </section>
+
+      {:else if phase === "reconnect"}
+        <section class="card center">
+          <span class="big-ico" aria-hidden="true">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8 8a6 6 0 0 0 0 8M16 8a6 6 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/></svg>
+          </span>
+          <h2 class="card-title">Join the new hotspot</h2>
+          <p class="desc">The robot restarted with the new settings, so this device has lost it for now.</p>
+        </section>
+
+        <ol class="steps">
+          <li>
+            <span class="num">1</span>
+            <span>Open this device's <b>Wi‑Fi settings</b> and join <b>{ssid || "MPX-Dog"}</b>{password ? " with the password you set." : ". It has no password."}</span>
+          </li>
+          <li>
+            <span class="num">2</span>
+            <span>Come back here and tap the button below.</span>
+          </li>
+        </ol>
+
+        <button type="button" class="primary" onclick={onReconnected}>I'm connected</button>
+
+      {:else}
+        <p class="lead">The hotspot is the robot's own Wi‑Fi. Your phone joins it directly when there's no other network around.</p>
+
+        <div class="facts">
+          <div class="fact"><span class="fact-k">Robot IP</span><span class="fact-v">{apIp}</span></div>
+        </div>
+
+        <form class="form" onsubmit={saveConfig}>
+          <label class="field">
+            <span class="field-k">Hotspot name</span>
+            <input type="text" bind:value={ssid} placeholder="MPX-Dog" autocomplete="off" />
+          </label>
+
+          <label class="field">
+            <span class="field-k">Password</span>
+            <span class="pw">
+              <input type={showPassword ? "text" : "password"} bind:value={password} placeholder="At least 8 characters, or empty" />
+              <button type="button" class="eye" onclick={() => (showPassword = !showPassword)} aria-label={showPassword ? "Hide password" : "Show password"}>
+                {#if showPassword}
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.1M6.6 6.6C3.8 8.4 2 12 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M3 3l18 18M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+                {:else}
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+                {/if}
+              </button>
+            </span>
+          </label>
+
+          <p class="hint">Saving restarts the robot's network. You'll need to join the hotspot again afterwards.</p>
+
+          {#if error}<p class="note err" role="alert">{error}</p>{/if}
+
+          <button type="submit" class="primary" disabled={saving || !ssid.trim()}>
+            {saving ? "Saving…" : "Save hotspot"}
+          </button>
+        </form>
+      {/if}
+    </div>
+  </div>
 </div>
 
 <style>
-  .ap-root {
-    position: absolute;
-    inset: 0;
-    background: #fff;
-    display: flex;
-    flex-direction: column;
-    padding: 0 20px;
-    overflow-y: auto;
+  .page { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--page); color: var(--ink); }
+  .bar {
+    flex-shrink: 0; height: calc(64px + var(--safe-top)); padding: calc(10px + var(--safe-top)) 16px 0;
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: var(--page-max); width: 100%; margin: 0 auto;
+  }
+  .bar h1 { font-size: 18px; font-weight: 800; }
+  .spacer { width: 44px; }
+  .round {
+    width: 44px; height: 44px; border-radius: 22px; border: none; background: var(--ground); color: var(--ink);
+    display: grid; place-items: center; cursor: pointer;
   }
 
-  .header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 16px 0 8px;
-  }
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; }
+  .inner { max-width: var(--page-max); margin: 0 auto; padding: 8px 16px calc(24px + var(--safe-bottom)); display: flex; flex-direction: column; gap: 12px; }
 
-  .back-btn {
-    width: 36px;
-    height: 36px;
-    border: none;
-    background: transparent;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    color: #000;
-    flex-shrink: 0;
-  }
-  .back-btn:hover {
-    background: rgba(0,0,0,0.05);
-  }
+  .lead { font-size: 14px; line-height: 1.45; color: var(--sub); padding: 0 4px; }
+  .hint { font-size: 13px; line-height: 1.45; color: var(--sub); padding: 0 4px; }
 
-  .header-title {
-    font-size: 1.25rem;
-    font-weight: 700;
-    color: #000;
-  }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 22px; padding: 24px 20px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; }
+  .card-title { font-size: 17px; font-weight: 800; }
+  .desc { font-size: 14px; line-height: 1.45; color: var(--sub); max-width: 320px; }
+  .big-ico { width: 56px; height: 56px; border-radius: 16px; display: grid; place-items: center; background: var(--mpx-yellow); margin-bottom: 4px; }
+  .pulse { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+  .loading { width: 200px; height: 6px; border-radius: 3px; background: var(--hair); overflow: hidden; margin-top: 8px; }
+  .loading div { width: 30%; height: 100%; border-radius: 3px; background: var(--ink); animation: slide 1.5s ease infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(400%); } }
 
-  .desc {
-    font-size: 0.85rem;
-    color: #666;
-    line-height: 1.5;
-    margin: 8px 0 20px;
-  }
+  .steps { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+  .steps li { display: flex; align-items: flex-start; gap: 12px; background: var(--ground); border-radius: 16px; padding: 12px 14px; font-size: 14px; line-height: 1.45; }
+  .num { width: 26px; height: 26px; border-radius: 13px; background: var(--ink); color: var(--mpx-yellow); display: grid; place-items: center; font-size: 13px; font-weight: 800; flex-shrink: 0; }
 
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-bottom: 16px;
-  }
+  .facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .fact { background: var(--ground); border-radius: 14px; padding: 9px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .fact-k, .field-k { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sub); }
+  .fact-v { font-family: var(--mono); font-size: 14px; font-weight: 500; }
 
-  .field-label {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: #000;
-  }
+  .form { display: flex; flex-direction: column; gap: 10px; }
+  .field { display: flex; flex-direction: column; gap: 4px; background: var(--ground); border-radius: 16px; padding: 8px 14px; }
+  .field:focus-within { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .field input { flex: 1; min-width: 0; border: none; background: transparent; font-size: 16px; color: var(--ink); outline: none; padding: 2px 0; }
+  .field input::placeholder { color: var(--sub); }
+  .pw { display: flex; align-items: center; gap: 8px; }
+  .eye { width: 32px; height: 32px; border-radius: 16px; border: none; background: transparent; color: var(--sub); display: grid; place-items: center; cursor: pointer; flex-shrink: 0; }
 
-  .field-input {
-    width: 100%;
-    padding: 12px 14px;
-    border: 1.5px solid #ddd;
-    border-radius: 10px;
-    font-size: 1rem;
-    color: #000;
-    background: #fff;
-    outline: none;
-    transition: border-color 0.15s;
+  .note { font-size: 13px; background: var(--ground); border-radius: 14px; padding: 10px 12px; }
+  .note.err { color: #9B2C20; font-weight: 600; }
+  .primary {
+    margin-top: 4px; height: 56px; border-radius: 28px; border: none; background: var(--ink); color: #fff;
+    font-size: 16px; font-weight: 700; cursor: pointer; transition: transform var(--dur-fast), opacity var(--dur-fast);
   }
-  .field-input:focus {
-    border-color: #000;
-  }
-  .field-input::placeholder {
-    color: #bbb;
-  }
-
-  .password-wrapper {
-    position: relative;
-  }
-
-  .toggle-vis {
-    position: absolute;
-    right: 10px;
-    top: 50%;
-    transform: translateY(-50%);
-    background: none;
-    border: none;
-    color: #999;
-    cursor: pointer;
-    padding: 4px;
-    display: flex;
-  }
-
-  .save-btn {
-    width: 100%;
-    padding: 14px;
-    border: none;
-    border-radius: 12px;
-    background: #000;
-    color: #fff;
-    font-size: 1rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.15s;
-    margin-top: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-  }
-  .save-btn:hover {
-    background: #222;
-  }
-  .save-btn:disabled {
-    background: #ccc;
-    cursor: not-allowed;
-  }
-
-  .saved-text {
-    color: #4caf50;
-  }
-
-  .spinner {
-    width: 20px;
-    height: 20px;
-    border: 2.5px solid rgba(255,255,255,0.4);
-    border-top-color: #fff;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    display: inline-block;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-  .ap-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background: #f5f5f5;
-    border-radius: 10px;
-    padding: 10px 14px;
-    margin-bottom: 16px;
-  }
-
-  .ap-info-label {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #666;
-  }
-
-  .ap-info-value {
-    font-size: 0.85rem;
-    font-weight: 500;
-    color: #000;
-    font-family: monospace;
-  }
-
-  .ap-error {
-    margin-top: 12px;
-    font-size: 0.85rem;
-    color: #d00;
-    text-align: center;
-  }
-
-  /* ── Restart View ──────────────────────── */
-  .restart-view {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    gap: 16px;
-    padding: 40px 20px;
-  }
-
-  .restart-icon {
-    font-size: 3rem;
-    animation: pulse 1.5s infinite;
-  }
-
-  .restart-title {
-    font-size: 1.2rem;
-    font-weight: 700;
-    color: #000;
-  }
-
-  .restart-desc {
-    font-size: 0.9rem;
-    color: #666;
-    line-height: 1.5;
-  }
-
-  .restart-bar-track {
-    width: 200px;
-    height: 4px;
-    border-radius: 4px;
-    background: #eee;
-    overflow: hidden;
-  }
-
-  .restart-bar-fill {
-    height: 100%;
-    width: 30%;
-    border-radius: 4px;
-    background: #000;
-    animation: loadingBar 1.5s ease infinite;
-  }
-
-  @keyframes loadingBar {
-    0%   { transform: translateX(-100%); }
-    100% { transform: translateX(400%); }
-  }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50%      { opacity: 0.4; }
-  }
-
-  /* ── Reconnect View ────────────────────── */
-  .reconnect-view {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    text-align: center;
-    padding: 30px 20px 24px;
-    gap: 14px;
-  }
-
-  .reconnect-icon {
-    font-size: 3rem;
-  }
-
-  .reconnect-title {
-    font-size: 1.2rem;
-    font-weight: 700;
-    color: #000;
-  }
-
-  .reconnect-desc {
-    font-size: 0.9rem;
-    color: #666;
-    line-height: 1.5;
-  }
-
-  .reconnect-step-list {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-    width: 100%;
-    margin-top: 8px;
-    text-align: left;
-  }
-
-  .reconnect-step {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-  }
-
-  .step-num {
-    width: 26px;
-    height: 26px;
-    border-radius: 50%;
-    background: #000;
-    color: #fff;
-    font-size: 0.8rem;
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-
-  .step-text {
-    font-size: 0.85rem;
-    color: #333;
-    line-height: 1.5;
-    padding-top: 3px;
-  }
-
-  .reconnect-btn {
-    width: 100%;
-    padding: 14px;
-    border: none;
-    border-radius: 12px;
-    color: #000;
-    font-size: 1rem;
-    font-weight: 700;
-    cursor: pointer;
-    transition: transform 0.1s;
-    margin-top: auto;
-  }
-  .reconnect-btn:active {
-    transform: scale(0.98);
-  }
+  .primary:active:not(:disabled) { transform: scale(0.98); }
+  .primary:disabled { opacity: 0.35; cursor: default; }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
 </style>

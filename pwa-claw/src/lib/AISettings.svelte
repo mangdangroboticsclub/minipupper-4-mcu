@@ -266,34 +266,38 @@
   });
 </script>
 
-<div class="ai-root">
-  <header class="ai-header">
-    <button class="icon-btn" onclick={() => onBack?.()} aria-label="Go back">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>
-      </svg>
+<div class="page">
+  <header class="bar">
+    <button type="button" class="round" onclick={() => onBack?.()} aria-label="Back to settings">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
     </button>
-    <h2 class="ai-title">AI &amp; Voice</h2>
+    <h1>AI &amp; Voice</h1>
     <span class="spacer"></span>
   </header>
 
-  <div class="ai-body">
+  <div class="scroll">
+  <div class="inner">
     {#if loading}
-      <p class="note">Reading the robot's AI settings…</p>
+      <div class="mode sk" aria-hidden="true"></div>
+      <div class="mode sk" aria-hidden="true"></div>
+      <div class="mode sk" aria-hidden="true"></div>
     {:else if loadError}
-      <p class="note bad">{loadError}</p>
-      <button class="ghost" onclick={load}>Try again</button>
+      <div class="empty">
+        <p class="empty-title">Can't read the AI settings</p>
+        <p class="empty-desc">{loadError}</p>
+        <button type="button" class="pill dark" onclick={load}>Try again</button>
+      </div>
     {:else if restarting}
-      <div class="restart">
+      <div class="restart" role="status">
         <span class="spin"></span>
         <p><b>Restarting the robot…</b><br/>It will be back in about 20 seconds.</p>
       </div>
     {:else}
-      <p class="lead">Choose where Pupper's AI comes from.</p>
+      <h2 class="section">Where Pupper's AI comes from</h2>
 
       <div class="modes" role="radiogroup" aria-label="AI mode">
         {#each modes as m}
-          <button class="mode" class:selected={mode === m.id} role="radio" aria-checked={mode === m.id}
+          <button type="button" class="mode" class:selected={mode === m.id} role="radio" aria-checked={mode === m.id}
                   onclick={() => { mode = m.id; error = ""; }}>
             <span class="dot" aria-hidden="true"></span>
             <span class="mode-text">
@@ -328,7 +332,7 @@
             <div class="key-row">
               <input type={showKey ? "text" : "password"} bind:value={apiKey} autocomplete="off" spellcheck="false"
                      placeholder={keySet ? `Saved (${keyHint}) — leave empty to keep` : "Paste your API key"} />
-              <button class="ghost small" type="button" onclick={() => (showKey = !showKey)}>{showKey ? "Hide" : "Show"}</button>
+              <button class="pill" type="button" onclick={() => (showKey = !showKey)}>{showKey ? "Hide" : "Show"}</button>
             </div>
           </label>
           <p class="note">The key is saved on the robot and only sent to {providerHost}. The robot never shows it again.</p>
@@ -341,7 +345,7 @@
       {#if warning}<p class="note">{warning}</p>{/if}
       {#if error}<p class="note bad">{error}</p>{/if}
 
-      <button class="primary" disabled={!canSave || !changed} onclick={save}>
+      <button type="button" class="primary" disabled={!canSave || !changed} onclick={save}>
         {saving ? "Saving…" : (offered || livesApply) ? "Save" : "Save & restart robot"}
       </button>
       {#if offered || livesApply}
@@ -351,8 +355,8 @@
       {/if}
 
       {#if voice}
+        <h2 class="section">Voice</h2>
         <section class="voice">
-          <h3 class="voice-title">Voice</h3>
           <p class="voice-line">{voiceLine}</p>
           <dl class="facts">
             <dt>Link</dt><dd>{voice.link}</dd>
@@ -370,12 +374,12 @@
           </label>
 
           <div class="row">
-            <button class="ghost small" type="button" disabled={voiceBusy || voice.pi_in_control}
+            <button class="pill" type="button" disabled={voiceBusy || voice.pi_in_control}
                     onclick={() => postVoice({ hands_free: !handsFreeOn })}>
               {handsFreeOn ? "Stop listening" : "Start listening"}
             </button>
             {#if !voice.provisioned}
-              <button class="ghost small" type="button" disabled={voiceBusy}
+              <button class="pill" type="button" disabled={voiceBusy}
                       onclick={() => postVoice({ provision: true })}>Pair with MangDang now</button>
             {/if}
           </div>
@@ -390,9 +394,9 @@
               {#if musicPick === "custom"}
                 <input type="url" bind:value={musicCustom} placeholder="https://…" autocomplete="off" spellcheck="false" />
               {/if}
-              <button class="ghost small" type="button" disabled={voiceBusy} onclick={playMusic}>Play</button>
+              <button class="pill dark" type="button" disabled={voiceBusy} onclick={playMusic}>Play</button>
               {#if voice.music?.active}
-                <button class="ghost small" type="button" disabled={voiceBusy} onclick={() => postVoice({ music: "stop" })}>Stop</button>
+                <button class="pill" type="button" disabled={voiceBusy} onclick={() => postVoice({ music: "stop" })}>Stop</button>
               {/if}
             </div>
             <p class="note">You can also just ask: “Hi ESP, play some jazz.”</p>
@@ -403,107 +407,105 @@
       {/if}
     {/if}
   </div>
+  </div>
 </div>
 
 <style>
-  .ai-root {
-    flex: 1;
-    min-height: 0;
-    background: var(--mpx-surface-2);
-    display: flex;
-    flex-direction: column;
+  .page { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--page); color: var(--ink); }
+  .bar {
+    flex-shrink: 0; height: calc(64px + var(--safe-top)); padding: calc(10px + var(--safe-top)) 16px 0;
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: var(--page-max); width: 100%; margin: 0 auto;
   }
-  .ai-header {
-    display: flex; align-items: center; gap: 10px;
-    padding: 10px 12px;
-    background: var(--yellow, #FFE605);
-    flex-shrink: 0;
+  .bar h1 { font-size: 18px; font-weight: 800; }
+  .spacer { width: 44px; }
+  .round {
+    width: 44px; height: 44px; border-radius: 22px; border: none; background: var(--ground); color: var(--ink);
+    display: grid; place-items: center; cursor: pointer;
   }
-  .icon-btn {
-    width: 34px; height: 34px; display: grid; place-items: center;
-    border: none; background: none; border-radius: 50%; cursor: pointer; color: var(--mpx-ink);
-  }
-  .icon-btn:hover { background: rgba(0,0,0,0.08); }
-  .ai-title { flex: 1; font-size: 1.02rem; font-weight: 800; color: var(--mpx-ink); text-align: center; }
-  .spacer { width: 34px; }
 
-  .ai-body {
-    flex: 1; min-height: 0; overflow-y: auto;
-    padding: 16px 16px 32px;
-    display: flex; flex-direction: column; gap: 12px;
-    max-width: 560px; width: 100%; margin: 0 auto; box-sizing: border-box;
-  }
-  .lead { margin: 0; font-weight: 700; color: var(--mpx-ink); }
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; }
+  .inner { max-width: var(--page-max); margin: 0 auto; padding: 8px 16px calc(28px + var(--safe-bottom)); display: flex; flex-direction: column; gap: 12px; }
+  .section { margin: 8px 4px 0; font-size: 12px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: var(--sub); }
 
   .modes { display: flex; flex-direction: column; gap: 10px; }
   .mode {
     display: flex; align-items: flex-start; gap: 12px; text-align: left;
-    padding: 14px; border-radius: 14px; cursor: pointer;
-    background: var(--mpx-surface); border: 2px solid var(--mpx-line);
-    color: var(--mpx-ink); font: inherit;
+    padding: 14px 16px; border-radius: 20px; cursor: pointer;
+    background: #fff; border: 1.5px solid var(--line); color: var(--ink);
+    transition: background var(--dur-fast), border-color var(--dur-fast);
   }
-  .mode.selected { border-color: var(--mpx-ink); }
+  .mode.selected { border-color: var(--ink); background: #FFF6B0; }
+  .mode.sk { height: 84px; border-color: var(--line); background: var(--ground); cursor: default; }
   .dot {
-    flex: none; width: 20px; height: 20px; margin-top: 2px; border-radius: 50%;
-    border: 2px solid var(--mpx-muted); background: var(--mpx-surface);
+    flex: none; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%;
+    border: 2px solid #A39F96; background: #fff;
   }
-  .mode.selected .dot { border-color: var(--mpx-ink); box-shadow: inset 0 0 0 4px var(--mpx-surface); background: var(--mpx-ink); }
+  .mode.selected .dot { border-color: var(--ink); box-shadow: inset 0 0 0 4px #fff; background: var(--ink); }
   .mode-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-  .mode-title { font-weight: 800; }
+  .mode-title { font-size: 16px; font-weight: 700; }
   .tag {
-    display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px;
-    background: var(--yellow, #FFE605); font-size: 0.68rem; font-weight: 800; vertical-align: 2px;
+    display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 8px;
+    background: var(--ground); color: #4F4C46; font-size: 11px; font-weight: 700; vertical-align: 2px;
   }
-  .mode-desc { font-size: 0.86rem; color: var(--mpx-ink-soft, #2B2B2B); line-height: 1.35; }
+  .mode.selected .tag { background: var(--mpx-yellow); color: var(--ink); }
+  .mode-desc { font-size: 13px; color: var(--sub); line-height: 1.45; }
 
   .own, .voice {
     display: flex; flex-direction: column; gap: 12px;
-    padding: 14px; border-radius: 14px; background: var(--mpx-surface); border: 1px solid var(--mpx-line);
+    padding: 16px; border-radius: 22px; background: #fff; border: 1px solid var(--line);
   }
-  .voice { margin-top: 8px; }
-  .voice-title { margin: 0; font-size: 0.95rem; font-weight: 800; color: var(--mpx-ink); }
-  .voice-line { margin: 0; font-size: 0.86rem; color: var(--mpx-ink-soft, #2B2B2B); }
+  .voice-line { font-size: 15px; font-weight: 700; }
   .facts {
-    display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0;
-    font-size: 0.8rem; color: var(--mpx-ink);
+    display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0;
+    background: var(--ground); border-radius: 14px; padding: 10px 12px; font-size: 13px;
   }
-  .facts dt { font-weight: 700; color: var(--mpx-muted); }
+  .facts dt { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sub); align-self: center; }
   .facts dd { margin: 0; }
-  .field { display: flex; flex-direction: column; gap: 6px; font-size: 0.8rem; font-weight: 700; color: var(--mpx-ink); }
-  .field em { font-style: normal; font-weight: 500; color: var(--mpx-muted); margin-left: 6px; }
-  .field-label { font-size: 0.8rem; font-weight: 700; color: var(--mpx-ink); }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field > span, .field-label { font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--sub); padding: 0 4px; }
+  .field em { font-style: normal; font-weight: 700; color: var(--ink); margin-left: 6px; letter-spacing: 0; }
   .field input, .field select, .music select, .music input {
-    font: inherit; font-weight: 500; font-size: 0.95rem;
-    padding: 10px 12px; border-radius: 10px; border: 1px solid var(--mpx-muted-2, #BDBDBD);
-    background: var(--mpx-surface); color: var(--mpx-ink); min-width: 0; width: 100%; box-sizing: border-box;
+    font: inherit; font-size: 16px; height: 48px;
+    padding: 0 14px; border-radius: 14px; border: none;
+    background: var(--ground); color: var(--ink); min-width: 0; width: 100%; outline: none;
   }
-  .field input[type="range"] { padding: 0; border: none; accent-color: var(--mpx-ink); }
-  .key-row { display: flex; gap: 8px; }
+  .field input:focus-visible, .field select:focus-visible, .music select:focus-visible, .music input:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .field input[type="range"] { height: auto; padding: 0; background: none; accent-color: var(--ink); }
+  .key-row { display: flex; gap: 8px; align-items: center; }
   .key-row input { flex: 1; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .row select, .row input { flex: 1; width: auto; }
   .music { display: flex; flex-direction: column; gap: 8px; }
 
-  .note { margin: 0; font-size: 0.8rem; color: var(--mpx-muted); line-height: 1.35; }
-  .note.bad { color: #b42318; font-weight: 700; }
+  .note { margin: 0; font-size: 13px; color: var(--sub); line-height: 1.45; padding: 0 4px; }
+  .note.bad { color: #9B2C20; font-weight: 600; }
 
   .primary {
-    margin-top: 4px; padding: 14px; border: none; border-radius: 999px; cursor: pointer;
-    background: var(--mpx-ink); color: var(--yellow, #FFE605); font: inherit; font-weight: 800; font-size: 1rem;
+    margin-top: 4px; height: 56px; border: none; border-radius: 28px; cursor: pointer;
+    background: var(--ink); color: #fff; font-size: 16px; font-weight: 700;
+    transition: transform var(--dur-fast), opacity var(--dur-fast);
   }
-  .primary:disabled { opacity: 0.4; cursor: not-allowed; }
-  .ghost {
-    padding: 10px 14px; border-radius: 999px; border: 1px solid var(--mpx-ink);
-    background: none; color: var(--mpx-ink); font: inherit; font-weight: 700; cursor: pointer;
+  .primary:active:not(:disabled) { transform: scale(0.98); }
+  .primary:disabled { opacity: 0.35; cursor: default; }
+  .pill {
+    height: 40px; padding: 0 16px; border-radius: 20px; border: none; flex-shrink: 0;
+    background: var(--ground); color: var(--ink); font-size: 14px; font-weight: 700; cursor: pointer;
   }
-  .ghost:disabled { opacity: 0.4; cursor: not-allowed; }
-  .ghost.small { padding: 8px 12px; font-size: 0.8rem; }
+  .pill.dark { background: var(--ink); color: #fff; }
+  .pill:disabled { opacity: 0.4; cursor: default; }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
 
-  .restart { display: flex; align-items: center; gap: 14px; padding: 24px 4px; color: var(--mpx-ink); }
-  .restart p { margin: 0; line-height: 1.5; }
+  .empty { background: var(--ground); border-radius: 20px; padding: 28px 20px; display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; }
+  .empty-title { font-size: 17px; font-weight: 800; }
+  .empty-desc { font-size: 14px; line-height: 1.45; color: var(--sub); max-width: 300px; }
+  .empty .pill { margin-top: 6px; }
+
+  .restart { display: flex; align-items: center; gap: 14px; padding: 20px; border-radius: 20px; background: var(--ground); }
+  .restart p { margin: 0; font-size: 14px; line-height: 1.5; }
   .spin {
     width: 26px; height: 26px; border-radius: 50%; flex: none;
-    border: 3px solid rgba(0,0,0,0.12); border-top-color: var(--mpx-ink);
+    border: 3px solid var(--hair); border-top-color: var(--ink);
     animation: spin 0.8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }

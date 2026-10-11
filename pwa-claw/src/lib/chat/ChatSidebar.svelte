@@ -65,27 +65,27 @@
 <div class="sidebar">
   <!-- Header -->
   <div class="sidebar-header">
-    <h3 class="sidebar-title">Conversations</h3>
-    <button class="new-btn" onclick={onNew} aria-label="New conversation">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="12" y1="5" x2="12" y2="19"/>
-        <line x1="5" y1="12" x2="19" y2="12"/>
+    <h2 class="sidebar-title">History</h2>
+    <button type="button" class="new-btn" onclick={onNew} aria-label="New conversation">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+        <path d="M12 5v14M5 12h14"/>
       </svg>
     </button>
   </div>
 
   <!-- Search -->
-  <div class="search-box">
-    <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="11" cy="11" r="8"/>
-      <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+  <label class="search-box">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+      <circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>
     </svg>
     <input
+      type="search"
       bind:value={searchText}
-      placeholder="Search chat history…"
+      placeholder="Search conversations"
+      aria-label="Search conversations"
       class="search-input"
     />
-  </div>
+  </label>
 
   <!-- Conversation list -->
   <div class="convo-list">
@@ -151,12 +151,13 @@
 
 <style>
   .sidebar {
-    width: 280px;
+    width: 100%;
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: #fff;
-    border-right: 1px solid #e8e8e8;
+    background: var(--page);
+    color: var(--ink);
+    border-right: 1px solid var(--line);
     flex-shrink: 0;
   }
 
@@ -164,66 +165,55 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 14px 10px;
+    padding: calc(18px + var(--safe-top)) 16px 12px 20px;
   }
 
   .sidebar-title {
-    font-size: 0.85rem;
-    font-weight: 700;
-    color: #333;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: 26px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
   }
 
   .new-btn {
-    width: 30px;
-    height: 30px;
-    border-radius: 50%;
+    width: 44px;
+    height: 44px;
+    border-radius: 22px;
     border: none;
-    background: #f0f0f0;
-    color: #666;
+    background: var(--ink);
+    color: var(--mpx-yellow);
     cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.15s;
-  }
-  .new-btn:hover {
-    background: #ffeb3b;
-    color: #222;
+    display: grid;
+    place-items: center;
   }
 
   .search-box {
-    position: relative;
-    margin: 0 14px 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 46px;
+    margin: 0 16px 8px;
+    padding: 0 14px;
+    border-radius: 23px;
+    background: var(--ground);
+    color: var(--sub);
   }
-
-  .search-icon {
-    position: absolute;
-    left: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    pointer-events: none;
-  }
+  .search-box:focus-within { outline: 3px solid var(--ink); outline-offset: 2px; }
 
   .search-input {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     border: none;
     outline: none;
-    background: #f3f3f3;
-    border-radius: 100px;
-    padding: 10px 14px 10px 36px;
-    font-size: 0.8rem;
-    color: #333;
+    background: transparent;
+    font-size: 16px;
+    color: var(--ink);
   }
-  .search-input::placeholder {
-    color: #bbb;
-  }
+  .search-input::placeholder { color: var(--sub); }
 
   .convo-list {
     flex: 1;
     overflow-y: auto;
-    padding: 0 6px 14px;
+    padding: 0 10px calc(16px + var(--safe-bottom));
   }
 
   .group {
@@ -232,34 +222,36 @@
 
   .group-label {
     display: block;
-    font-size: 0.65rem;
-    font-weight: 600;
-    color: #999;
+    font-size: 12px;
+    font-weight: 800;
+    color: var(--sub);
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 8px 10px 4px;
+    letter-spacing: 0.12em;
+    padding: 12px 10px 6px;
   }
 
   .convo-item {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 6px;
+    gap: 8px;
     width: 100%;
     text-align: left;
     background: none;
     border: none;
-    border-radius: 8px;
-    padding: 10px;
+    border-radius: 16px;
+    padding: 10px 12px;
+    color: var(--ink);
     cursor: pointer;
-    transition: background 0.12s;
+    transition: background var(--dur-fast);
   }
   .convo-item:hover {
-    background: #f5f5f5;
+    background: var(--ground);
   }
   .convo-item.active {
-    background: #fff8e1;
+    background: #FFF6B0;
   }
+  .convo-item:focus-visible { outline: 3px solid var(--ink); outline-offset: -3px; }
 
   .convo-content {
     flex: 1;
@@ -267,17 +259,16 @@
   }
 
   .convo-title {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #333;
+    font-size: 15px;
+    font-weight: 700;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
   .convo-preview {
-    font-size: 0.7rem;
-    color: #999;
+    font-size: 13px;
+    color: var(--sub);
     margin-top: 2px;
     white-space: nowrap;
     overflow: hidden;
@@ -287,16 +278,15 @@
   .brain-badge {
     display: inline-block;
     margin-right: 6px;
-    padding: 1px 6px;
-    border-radius: var(--r-pill);
-    background: var(--mpx-surface-3);
-    color: var(--mpx-muted);
-    font-size: 0.6rem;
+    padding: 2px 7px;
+    border-radius: 8px;
+    background: var(--ground);
+    color: var(--sub);
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: 0.02em;
     vertical-align: 1px;
   }
-  .brain-badge.local { background: var(--mpx-yellow-soft); color: var(--mpx-ink-soft); }
+  .brain-badge.local { background: var(--mpx-yellow); color: var(--ink); }
 
   .convo-meta {
     display: flex;
@@ -307,33 +297,33 @@
   }
 
   .convo-time {
-    font-size: 0.6rem;
-    color: #bbb;
+    font-size: 12px;
+    color: var(--sub);
   }
 
   .delete-btn {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #ccc;
-    transition: all 0.12s;
+    width: 26px;
+    height: 26px;
+    border-radius: 13px;
+    display: grid;
+    place-items: center;
+    color: #A39F96;
+    transition: background var(--dur-fast), color var(--dur-fast), opacity var(--dur-fast);
     opacity: 0;
   }
   .convo-item:hover .delete-btn,
   .convo-item.active .delete-btn {
     opacity: 1;
   }
+  @media (hover: none) { .delete-btn { opacity: 1; } }
   .delete-btn:hover {
-    background: #fee2e2;
-    color: #ef4444;
+    background: #FBE4E0;
+    color: #9B2C20;
   }
 
   .empty-msg {
-    font-size: 0.75rem;
-    color: #bbb;
+    font-size: 14px;
+    color: var(--sub);
     text-align: center;
     padding: 40px 14px;
   }

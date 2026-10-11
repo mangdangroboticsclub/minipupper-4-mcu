@@ -1,15 +1,11 @@
 <script>
-  import { colors } from "./colors.js";
-
   let { onBack } = $props();
-
-  const YELLOW = colors.mpx.primary;
 
   let dragging = $state(false);
   let uploading = $state(false);
-  let uploadStatus = $state("");
+  let status = $state(null);          // { tone: "ok" | "err", text }
   let selectedFile = $state(null);
-  let dragRef = $state(null);
+  let inputEl = $state(null);
 
   function onDragOver(e) {
     e.preventDefault();
@@ -25,19 +21,21 @@
     dragging = false;
     if (e.dataTransfer.files.length > 0) {
       selectedFile = e.dataTransfer.files[0];
+      status = null;
     }
   }
 
   function onFileSelect(e) {
     if (e.target.files.length > 0) {
       selectedFile = e.target.files[0];
+      status = null;
     }
   }
 
   async function upload() {
     if (!selectedFile) return;
     uploading = true;
-    uploadStatus = "Uploading…";
+    status = null;
 
     try {
       const name = encodeURIComponent(selectedFile.name);
@@ -47,14 +45,14 @@
       });
 
       if (res.ok) {
-        uploadStatus = `✅ ${selectedFile.name} uploaded successfully`;
+        status = { tone: "ok", text: `${selectedFile.name} is on the robot` };
         selectedFile = null;
       } else {
         const err = await res.text();
-        uploadStatus = `❌ Upload failed: ${err}`;
+        status = { tone: "err", text: `Upload failed: ${err}` };
       }
     } catch (e) {
-      uploadStatus = `❌ Error: ${e.message}`;
+      status = { tone: "err", text: `Couldn't reach the robot: ${e.message}` };
     }
     uploading = false;
   }
@@ -65,192 +63,94 @@
   }
 </script>
 
-<div class="upload-root">
-  <header class="upload-header" style="background: {YELLOW}">
-    <button class="upload-back-btn" onclick={onBack} aria-label="Go back">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="19" y1="12" x2="5" y2="12"/>
-        <polyline points="12 19 5 12 12 5"/>
-      </svg>
+<div class="page">
+  <header class="bar">
+    <button type="button" class="round" onclick={onBack} aria-label="Back to files">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
     </button>
-    <h2 class="upload-title">Upload Skill</h2>
+    <h1>Upload skill</h1>
+    <span class="spacer"></span>
   </header>
 
-  <div class="upload-body">
-    <div
-      bind:this={dragRef}
-      ondragover={onDragOver}
-      ondragleave={onDragLeave}
-      ondrop={onDrop}
-      class="upload-dropzone"
-      class:upload-dragging={dragging}
-      style="--drop-border: {YELLOW}"
-      onclick={() => dragRef?.querySelector("input").click()}
-      role="button"
-      tabindex="0"
-      onkeydown={(e) => e.key === "Enter" && dragRef?.querySelector("input").click()}
-    >
-      <input type="file" accept=".wasm" onchange={onFileSelect} class="upload-hidden-input" />
-      {#if selectedFile}
-        <span class="upload-drop-icon">📄</span>
-        <p class="upload-file-name">{selectedFile.name}</p>
-        <p class="upload-file-size">{formatSize(selectedFile.size)}</p>
-      {:else}
-        <span class="upload-drop-icon">📤</span>
-        <p class="upload-drop-text">
-          {dragging ? "Drop it here!" : "Tap to browse for a .wasm file"}
-        </p>
-        <p class="upload-drop-hint">Max file size: 128 KB</p>
-      {/if}
-    </div>
-
-    {#if selectedFile}
-      <button class="upload-btn" onclick={upload} disabled={uploading}
-              style="background: {YELLOW}"
-              class:upload-disabled={uploading}>
-        {uploading ? "Uploading…" : "Upload to Robot"}
+  <div class="scroll">
+    <div class="inner">
+      <button
+        type="button"
+        class="drop"
+        class:dragging
+        class:picked={!!selectedFile}
+        ondragover={onDragOver}
+        ondragleave={onDragLeave}
+        ondrop={onDrop}
+        onclick={() => inputEl?.click()}
+      >
+        <span class="ico" aria-hidden="true">
+          {#if selectedFile}
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18c3-8 5-12 8-12s5 4 8 12"/><circle cx="12" cy="6" r="2"/></svg>
+          {:else}
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M6 10l6-6 6 6"/><path d="M4 20h16"/></svg>
+          {/if}
+        </span>
+        {#if selectedFile}
+          <span class="drop-title">{selectedFile.name}</span>
+          <span class="drop-desc">{formatSize(selectedFile.size)} · tap to pick another</span>
+        {:else}
+          <span class="drop-title">{dragging ? "Drop it here" : "Pick a .wasm file"}</span>
+          <span class="drop-desc">Tap to browse, or drag a file here. Up to 128 KB.</span>
+        {/if}
       </button>
-    {/if}
+      <input bind:this={inputEl} type="file" accept=".wasm" onchange={onFileSelect} class="hidden" tabindex="-1" aria-hidden="true" />
 
-    {#if uploadStatus}
-      <p class="upload-status" class:upload-success={uploadStatus.includes('✅')} class:upload-error={!uploadStatus.includes('✅')}>
-        {uploadStatus}
-      </p>
-    {/if}
+      {#if status}
+        <p class="note" class:err={status.tone === "err"} role="status">{status.text}</p>
+      {/if}
+
+      <button type="button" class="primary" onclick={upload} disabled={!selectedFile || uploading}>
+        {uploading ? "Uploading…" : "Upload to the robot"}
+      </button>
+    </div>
   </div>
 </div>
 
 <style>
-  .upload-root {
-    flex: 1;
-    background: #f5f5f5;
-    display: flex;
-    flex-direction: column;
+  .page { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--page); color: var(--ink); }
+  .bar {
+    flex-shrink: 0; height: calc(64px + var(--safe-top)); padding: calc(10px + var(--safe-top)) 16px 0;
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: var(--page-max); width: 100%; margin: 0 auto;
+  }
+  .bar h1 { font-size: 18px; font-weight: 800; }
+  .spacer { width: 44px; }
+  .round {
+    width: 44px; height: 44px; border-radius: 22px; border: none; background: var(--ground); color: var(--ink);
+    display: grid; place-items: center; cursor: pointer;
   }
 
-  .upload-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 12px 14px;
-    flex-shrink: 0;
-  }
+  .scroll { flex: 1; min-height: 0; overflow-y: auto; }
+  .inner { max-width: var(--page-max); margin: 0 auto; padding: 8px 16px calc(24px + var(--safe-bottom)); display: flex; flex-direction: column; gap: 12px; }
 
-  .upload-back-btn {
-    width: 30px;
-    height: 30px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    background: rgba(0,0,0,0.12);
-    border-radius: 50%;
-    cursor: pointer;
-    color: #000;
-    flex-shrink: 0;
+  .drop {
+    width: 100%; min-height: 200px; border: 1.5px dashed #CFC9BB; border-radius: 22px; background: #fff; color: var(--ink);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    padding: 28px 20px; text-align: center; cursor: pointer;
+    transition: background var(--dur-fast), border-color var(--dur-fast);
   }
-  .upload-back-btn:hover {
-    background: rgba(0,0,0,0.2);
-  }
+  .drop.dragging { border-color: var(--ink); background: #FFF6B0; }
+  .drop.picked { border-style: solid; border-color: var(--line); }
+  .ico { width: 52px; height: 52px; border-radius: 15px; display: grid; place-items: center; background: var(--ground); margin-bottom: 6px; }
+  .drop.picked .ico { background: #CFE3FF; }
+  .drop-title { font-size: 17px; font-weight: 800; word-break: break-all; }
+  .drop-desc { font-size: 14px; line-height: 1.45; color: var(--sub); max-width: 300px; }
+  .hidden { display: none; }
 
-  .upload-title {
-    font-size: 1.05rem;
-    font-weight: 800;
-    color: #000;
-    margin: 0;
-  }
+  .note { font-size: 13px; color: #1E7B34; font-weight: 600; background: var(--ground); border-radius: 14px; padding: 10px 12px; }
+  .note.err { color: #9B2C20; }
 
-  .upload-body {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 20px;
-    padding: 24px 20px;
+  .primary {
+    height: 56px; border-radius: 28px; border: none; background: var(--ink); color: #fff;
+    font-size: 16px; font-weight: 700; cursor: pointer; transition: transform var(--dur-fast), opacity var(--dur-fast);
   }
-
-  .upload-dropzone {
-    width: 100%;
-    max-width: 320px;
-    border: 2.5px dashed #ccc;
-    border-radius: 16px;
-    padding: 32px 20px;
-    text-align: center;
-    cursor: pointer;
-    transition: border-color 0.2s, background 0.2s;
-  }
-  .upload-dragging {
-    border-color: var(--drop-border, #FFE605);
-    background: rgba(255,230,5,0.06);
-  }
-  .upload-dropzone:hover {
-    border-color: #999;
-  }
-
-  .upload-hidden-input {
-    display: none;
-  }
-
-  .upload-drop-icon {
-    font-size: 2.5rem;
-    display: block;
-    margin-bottom: 8px;
-  }
-
-  .upload-drop-text {
-    font-size: 0.9rem;
-    font-weight: 600;
-    color: #333;
-    margin: 0;
-  }
-
-  .upload-drop-hint {
-    font-size: 0.75rem;
-    color: #999;
-    margin: 4px 0 0;
-  }
-
-  .upload-file-name {
-    font-size: 0.9rem;
-    font-weight: 600;
-    color: #000;
-    margin: 0;
-  }
-
-  .upload-file-size {
-    font-size: 0.75rem;
-    color: #999;
-    margin: 2px 0 0;
-  }
-
-  .upload-btn {
-    border: none;
-    border-radius: 12px;
-    padding: 12px 32px;
-    font-size: 0.9rem;
-    font-weight: 700;
-    color: #000;
-    cursor: pointer;
-    transition: filter 0.15s;
-  }
-  .upload-btn:hover {
-    filter: brightness(0.9);
-  }
-  .upload-disabled {
-    opacity: 0.5;
-  }
-
-  .upload-status {
-    font-size: 0.8rem;
-    text-align: center;
-    max-width: 300px;
-    margin: 0;
-  }
-  .upload-success {
-    color: #22c55e;
-  }
-  .upload-error {
-    color: #ef4444;
-  }
+  .primary:active:not(:disabled) { transform: scale(0.98); }
+  .primary:disabled { opacity: 0.35; cursor: default; }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
 </style>

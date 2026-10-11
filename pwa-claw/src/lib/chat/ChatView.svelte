@@ -624,6 +624,13 @@
   });
 </script>
 
+{#snippet lockIcon()}
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="5" y="11" width="14" height="10" rx="2"/>
+    <path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+  </svg>
+{/snippet}
+
 <div class="chat-root">
   <!-- Sidebar (slide animation) -->
   <div class="sidebar-backdrop" class:visible={showSidebar} role="presentation" onclick={() => (showSidebar = false)}></div>
@@ -639,37 +646,25 @@
 
   <!-- Main chat area -->
   <div class="chat-main">
-    <!-- Action bar -->
-    <div class="action-bar">
+    <header class="bar">
       <button
-        class="action-bar-btn"
-        class:active={showSidebar}
+        type="button"
+        class="round"
+        class:on={showSidebar}
         onclick={() => (showSidebar = !showSidebar)}
         aria-label="Conversation history"
+        aria-expanded={showSidebar}
         title="Conversation history"
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"/>
-          <polyline points="12 6 12 12 16 14"/>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"/>
+          <polyline points="12 7 12 12 15.5 14"/>
         </svg>
-        <span>History</span>
-      </button>
-      <button
-        class="action-bar-btn"
-        onclick={newConversation}
-        aria-label="New conversation"
-        title="New conversation"
-      >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="12" y1="5" x2="12" y2="19"/>
-          <line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        <span>New</span>
       </button>
 
       <!-- Brain: fixed once the conversation has a message -->
       <div
-        class="brain-toggle"
+        class="seg"
         class:locked={brainLocked}
         role="radiogroup"
         aria-label="Who answers this conversation"
@@ -678,43 +673,57 @@
           : "Who answers the next message: Pupper (the robot's own agent) or the Cloud"}
       >
         <button
-          class="brain-opt"
-          class:selected={brain === BRAINS.LOCAL}
+          type="button"
+          class:on={brain === BRAINS.LOCAL}
           role="radio"
           aria-checked={brain === BRAINS.LOCAL}
           disabled={brainLocked || !localBrainAvailable}
           title={!localBrainAvailable ? localBrainReason : undefined}
           onclick={() => setBrain(BRAINS.LOCAL)}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="4" y="7" width="16" height="12" rx="3"/>
-            <circle cx="9" cy="13" r="1.4" fill="currentColor" stroke="none"/>
-            <circle cx="15" cy="13" r="1.4" fill="currentColor" stroke="none"/>
-            <line x1="12" y1="3" x2="12" y2="7"/>
-          </svg>
+          {#if brainLocked && brain === BRAINS.LOCAL}
+            {@render lockIcon()}
+          {:else}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="4" y="7" width="16" height="12" rx="3"/>
+              <circle cx="9" cy="13" r="1.4" fill="currentColor" stroke="none"/>
+              <circle cx="15" cy="13" r="1.4" fill="currentColor" stroke="none"/>
+              <line x1="12" y1="3" x2="12" y2="7"/>
+            </svg>
+          {/if}
           <span>Pupper</span>
         </button>
         <button
-          class="brain-opt"
-          class:selected={brain === BRAINS.CLOUD}
+          type="button"
+          class:on={brain === BRAINS.CLOUD}
           role="radio"
           aria-checked={brain === BRAINS.CLOUD}
           disabled={brainLocked}
           onclick={() => setBrain(BRAINS.CLOUD)}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M7 18a4 4 0 0 1-.6-7.95A6 6 0 0 1 18 9.5a3.5 3.5 0 0 1 .5 7H7z"/>
-          </svg>
+          {#if brainLocked && brain === BRAINS.CLOUD}
+            {@render lockIcon()}
+          {:else}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M7 18a4 4 0 0 1-.6-7.95A6 6 0 0 1 18 9.5a3.5 3.5 0 0 1 .5 7H7z"/>
+            </svg>
+          {/if}
           <span>Cloud</span>
         </button>
-        {#if brainLocked}
-          <svg class="brain-lock" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="5" y="11" width="14" height="10" rx="2"/>
-            <path d="M8 11V7a4 4 0 0 1 8 0v4"/>
-          </svg>
-        {/if}
       </div>
-    </div>
+
+      <button
+        type="button"
+        class="round"
+        onclick={newConversation}
+        aria-label="New conversation"
+        title="New conversation"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+      </button>
+    </header>
 
     <!-- Messages or Empty state -->
     {#if messages.length === 0 && !sending}
@@ -791,8 +800,10 @@
 <style>
   .chat-root {
     display: flex;
-    height: 100%;
-    background: #fff;
+    flex: 1;
+    min-height: 0;
+    background: var(--page);
+    color: var(--ink);
     position: relative;
   }
 
@@ -816,7 +827,7 @@
     top: 0;
     left: 0;
     bottom: 0;
-    width: 280px;
+    width: min(300px, 86vw);
     z-index: 50;
     transform: translateX(-100%);
     transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
@@ -834,79 +845,65 @@
     min-width: 0;
   }
 
-  /* ── Action bar ───────────────────────── */
-  .action-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 14px;
-    border-bottom: 1px solid var(--mpx-line);
-    background: var(--mpx-surface);
+  /* ── Header ───────────────────────────── */
+  .bar {
     flex-shrink: 0;
+    height: calc(64px + var(--safe-top));
+    padding: calc(10px + var(--safe-top)) 16px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    max-width: var(--page-max);
+    width: 100%;
+    margin: 0 auto;
   }
+  .round {
+    width: 44px; height: 44px; border-radius: 22px; border: none; flex-shrink: 0;
+    background: var(--ground); color: var(--ink);
+    display: grid; place-items: center; cursor: pointer;
+    transition: background var(--dur-fast);
+  }
+  .round.on { background: var(--mpx-yellow); }
 
-  .action-bar-btn {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    height: 32px;
-    padding: 0 12px;
-    border: 1px solid var(--mpx-line);
-    border-radius: var(--r-pill);
-    background: var(--mpx-surface);
-    color: var(--mpx-ink-soft);
-    font-size: 0.75rem;
-    font-weight: 700;
-    cursor: pointer;
-    transition: border-color var(--dur-fast), background var(--dur-fast);
-  }
-  .action-bar-btn:hover { border-color: var(--mpx-yellow); background: #fffef2; }
-  .action-bar-btn.active { border-color: var(--mpx-yellow); background: var(--mpx-yellow-soft); }
-
-  /* ── Brain toggle (right end of the action bar) ── */
-  .brain-toggle {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    height: 32px;
-    margin-left: auto;
-    padding: 2px;
-    border: 1px solid var(--mpx-line);
-    border-radius: var(--r-pill);
-    background: var(--mpx-surface-3);
-  }
-  .brain-opt {
-    display: flex;
-    align-items: center;
+  /* Brain: same segmented control as Skills' On robot / Library */
+  .seg {
+    flex: 1;
+    max-width: 240px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 4px;
-    height: 26px;
-    padding: 0 10px;
-    border: 0;
-    border-radius: var(--r-pill);
+    padding: 4px;
+    border-radius: 16px;
+    background: var(--hair);
+  }
+  .seg button {
+    height: 36px;
+    border: none;
+    border-radius: 12px;
     background: transparent;
-    color: var(--mpx-muted);
-    font-size: 0.72rem;
+    color: #4F4C46;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    font-size: 14px;
     font-weight: 700;
     cursor: pointer;
     transition: background var(--dur-fast), color var(--dur-fast);
   }
-  .brain-opt:hover:not(:disabled) { color: var(--mpx-ink-soft); }
-  .brain-opt.selected { background: var(--mpx-surface); color: var(--mpx-ink); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
-  .brain-opt:disabled { cursor: default; }
-  .brain-opt:disabled:not(.selected) { opacity: 0.45; }
-  .brain-toggle.locked .brain-opt.selected { background: var(--mpx-yellow-soft); }
-  .brain-lock { color: var(--mpx-muted); margin: 0 6px 0 2px; flex-shrink: 0; }
+  .seg button.on { background: #fff; color: var(--ink); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
+  .seg button:disabled { cursor: default; }
+  .seg button:disabled:not(.on) { opacity: 0.45; }
+  .seg.locked button.on { background: var(--mpx-yellow); box-shadow: none; }
 
-  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
 
   /* ── Date delineator ──────────────────── */
   .date-delineator { display: flex; justify-content: center; margin: 10px 0; }
   .date-delineator span {
-    font-size: 0.66rem;
+    font-size: 12px;
     font-weight: 700;
-    color: var(--mpx-muted);
-    background: var(--mpx-surface-3);
-    padding: 3px 12px;
+    color: var(--sub);
+    background: var(--ground);
+    padding: 4px 12px;
     border-radius: var(--r-pill);
   }
 
@@ -917,7 +914,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    max-width: 820px;
+    max-width: var(--page-max);
     margin: 0 auto;
     width: 100%;
   }
@@ -926,11 +923,11 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 14px;
+    padding: 12px 14px;
     margin: 2px 16px;
-    border-radius: 18px 18px 18px 6px;
-    background: var(--mpx-surface);
-    border: 1px solid var(--mpx-line);
+    border-radius: 20px 20px 20px 6px;
+    background: #fff;
+    border: 1px solid var(--line);
     width: fit-content;
   }
   .typing { display: inline-flex; gap: 4px; }
@@ -953,46 +950,44 @@
   .spinner.small { width: 16px; height: 16px; border-width: 2px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  .timer { font-size: 0.74rem; font-weight: 700; color: var(--mpx-muted); font-variant-numeric: tabular-nums; }
+  .timer { font-size: 12px; font-weight: 700; color: var(--sub); font-variant-numeric: tabular-nums; }
 
   /* ── Input bar ───────────────────────── */
   .input-bar {
-    padding: 10px 14px calc(12px + var(--safe-bottom));
-    border-top: 1px solid var(--mpx-line);
-    background: var(--mpx-surface);
+    padding: 8px 16px 12px;
+    background: var(--page);
     flex-shrink: 0;
   }
   .input-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    background: var(--mpx-surface-2);
+    background: var(--ground);
     border-radius: var(--r-pill);
     padding: 4px 4px 4px 18px;
-    max-width: 820px;
+    max-width: calc(var(--page-max) - 32px);
     margin: 0 auto;
-    transition: box-shadow var(--dur-fast);
   }
-  .input-row:focus-within { box-shadow: 0 0 0 2px var(--mpx-yellow); }
+  .input-row:focus-within { outline: 3px solid var(--ink); outline-offset: 2px; }
 
   .chat-input {
     flex: 1;
     border: none;
     outline: none;
     background: transparent;
-    font-size: 0.92rem;
-    color: var(--mpx-ink);
+    font-size: 16px;
+    color: var(--ink);
     padding: 10px 0;
     min-width: 0;
   }
-  .chat-input::placeholder { color: var(--mpx-muted-2); }
+  .chat-input::placeholder { color: var(--sub); }
   .chat-input:disabled { opacity: 0.6; }
 
   .send-btn {
-    width: 40px; height: 40px;
+    width: 44px; height: 44px;
     border-radius: 50%;
     border: none;
-    background: var(--mpx-ink);
+    background: var(--ink);
     color: var(--mpx-yellow);
     display: grid; place-items: center;
     cursor: pointer;

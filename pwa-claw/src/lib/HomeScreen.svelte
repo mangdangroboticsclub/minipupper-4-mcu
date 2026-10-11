@@ -320,10 +320,7 @@
       <SkillsMarketplace embedded onNavigate={(to) => { if (to === "skills") activeTab = "skills"; }} />
     {:else if activeTab === "chat"}
       <div class="chat-tab">
-        <header class="brand-bar"><img src="/md.svg" alt="MangDang" /></header>
-        <div class="chat-body">
-          <ChatView navigate={(to) => { if (to === "home") activeTab = "home"; }} {network} />
-        </div>
+        <ChatView navigate={(to) => { if (to === "home") activeTab = "home"; }} {network} />
       </div>
     {:else if activeTab === "settings"}
       <SettingsPage {network} />
@@ -451,9 +448,6 @@
 
   /* ── Chat ── */
   .chat-tab { position: absolute; inset: 0; display: flex; flex-direction: column; }
-  .brand-bar { flex-shrink: 0; height: calc(48px + var(--safe-top)); padding-top: var(--safe-top); background: var(--mpx-yellow); display: grid; place-items: center; }
-  .brand-bar img { height: 18px; width: auto; }
-  .chat-body { flex: 1; min-height: 0; position: relative; }
 
   /* ── Tab bar ── */
   .tabs {
