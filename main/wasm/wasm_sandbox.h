@@ -96,6 +96,16 @@ SandboxResult load_and_run_bytes(const uint8_t *wasm_bytes,
 bool was_cancelled();
 
 /**
+ * @brief Report time a host function spent waiting on the user, not running.
+ *
+ * The watchdog counts execution time against the skill's budget; a permission
+ * prompt (fs_write / fs_delete) is the user deciding, not the skill running,
+ * so that wait is added back here. The watchdog drains this into its budget on
+ * its next poll. Mirrors lua_vm_extend_deadline().
+ */
+void extend_watchdog(std::uint32_t ms);
+
+/**
  * @brief Check whether a WASM skill is currently executing.
  *
  * Used by the gait task to avoid flushing neutral positions while a

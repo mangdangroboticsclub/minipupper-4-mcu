@@ -34,6 +34,14 @@ static std::atomic<bool> s_cancelled{false};
 // the skill's servo commands.
 static std::atomic<bool> s_running{false};
 
+// ── Watchdog extension ──────────────────────────────────────
+// Milliseconds a host function spent waiting on something that is not the
+// skill running -- fs.write's / fs.delete's permission prompt is the only
+// caller. The watchdog loop drains this into its own budget each poll, so
+// that wait does not count against the skill's deadline, exactly as
+// lua_vm_extend_deadline() does for the Lua VM.
+static std::atomic<std::uint32_t> s_watchdog_extra_ms{0};
+
 // ── Per-run clock ────────────────────────────────────────────
 // Origin for wasm::skill_millis(). Set just before on_start() is called, so a
 // skill measuring a frame does not have to subtract a boot time it has no way
@@ -558,6 +566,9 @@ SandboxResult load_and_run_bytes(const uint8_t *wasm_bytes,
 	pthread_attr_t attr;
 	LoadRunArgs args = { wasm_bytes, wasm_size, func_name, timeout_ms,
 						 false, SandboxResult::NotInitialized, nullptr };
+	// A fresh run starts with a fresh watchdog budget: whatever the previous
+	// skill asked for must not carry over.
+	s_watchdog_extra_ms = 0;
 
 	pthread_attr_init(&attr);
 	// Native C thread stack (internal RAM) — separate from the WASM operand
@@ -577,9 +588,13 @@ SandboxResult load_and_run_bytes(const uint8_t *wasm_bytes,
 	if (timeout_ms > 0) {
 		const int poll_ms = 10;
 		int elapsed = 0;
-		while (elapsed < static_cast<int>(timeout_ms) && !args.completed) {
+		// The budget grows whenever a host function reports time it spent
+		// waiting on the user (see extend_watchdog).
+		std::uint32_t budget = timeout_ms;
+		while (elapsed < static_cast<int>(budget) && !args.completed) {
 			vTaskDelay(pdMS_TO_TICKS(poll_ms));
 			elapsed += poll_ms;
+			budget += s_watchdog_extra_ms.exchange(0);
 		}
 		if (!args.completed) {
 			ESP_LOGW(TAG, "WASM execution exceeded %" PRIu32 " ms watchdog — "
@@ -614,6 +629,11 @@ SandboxResult load_and_run_bytes(const uint8_t *wasm_bytes,
 bool was_cancelled()
 {
 	return s_cancelled.load();
+}
+
+void extend_watchdog(std::uint32_t ms)
+{
+	s_watchdog_extra_ms.fetch_add(ms);
 }
 
 bool is_running()
