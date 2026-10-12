@@ -164,6 +164,20 @@ static int lua_print_writer(lua_State *L)
     return 0;
 }
 
+/* os.execute() is a false friend on this board. There is no shell, so
+ * system() fails and Lua's os.execute returns nil, "exit", -1 rather than
+ * raising -- a script that writes the portable-looking
+ * `os.execute("sleep 0.05")` to pace itself (as the bouncing-DVD skill did)
+ * silently does not sleep at all, spins its core and starves the idle task
+ * until the watchdog fires. Fail where the author can see it, and name the
+ * call that does work. io.popen() already errors; this is the one that
+ * lies. */
+static int l_os_execute_unsupported(lua_State *L)
+{
+    return luaL_error(L, "os.execute() is not available on the robot (there is no shell); "
+                         "use robot.delay_ms(ms) to wait");
+}
+
 /* ── Initialisation ───────────────────────────────────────────────────── */
 
 esp_err_t lua_init(void)
@@ -190,6 +204,14 @@ esp_err_t lua_init(void)
 
     /* Open standard libraries */
     luaL_openlibs(g_L);
+
+    /* ...but os.execute() only pretends to work here (see the function) */
+    lua_getglobal(g_L, "os");
+    if (lua_istable(g_L, -1)) {
+        lua_pushcfunction(g_L, l_os_execute_unsupported);
+        lua_setfield(g_L, -2, "execute");
+    }
+    lua_pop(g_L, 1);
 
     /* Register robot bindings */
     lua_register_robot_bindings(g_L);
@@ -237,22 +259,39 @@ lua_State *lua_get_state(void)
 
 /* ── Execution: one script at a time, with a deadline ─────────────────────
  *
- * The state is shared by the HTTP server (/v1/lua/run) and the chat worker,
- * each on its own task; s_run_lock makes them take turns. Before it they
- * simply raced on it.
+ * The state is shared by the HTTP server (/v1/lua/run), the chat worker and
+ * the agent's lua_run_script, each on its own task; s_run_lock makes them
+ * take turns. Before it they simply raced on it.
  *
  * The timeout every caller passes was documented but not enforced, so a
  * `while true do end` held its task (the HTTP server, for /v1/lua/run)
  * forever. A count hook now checks the clock every kHookEvery instructions
  * and raises an error past the deadline; bindings that sleep in C call
  * lua_vm_check_deadline() themselves. Once past it the error comes back on
- * every check, so a script cannot pcall its way out. */
+ * every check, so a script cannot pcall its way out.
+ *
+ * The hook also yields, because a deadline alone is not enough. A busy loop
+ * -- an animation redrawing the screen between two `display.show()` calls,
+ * say -- keeps its task runnable for the whole run. The idle task is what
+ * feeds the task watchdog (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0/1), so
+ * on a core the script owns, IDLE never runs and task_wdt fires every 5 s
+ * until the script ends. That is what the bouncing-DVD skill did: its only
+ * wait was `os.execute("sleep 0.05")`, which is a silent no-op here, so the
+ * loop never gave up the CPU.
+ *
+ * Yielding from the hook, at most once every kYieldEveryMs, bounds that to
+ * one tick of delay per window (a tight numeric loop pays ~10% and every
+ * other loop pays nothing); the idle task, the LVGL flusher and the audio
+ * tasks all get their slots back. It must be vTaskDelay(), not taskYIELD():
+ * the idle task runs at priority 0, below every task that can call Lua. */
 
-static constexpr int      kHookEvery = 1000;   /* VM instructions between clock checks */
-static constexpr uint32_t kBusyWaitMs = 10000;
+static constexpr int      kHookEvery    = 1000;   /* VM instructions between clock checks */
+static constexpr uint32_t kBusyWaitMs   = 10000;
+static constexpr uint32_t kYieldEveryMs = 10;     /* longest a script may hold a core */
 
 static int64_t           s_deadline_us;        /* 0 = no limit */
 static bool              s_timed_out;
+static int64_t           s_last_yield_us;
 
 void lua_vm_check_deadline(lua_State *L)
 {
@@ -273,6 +312,12 @@ static void deadline_hook(lua_State *L, lua_Debug *ar)
 {
     (void)ar;
     lua_vm_check_deadline(L);
+
+    const int64_t now = esp_timer_get_time();
+    if (now - s_last_yield_us >= (int64_t)kYieldEveryMs * 1000) {
+        s_last_yield_us = now;
+        vTaskDelay(1);
+    }
 }
 
 static void capture_append(capture_buf_t *cap, const char *text)
@@ -419,6 +464,7 @@ static esp_err_t run_chunk(chunk_loader_t loader, const char *arg, esp_err_t loa
         if (file) prepare_file_run(g_L, file);
         s_timed_out = false;
         s_deadline_us = timeout_ms ? esp_timer_get_time() + (int64_t)timeout_ms * 1000 : 0;
+        s_last_yield_us = esp_timer_get_time();   /* first yield one window in */
         lua_sethook(g_L, deadline_hook, LUA_MASKCOUNT, kHookEvery);
 
         const int ret = lua_pcall(g_L, 0, 0, 0);

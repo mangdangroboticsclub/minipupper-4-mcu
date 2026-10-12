@@ -50,6 +50,11 @@ The essentials:
   and arguments) does what that tool call would do. Tool names are not Lua
   functions: `display_draw(...)` on its own is an error.
 - `print` a short result line; `error("...")` on failure.
+- An animation must pace itself: draw a frame, then `robot.delay_ms(frame_ms)`.
+  `display.show()` does not wait, and there is no shell for
+  `os.execute("sleep ...")` -- a loop with no real wait fights the rest of the
+  robot for the CPU. See the animation section of
+  `{CUR_SKILL_DIR}/references/robot_lua.md`.
 - Runs are limited to 60 s and block the robot's Lua meanwhile: do the thing
   and return.
 
