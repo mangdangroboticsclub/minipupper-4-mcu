@@ -98,3 +98,21 @@ skill_builder_configure_skill_sync(
 # The sync writes into the staging tree, so it has to run after the tree is
 # (re)created, and the image has to wait for both.
 add_dependencies(skill_builder_sync_skills mpx_prepare_system_fs)
+
+# skill_builder ships every skill of every component in the build, and its own
+# three are written for ESP-Claw's Lua runtime, which this firmware leaves out
+# (CONFIG_APP_CLAW_CAP_LUA=n, see sdkconfig.defaults). skill_creator teaches
+# the agent to write `require("arg_schema")` scripts nothing here can run, and
+# the Skills Lab pair installs such scripts from the hub. Dropped from the
+# image after the sync; main/skills/mpx_skill_creator replaces skill_creator.
+set(MPX_SYSTEM_SKILLS_EXCLUDED skill_creator skills_lab_downloader skills_lab_search)
+set(mpx_excluded_skill_dirs "")
+foreach(skill_id IN LISTS MPX_SYSTEM_SKILLS_EXCLUDED)
+    list(APPEND mpx_excluded_skill_dirs "${MPX_SYSTEM_FS_STAGING}/skills/${skill_id}")
+endforeach()
+add_custom_target(mpx_prune_system_skills ALL
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${mpx_excluded_skill_dirs}
+    VERBATIM
+)
+add_dependencies(mpx_prune_system_skills skill_builder_sync_skills)
+add_dependencies(littlefs_system_bin mpx_prune_system_skills)
