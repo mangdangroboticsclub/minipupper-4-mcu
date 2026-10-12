@@ -37,6 +37,34 @@
     : "Chat and voice"
   );
 
+  // ── Agent permissions (/v1/agent/permissions): "Allow writes (YOLO)" ──
+  let allowWrites = $state(null);   // null until the firmware answers (older builds: no row)
+  let permsBusy = $state(false);
+  $effect(() => {
+    fetch("/v1/agent/permissions", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (j && typeof j.allow_writes === "boolean") allowWrites = j.allow_writes; })
+      .catch(() => {});
+  });
+
+  async function toggleAllowWrites() {
+    if (allowWrites === null || permsBusy) return;
+    const next = !allowWrites;
+    if (next && !confirm(
+      "Allow writes without asking?\n\nScripts and skills started by the agent will save and delete files on the robot with no permission prompt. Turn this off again to be asked first."
+    )) return;
+    permsBusy = true;
+    try {
+      const r = await fetch("/v1/agent/permissions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allow_writes: next }),
+      });
+      if (r.ok) allowWrites = (await r.json()).allow_writes;
+    } catch { /* keep the old state */ }
+    permsBusy = false;
+  }
+
   // ── Display (/v1/display): eyes or an animation ──
   let display = $state(null);
   $effect(() => {
@@ -117,6 +145,7 @@
 {#snippet iStudio()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 4v16M12 4v16M18 4v16"/><path d="M4 9h4M10 14h4M16 7h4" stroke-width="2.6"/></svg>{/snippet}
 {#snippet iRest()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg>{/snippet}
 {#snippet iDisplay()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8.5 10v4M15.5 10v4"/></svg>{/snippet}
+{#snippet iUnlock()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/></svg>{/snippet}
 {#snippet iFiles()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>{/snippet}
 
 {#if page === "wifi"}
@@ -167,11 +196,32 @@
         </section>
       {/if}
 
-      {#if hasAi}
+      {#if hasAi || allowWrites !== null}
         <section>
           <h2>AI</h2>
           <div class="group">
-            {@render row({ icon: iAi, title: "AI & Voice", desc: aiLabel, onclick: () => (page = "ai") })}
+            {#if hasAi}
+              {@render row({ icon: iAi, title: "AI & Voice", desc: aiLabel, onclick: () => (page = "ai") })}
+            {/if}
+            {#if allowWrites !== null}
+              <button
+                type="button"
+                class="row"
+                role="switch"
+                aria-checked={allowWrites}
+                disabled={permsBusy}
+                onclick={toggleAllowWrites}
+              >
+                <span class="ico" class:warn={allowWrites}>{@render iUnlock()}</span>
+                <span class="txt">
+                  <span class="t">Allow writes (YOLO)</span>
+                  <span class="d" class:warn={allowWrites}>
+                    {allowWrites ? "On · files are saved and deleted without asking" : "Off · ask before saving or deleting files"}
+                  </span>
+                </span>
+                <span class="switch" class:on={allowWrites} aria-hidden="true"><span class="knob"></span></span>
+              </button>
+            {/if}
           </div>
         </section>
       {/if}
@@ -247,6 +297,13 @@
   .mono { font-family: var(--mono); color: var(--sub); font-weight: 500; }
   .chev { color: #A39F96; flex-shrink: 0; transition: transform var(--dur-fast); }
   .chev.down { transform: rotate(90deg); }
+  .row:disabled { cursor: default; opacity: 0.7; }
+  .ico.warn { background: #F6C9C2; color: #9B2C20; }
+  .d.warn { color: #9B2C20; font-weight: 600; }
+  .switch { width: 46px; height: 28px; border-radius: 14px; background: var(--hair); flex-shrink: 0; position: relative; transition: background var(--dur-fast); }
+  .switch .knob { position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 11px; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2); transition: transform var(--dur-fast); }
+  .switch.on { background: #9B2C20; }
+  .switch.on .knob { transform: translateX(18px); }
 
   .rest { padding: 4px 16px 16px; display: flex; flex-direction: column; gap: 12px; border-top: none !important; }
   .seg { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; background: var(--hair); border-radius: 14px; padding: 4px; }

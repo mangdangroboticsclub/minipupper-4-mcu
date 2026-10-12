@@ -121,6 +121,19 @@ bool request_permission(const char *type,
                         uint32_t timeout_ms);
 
 /**
+ * @brief Settings' "Allow writes (YOLO)": while on, request_permission()
+ *        approves at once (still broadcasting "approved" to the PWA)
+ *        instead of prompting. Off by default.
+ */
+bool allow_writes();
+
+/**
+ * @brief Turn "Allow writes" on or off and save it in NVS.
+ * @return false if it could not be saved (the setting is then unchanged).
+ */
+bool set_allow_writes(bool allow);
+
+/**
  * @brief Queue a Lua script for async execution in the worker task.
  *
  * Non-blocking — pushes the script to the Lua command queue and

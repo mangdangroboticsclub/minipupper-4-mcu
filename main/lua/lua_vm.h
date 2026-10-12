@@ -44,7 +44,13 @@ esp_err_t lua_run_string(const char *script,
 /**
  * @brief Run a Lua script from a LittleFS file (synchronous).
  *
- * @param path        Absolute path in LittleFS (e.g. "/lua/test.lua")
+ * Unlike an inline snippet, a file runs in its own global environment
+ * (reads fall through to the shared one: robot, display, tools, ...), sees
+ * a global `args` table ({} here), and require() searches the script's own
+ * folder first. Modules it loads are dropped when it ends.
+ *
+ * @param path        "/lua/test.lua" (relative to /fs), "/fs/...", "/system/...",
+ *                    or a bare name under /fs/lua
  * @param output      Output buffer (stdout capture)
  * @param output_size Size of output buffer
  * @param timeout_ms  Max execution time in ms (0 = no limit)
@@ -58,6 +64,14 @@ esp_err_t lua_run_string(const char *script,
 esp_err_t lua_run_file(const char *path,
                        char *output, size_t output_size,
                        uint32_t timeout_ms);
+
+/**
+ * @brief lua_run_file() with `args` taken from @p args_json (a JSON object;
+ *        nullptr, "" or anything else gives {}).
+ */
+esp_err_t lua_run_file_args(const char *path, const char *args_json,
+                            char *output, size_t output_size,
+                            uint32_t timeout_ms);
 
 /**
  * @brief For bindings that block in C (robot.delay_ms): raise the timeout

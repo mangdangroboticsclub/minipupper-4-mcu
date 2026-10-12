@@ -28,7 +28,9 @@ extern "C" {
 #include "lauxlib.h"
 }
 
+#include "cJSON.h"
 #include "lua_bindings.h"
+#include "lua_json.h"
 
 static const char *TAG = "lua_vm";
 
@@ -204,6 +206,9 @@ esp_err_t lua_init(void)
     /* Register display bindings (drawing on the screen's canvas) */
     lua_register_display_bindings(g_L);
 
+    /* Register the agent's robot tools (tools.call) */
+    lua_register_tools_bindings(g_L);
+
     /* Override print to use our capture mechanism */
     /* We push our custom print function as _G.print */
     lua_pushcfunction(g_L, lua_print_writer);
@@ -286,10 +291,101 @@ typedef int (*chunk_loader_t)(lua_State *L, const char *arg);
 static int load_string(lua_State *L, const char *script) { return luaL_loadstring(L, script); }
 static int load_file(lua_State *L, const char *path)     { return luaL_loadfile(L, path); }
 
+/* ── File runs: own globals, `args`, require() next to the script ──────────
+ *
+ * A file is a program the user can run again, from the app or the agent, so
+ * it must not see what the previous one left behind. Its chunk gets a fresh
+ * _ENV whose misses fall through to _G (robot, display, tools, print ...),
+ * so its globals die with it. require() looks in the script's folder first,
+ * and modules loaded during the run are dropped afterwards, so an edited
+ * helper is picked up next time. Inline snippets (lua_run_string) keep the
+ * shared state, as before. */
+
+typedef struct {
+    const char *dir;        /* the script's folder, a VFS path */
+    const char *args_json;  /* JSON object/array for `args`; nullptr or "" = {} */
+} file_run_t;
+
+/* Push `args` for the script: the JSON's value, or {} for none/invalid. */
+static void push_args(lua_State *L, const char *args_json)
+{
+    cJSON *parsed = (args_json && args_json[0]) ? cJSON_Parse(args_json) : NULL;
+    const bool usable = parsed && (cJSON_IsObject(parsed) || cJSON_IsArray(parsed));
+    if (!usable || !lua_json_push(L, parsed)) {
+        if (parsed) ESP_LOGW(TAG, "script args are not a usable JSON object; using {}");
+        lua_newtable(L);
+    }
+    cJSON_Delete(parsed);
+}
+
+/* The loaded chunk is on top. Leaves [loaded-snapshot, old package.path,
+ * chunk] for restore_file_run() after the call. */
+static void prepare_file_run(lua_State *L, const file_run_t *run)
+{
+    const int chunk = lua_gettop(L);
+
+    lua_newtable(L);                                   /* snapshot */
+    const int snap = lua_gettop(L);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "loaded");
+    lua_pushnil(L);
+    while (lua_next(L, -2) != 0) {
+        lua_pop(L, 1);
+        lua_pushvalue(L, -1);
+        lua_pushboolean(L, 1);
+        lua_rawset(L, snap);
+    }
+    lua_pop(L, 1);                                     /* loaded */
+
+    lua_getfield(L, -1, "path");                       /* old path */
+    const char *old_path = lua_tostring(L, -1);
+    lua_pushfstring(L, "%s/?.lua;%s/?/init.lua;%s", run->dir, run->dir, old_path ? old_path : "");
+    lua_setfield(L, -3, "path");
+    lua_remove(L, -2);                                 /* package */
+
+    lua_rotate(L, chunk, -1);                          /* [snap, old path, chunk] */
+
+    lua_createtable(L, 0, 1);                          /* the script's _ENV */
+    push_args(L, run->args_json);
+    lua_setfield(L, -2, "args");
+    lua_createtable(L, 0, 1);
+    lua_pushglobaltable(L);
+    lua_setfield(L, -2, "__index");
+    lua_setmetatable(L, -2);
+    if (lua_setupvalue(L, -2, 1) == NULL) {            /* a main chunk's upvalue 1 is _ENV */
+        lua_pop(L, 1);
+    }
+}
+
+/* Undo prepare_file_run(): stack top is [snapshot, old package.path]. */
+static void restore_file_run(lua_State *L)
+{
+    const int snap = lua_gettop(L) - 1;
+    lua_getglobal(L, "package");
+    lua_pushvalue(L, snap + 1);
+    lua_setfield(L, -2, "path");
+    lua_getfield(L, -1, "loaded");
+    const int loaded = lua_gettop(L);
+    lua_pushnil(L);
+    while (lua_next(L, loaded) != 0) {
+        lua_pop(L, 1);
+        lua_pushvalue(L, -1);
+        const bool known = lua_rawget(L, snap) != LUA_TNIL;
+        lua_pop(L, 1);
+        if (!known) {          /* clearing an existing field during lua_next is allowed */
+            lua_pushvalue(L, -1);
+            lua_pushnil(L);
+            lua_rawset(L, loaded);
+        }
+    }
+    lua_pop(L, 4);             /* loaded, package, old path, snapshot */
+}
+
 /* Load with `loader`, run under the deadline, report into `output`. A load
  * failure returns `load_err` (a missing file and a syntax error are
- * different answers to the caller). */
+ * different answers to the caller). `file` is set for file runs. */
 static esp_err_t run_chunk(chunk_loader_t loader, const char *arg, esp_err_t load_err,
+                           const file_run_t *file,
                            char *output, size_t output_size, uint32_t timeout_ms)
 {
     if (output && output_size > 0) output[0] = '\0';
@@ -320,6 +416,7 @@ static esp_err_t run_chunk(chunk_loader_t loader, const char *arg, esp_err_t loa
         lua_pop(g_L, 1);
         result = load_err;
     } else {
+        if (file) prepare_file_run(g_L, file);
         s_timed_out = false;
         s_deadline_us = timeout_ms ? esp_timer_get_time() + (int64_t)timeout_ms * 1000 : 0;
         lua_sethook(g_L, deadline_hook, LUA_MASKCOUNT, kHookEvery);
@@ -338,6 +435,7 @@ static esp_err_t run_chunk(chunk_loader_t loader, const char *arg, esp_err_t loa
             lua_pop(g_L, 1);
             result = s_timed_out ? ESP_ERR_TIMEOUT : ESP_FAIL;
         }
+        if (file) restore_file_run(g_L);
     }
 
     lua_pushstring(g_L, CAPTURE_BUF_REG_KEY);
@@ -352,27 +450,46 @@ esp_err_t lua_run_string(const char *script,
                          char *output, size_t output_size,
                          uint32_t timeout_ms)
 {
-    return run_chunk(load_string, script, ESP_FAIL, output, output_size, timeout_ms);
+    return run_chunk(load_string, script, ESP_FAIL, NULL, output, output_size, timeout_ms);
 }
+
+static constexpr size_t kVfsPathMax = 256;
 
 esp_err_t lua_run_file(const char *path,
                        char *output, size_t output_size,
                        uint32_t timeout_ms)
 {
+    return lua_run_file_args(path, NULL, output, output_size, timeout_ms);
+}
+
+esp_err_t lua_run_file_args(const char *path, const char *args_json,
+                            char *output, size_t output_size,
+                            uint32_t timeout_ms)
+{
+    if (!path || !path[0]) return ESP_ERR_INVALID_ARG;
+
     /* Resolve path to VFS path:
-     *   "walk.lua"      → "/fs/lua/walk.lua"
-     *   "/lua/walk.lua" → "/fs/lua/walk.lua"
-     *   "/fs/lua/..."   → unchanged (already a VFS path)
+     *   "walk.lua"        → "/fs/lua/walk.lua"
+     *   "/lua/walk.lua"   → "/fs/lua/walk.lua"
+     *   "/fs/..."         → unchanged (already a VFS path)
+     *   "/system/..."     → unchanged (the agent's read-only partition)
      */
-    char vfs_path[256];
+    char vfs_path[kVfsPathMax];
     if (path[0] != '/') {
         snprintf(vfs_path, sizeof(vfs_path), "/fs/lua/%s", path);
-    } else if (strncmp(path, "/fs/", 4) != 0) {
+    } else if (strncmp(path, "/fs/", 4) != 0 && strncmp(path, "/system/", 8) != 0) {
         snprintf(vfs_path, sizeof(vfs_path), "/fs%s", path);
     } else {
         strncpy(vfs_path, path, sizeof(vfs_path) - 1);
         vfs_path[sizeof(vfs_path) - 1] = '\0';
     }
 
-    return run_chunk(load_file, vfs_path, ESP_ERR_NOT_FOUND, output, output_size, timeout_ms);
+    char dir[kVfsPathMax];
+    strncpy(dir, vfs_path, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = '\0';
+
+    const file_run_t run = { dir, args_json };
+    return run_chunk(load_file, vfs_path, ESP_ERR_NOT_FOUND, &run, output, output_size, timeout_ms);
 }

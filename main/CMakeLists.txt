@@ -52,6 +52,8 @@ set(sources
     "lua/lua_vm.cc"
     "lua/lua_bindings.cc"
     "lua/lua_display.cc"
+    "lua/lua_json.cc"
+    "lua/lua_tools.cc"
     # The on-device agent (Phase 5). The owner's AI mode and the robot's
     # tool table exist in every build (the voice server's MCP and /v1/ai use
     # them); agent_runtime.cc compiles to stubs when the agent is off.
@@ -67,6 +69,7 @@ if(CONFIG_APP_AGENT_ENABLE)
     list(APPEND sources
         "agent/agent_fs.cc"
         "agent/agent_caps.cc"
+        "agent/agent_lua.cc"
         "agent/claw_overrides.c"
     )
 endif()

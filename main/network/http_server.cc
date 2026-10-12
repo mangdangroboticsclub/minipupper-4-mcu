@@ -1135,6 +1135,52 @@ static esp_err_t api_robot_power_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* /v1/agent/permissions — Settings' "Allow writes (YOLO)".
+ *
+ * GET  -> {"ok":true,"allow_writes":false}
+ * POST {"allow_writes":true|false}   saved on the robot
+ * While on, file write/delete requests from scripts and skills are approved
+ * without the permission prompt (see network::request_permission). */
+static void send_permissions_json(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, network::allow_writes() ? R"({"ok":true,"allow_writes":true})"
+                                                 : R"({"ok":true,"allow_writes":false})", -1);
+}
+
+static esp_err_t api_agent_permissions_get(httpd_req_t *req)
+{
+    send_permissions_json(req);
+    return ESP_OK;
+}
+
+static esp_err_t api_agent_permissions_post(httpd_req_t *req)
+{
+    char buf[64] = {};
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len <= 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "empty body", -1);
+        return ESP_OK;
+    }
+    buf[len] = 0;
+
+    const bool on  = std::strstr(buf, "\"allow_writes\":true") != nullptr;
+    const bool off = std::strstr(buf, "\"allow_writes\":false") != nullptr;
+    if (on == off) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "expected {\"allow_writes\":true|false}", -1);
+        return ESP_OK;
+    }
+    if (!network::set_allow_writes(on)) {
+        httpd_resp_set_status(req, "500 Server Error");
+        httpd_resp_send(req, "could not save the setting", -1);
+        return ESP_OK;
+    }
+    send_permissions_json(req);
+    return ESP_OK;
+}
+
 /* POST /v1/robot/joy — web joystick input (mini_pupper_web_controller
  * style).  Body: {"f":-1..1,"s":-1..1,"t":-1..1}
  *   f = forward/back, s = strafe (+left), t = turn (+left).
@@ -2608,6 +2654,8 @@ bool start_http_server()
     register_api(s_server, "GET",  "/v1/robot/look",           HTTP_GET,  api_robot_look);
     register_api(s_server, "GET",  "/v1/robot/power",          HTTP_GET,  api_robot_power_get);
     register_api(s_server, "POST", "/v1/robot/power",          HTTP_POST, api_robot_power_post);
+    register_api(s_server, "GET",  "/v1/agent/permissions",    HTTP_GET,  api_agent_permissions_get);
+    register_api(s_server, "POST", "/v1/agent/permissions",    HTTP_POST, api_agent_permissions_post);
     register_api(s_server, "POST", "/v1/robot/config",         HTTP_POST, api_robot_config);
     register_api(s_server, "GET",  "/v1/robot/config",         HTTP_GET,  api_robot_get_config);
     register_api(s_server, "POST", "/v1/robot/calibrate",      HTTP_POST, api_robot_calibrate);

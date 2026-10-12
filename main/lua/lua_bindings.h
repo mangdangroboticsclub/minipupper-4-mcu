@@ -118,3 +118,13 @@ void lua_register_crypto_bindings(lua_State *L);
  * Errors (no screen, bad size) are raised as Lua errors.
  */
 void lua_register_display_bindings(lua_State *L);
+
+/**
+ * @brief Register the `tools` module (lua_tools.cc): the agent's robot tools.
+ *
+ *   tools.call(name [, args]) → result | nil, error
+ *       Same names and arguments as the agent's tools (robot_move,
+ *       display_draw, mpx_run_skill, ...). result is the reply as a table.
+ *   tools.list()              → { tool names }
+ */
+void lua_register_tools_bindings(lua_State *L);

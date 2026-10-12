@@ -424,7 +424,8 @@ Files and skills (paths are relative to the LittleFS root `/fs`):
 | `POST /v1/skills/upload` | Q `name=x.wasm`, raw binary body (<=256 KB) | `{"ok":true,"path"}` |
 | `POST /v1/skills/run` | B `{"skill":"x.wasm","params":"a=1;b=2"}` | `{"output":"started"}`; 409 if one is running; runs async, 60 s watchdog |
 | `GET /v1/fs/list` | Q `path` (default `/`) | `{"f":[{"n","s","r"(read-only)}],"d":[dir names]}` |
-| `GET /v1/fs/read` | Q `path` | `{"ok":true,"p","c"}` (text content) |
+| `GET /v1/fs/read` | Q `path` | `{"ok":true,"p","c"}` (text content; `c:""` for empty files) |
+| `POST /v1/fs/write` | B `{"path","content"}` (body <=32 KB) | `{"ok":true,"p","s"}`; overwrites an existing file only; `/www` never writable |
 | `GET /v1/fs/info` | - | `{"total","used"}` |
 | `POST /v1/fs/delete` | B `{"path","sudo":bool}` | `{"ok":true}`; `/www` never deletable; without sudo only `.wasm/.mpxe/.lua` |
 
@@ -432,12 +433,24 @@ Lua:
 
 | Method + path | Input | Response |
 |---|---|---|
-| `POST /v1/lua/run` | B `{"script"}` or `{"path"}` | `{"ok":true,"output"}` / `{"ok":false,"error"}` - synchronous, 5 s timeout (60 s for `path`), 2 KB output |
+| `POST /v1/lua/run` | B `{"script"}` or `{"path"}` | `{"ok":true,"output"}` / `{"ok":false,"error"}` - synchronous, 5 s timeout (60 s for `path`), 2 KB output. A `path` run gets its own globals, `args = {}`, and `require` from its folder (see `lua_run_file` in `main/lua/lua_vm.h`) |
 | `POST /v1/lua/enqueue` | B `{"script"}` | `{"ok":true}`; written to `/lua/_deploy_N.lua` and run by the chat Lua worker (60 s), results arrive on the chat WS |
 | `GET /v1/lua/list` | - | `{"ok":true,"files":[...]}` (under `/lua`) |
 | `GET /v1/lua/read` | Q `name` | `{"ok":true,"name","code"}` |
 | `POST /v1/lua/save` | B `{"name","code"}` | `{"ok","path"}` |
 | `POST /v1/lua/delete` | B `{"name"}` | `{"ok"}` |
+
+| Method + path | Input | Response |
+|---|---|---|
+| `GET /v1/agent/permissions` | - | `{"ok":true,"allow_writes":bool}` |
+| `POST /v1/agent/permissions` | B `{"allow_writes":bool}` | same; saved in NVS (`agent_perm/allow_writes`). While on, `network::request_permission` (Lua/WASM `fs.write`/`fs.delete`) approves at once and broadcasts `approved` instead of `pending` |
+
+The on-device agent runs scripts on the same VM through its `lua_run_script`
+tool (`main/agent/agent_lua.cc`, group `cap_mpx_lua`, not offered to the voice
+gateway), with `args` from the call. Scripts reach the agent's robot tools with
+`tools.call(name, args)` (`main/lua/lua_tools.cc`). Agent skill scripts live in
+`/agent/skills/<id>/scripts/`, so the Files page can open, edit and run them;
+`main/skills/mpx_skill_creator` teaches the agent this layout.
 
 Chat and cloud:
 

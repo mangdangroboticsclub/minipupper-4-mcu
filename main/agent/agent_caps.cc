@@ -18,6 +18,7 @@
 
 #include "esp_log.h"
 
+#include "agent/agent_lua.h"
 #include "agent/robot_tools.h"
 #include "app_capabilities.h"
 #include "claw_cap.h"
@@ -49,6 +50,7 @@ Group s_groups[] = {
     { "cap_display",   "Screen",       "MangDang robot screen",    "display", {}, 0, {} },
     { "cap_mpx_skill", "Robot skills", "MangDang robot skills",    "skill",   {}, 0, {} },
     { "cap_music",     "Music",        "MangDang robot music",     "music",   {}, 0, {} },
+    { "cap_mpx_lua",   "Robot Lua",    "MangDang robot Lua",       "lua",     {}, 0, {} },
 };
 constexpr size_t kGroupCount = sizeof(s_groups) / sizeof(s_groups[0]);
 
@@ -68,8 +70,12 @@ esp_err_t run_slot(size_t slot, const char *input_json, char *output, size_t out
     ESP_LOGI(TAG, "%s", tool->name);
     /* ESP-Claw's agent core logs and reports an error text itself when the
      * execute returns anything but ESP_OK; the Reply's own error flag maps
-     * onto that. Information for the model ("no such movement") is ESP_OK. */
-    const Reply r = robot_tools::call(tool->name, input_json ? input_json : "{}");
+     * onto that. Information for the model ("no such movement") is ESP_OK.
+     * Run directly rather than by name: agent_lua's tools are not in
+     * robot_tools' table. */
+    cJSON *args = (input_json && input_json[0]) ? cJSON_Parse(input_json) : nullptr;
+    const Reply r = robot_tools::run(*tool, args);
+    cJSON_Delete(args);
     snprintf(output, output_size, "%s", r.text.c_str());
     return r.error ? ESP_ERR_INVALID_ARG : ESP_OK;
 }
@@ -104,18 +110,9 @@ Group *group_for(const char *id)
     return nullptr;
 }
 
-/* Fill every group's descriptor array from the tool table. Once. */
-void build_descriptors()
+/* Add one table's tools to their groups, from trampoline slot `slot` on. */
+void add_tools(const Tool *table, size_t count, size_t &slot)
 {
-    static bool built = false;
-    if (built) {
-        return;
-    }
-    built = true;
-
-    size_t count = 0;
-    const Tool *table = robot_tools::all(&count);
-    size_t slot = 0;
     for (size_t k = 0; k < count && slot < kMaxTools; k++) {
         const Tool &t = table[k];
         Group *g = group_for(t.group);
@@ -145,6 +142,23 @@ void build_descriptors()
         d.execute = trampoline_for(slot);
         slot++;
     }
+}
+
+/* Fill every group's descriptor array from the tool tables. Once. */
+void build_descriptors()
+{
+    static bool built = false;
+    if (built) {
+        return;
+    }
+    built = true;
+
+    size_t slot = 0;
+    size_t count = 0;
+    const Tool *table = robot_tools::all(&count);
+    add_tools(table, count, slot);
+    table = agent_lua::tools(&count);
+    add_tools(table, count, slot);
 
     for (Group &g : s_groups) {
         g.group = {};
@@ -177,9 +191,11 @@ esp_err_t reg_group(const app_claw_config_t *config, const app_claw_storage_path
     return register_group(s_groups[Index]);
 }
 
-const app_capability_register_fn kRegFns[kGroupCount] = {
-    reg_group<0>, reg_group<1>, reg_group<2>, reg_group<3>,
+const app_capability_register_fn kRegFns[] = {
+    reg_group<0>, reg_group<1>, reg_group<2>, reg_group<3>, reg_group<4>,
 };
+static_assert(sizeof(kRegFns) / sizeof(kRegFns[0]) == kGroupCount,
+              "one reg_group<N> per entry of s_groups");
 
 }  // namespace
 

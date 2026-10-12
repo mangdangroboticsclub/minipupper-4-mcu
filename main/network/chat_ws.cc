@@ -2,6 +2,7 @@
 #include "network/crypto.h"
 #include "network/wifi_sta.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <cctype>
@@ -12,6 +13,7 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "nvs.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -73,6 +75,25 @@ static bool     s_perm_approved = false;
 static char     s_perm_action_id[64] = {};
 // Mutex protecting the permission state.
 static SemaphoreHandle_t s_perm_mutex = nullptr;
+
+/* Settings > "Allow writes (YOLO)": approve every request without asking.
+ * Saved in NVS, read once by init_chat_pipeline(). Off by default. */
+static constexpr const char *kPermNvsNamespace = "agent_perm";
+static constexpr const char *kPermNvsKeyAllow  = "allow_writes";
+static std::atomic<bool> s_perm_allow_writes{false};
+
+static void load_allow_writes()
+{
+    nvs_handle_t h;
+    if (nvs_open(kPermNvsNamespace, NVS_READONLY, &h) != ESP_OK) {
+        return;                  /* never set: keep asking */
+    }
+    uint8_t v = 0;
+    if (nvs_get_u8(h, kPermNvsKeyAllow, &v) == ESP_OK) {
+        s_perm_allow_writes = (v != 0);
+    }
+    nvs_close(h);
+}
 
 
 /* ── PWA WebSocket client entry ──────────────────────────── */
@@ -1416,6 +1437,10 @@ bool init_chat_pipeline()
         ESP_LOGE(TAG, "Failed to create permission mutex");
         return false;
     }
+    load_allow_writes();
+    if (s_perm_allow_writes) {
+        ESP_LOGW(TAG, "Allow writes is ON: file writes/deletes are approved without asking");
+    }
 
     // ── Create reply queue (chat_send → downstream bridge) ────
     s_reply_queue = xQueueCreate(16, REPLY_TEXT_MAX);
@@ -2071,6 +2096,13 @@ bool request_permission(const char *type,
     std::snprintf(action_id, sizeof(action_id), "perm_%lld_%d",
                   (long long)esp_timer_get_time(), rand());
 
+    // "Allow writes": no prompt, but the app still hears what was done.
+    if (s_perm_allow_writes) {
+        broadcast_action(nullptr, type, description, "approved", action_id);
+        ESP_LOGI(TAG, "Permission auto-approved (allow writes): %s (%s)", type, description);
+        return true;
+    }
+
     // Store the pending action ID under the mutex
     xSemaphoreTake(s_perm_mutex, portMAX_DELAY);
     std::strncpy(s_perm_action_id, action_id, sizeof(s_perm_action_id) - 1);
@@ -2108,6 +2140,29 @@ bool request_permission(const char *type,
              type, approved ? "APPROVED" : "DENIED/TIMEOUT", signalled, approved);
 
     return approved;
+}
+
+bool allow_writes()
+{
+    return s_perm_allow_writes;
+}
+
+bool set_allow_writes(bool allow)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(kPermNvsNamespace, NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, kPermNvsKeyAllow, allow ? 1 : 0);
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not save allow writes: %s", esp_err_to_name(err));
+        return false;
+    }
+    s_perm_allow_writes = allow;
+    ESP_LOGW(TAG, "Allow writes %s", allow ? "ON: requests are approved without asking" : "off");
+    return true;
 }
 
 /* ── Public helper: queue a Lua script for async execution ─── */

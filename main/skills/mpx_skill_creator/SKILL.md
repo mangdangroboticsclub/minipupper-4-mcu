@@ -1,12 +1,13 @@
 ---
 {
   "name": "mpx_skill_creator",
-  "description": "Create, update or remove a reusable skill on this robot when the user asks to add a feature, teach a new trick, or remember a routine such as \"make a skill that draws a crab\".",
+  "description": "Create, update or remove a reusable skill on this robot (optionally with a Lua script the owner can also run and edit in the app) when the user asks to add a feature, teach a new trick, or save a routine such as \"make a skill that draws a crab\".",
   "author": "MangDang",
   "metadata": {
     "cap_groups": [
       "cap_skill",
-      "cap_files"
+      "cap_files",
+      "cap_mpx_lua"
     ],
     "manage_mode": "readonly"
   }
@@ -15,51 +16,72 @@
 
 # Creating skills on this robot
 
-A skill here is **one `SKILL.md` document**: instructions you will follow later
-by calling the robot's tools. There is nothing to execute besides those tools.
+A skill is a folder under the agent's data root:
 
-## No Lua, no scripts
+```text
+/fs/agent/skills/<skill_id>/
+├── SKILL.md            required: when to use it, and what to do
+└── scripts/
+    └── <name>.lua      optional: a script run with lua_run_script
+```
 
-You have **no tool that runs Lua** (or any other script) on this robot. Do not
-write `.lua` files, do not `require` modules such as `arg_schema`, and do not
-treat tool names as functions inside code: `display_draw(...)` written in a
-script does nothing, `display_draw` called as a tool draws. If a request sounds
-like it needs a script, write the steps as tool calls in the skill instead.
+Write files with `write_file`, then register the skill (below).
 
-## What a skill can use
+## Script or no script?
 
-The robot's own tools, called directly:
+- **Prefer a Lua script** when the skill is a routine the owner may want to
+  run or tweak themselves: a drawing, a dance, a sequence of moves, a timer.
+  The owner sees it in the app's **Files** page under
+  `agent/skills/<skill_id>/scripts/`, can open and edit it there and press
+  **Run**. Keep each skill to one script, and reuse that path when iterating
+  (no `foo2.lua`).
+- **No script** when the skill is judgement, not a routine (how to answer, which
+  tool to pick). Then `SKILL.md` alone describes the tool calls.
 
-- Moving: `robot_move`, `robot_pose`, `robot_get_state`, `robot_set_config`
-- Screen: `display_draw`, `display_show_emotion`, `display_show_text`,
-  `display_set_colors`, `display_set_brightness`, `display_clear`
-- Robot skills (installed `.wasm` files): `mpx_list_skills`, `mpx_run_skill`,
-  `mpx_stop_skill`
-- Music, when this robot has it: `music_play`, `music_stop`
+## Writing the script
 
-Put the exact arguments in the skill (for a drawing: the whole `shapes` list),
-so running it later is one tool call, not a redesign. Activate the skill that
-documents a tool (`mpx_robot`, `mpx_display_draw`, ...) before writing about it.
+Read `{CUR_SKILL_DIR}/references/robot_lua.md` first: it is the whole API, and
+it is not ESP-Claw's Lua -- no `arg_schema`, no `delay` or `lvgl` modules.
+The essentials:
 
-## Where it goes
+- `args` is always a table, and is **empty when the owner presses Run**: give
+  every argument a default.
+- `tools.call("display_draw", {...})` (and every other robot tool, same names
+  and arguments) does what that tool call would do. Tool names are not Lua
+  functions: `display_draw(...)` on its own is an error.
+- `print` a short result line; `error("...")` on failure.
+- Runs are limited to 60 s and block the robot's Lua meanwhile: do the thing
+  and return.
 
-`skills/<skill_id>/SKILL.md` under the agent's data root (on this robot
-`/fs/agent/skills/<skill_id>/SKILL.md`), written with `write_file`. Nothing else
-belongs in that folder.
+```lua
+-- Draw a crab. args.seconds: how long it stays (default 20).
+local seconds = tonumber(args.seconds) or 20
 
-`skill_id`: lowercase letters, digits, `_` or `-`; named after what it does for
-the user (`draw_crab`, `morning_stretch`), not how. Do not reuse an existing id
-unless the user asked to update that skill.
+local res, err = tools.call("display_draw", {
+  background = "black",
+  seconds = seconds,
+  shapes = {
+    { type = "oval", x = 160, y = 140, rx = 75, ry = 50, color = "#FF5A2A" },
+    { type = "circle", x = 135, y = 70, r = 11, color = "white" },
+    { type = "circle", x = 185, y = 70, r = 11, color = "white" },
+  },
+})
+if not res then error(err) end
+print("crab on screen for " .. seconds .. " s")
+```
 
-## The document
+After writing it, run it once with `lua_run_script` (`path` is the absolute
+path you wrote, `args` optional) and fix it until it succeeds.
 
-```md
+## The SKILL.md
+
+````md
 ---
 {
   "name": "draw_crab",
   "description": "Draw a red crab on the robot's screen when the user asks for a crab.",
   "metadata": {
-    "cap_groups": ["cap_display"],
+    "cap_groups": ["cap_mpx_lua"],
     "manage_mode": "runtime"
   }
 }
@@ -67,26 +89,32 @@ unless the user asked to update that skill.
 
 # Draw a crab
 
-Call `display_draw` with exactly these arguments:
+Run `/fs/agent/skills/draw_crab/scripts/draw_crab.lua` with `lua_run_script`.
 
-{ "background": "black", "seconds": 30, "shapes": [ ... ] }
+Args: `seconds` (number, 1-600, default 20): how long the crab stays.
 
-Then tell the user the crab is on the screen.
+```json
+{"path":"/fs/agent/skills/draw_crab/scripts/draw_crab.lua","args":{"seconds":20}}
 ```
 
-- `name` must equal `skill_id`.
-- `description`: one sentence, in the words a user would say, plus any
-  prerequisite.
-- `cap_groups`: the groups whose tools the skill calls: `cap_robot`,
-  `cap_display`, `cap_mpx_skill`, `cap_music`.
+Report the script's output. If it fails, tell the user the error.
+````
+
+- `name` must equal `skill_id`: lowercase letters, digits, `_` or `-`, named
+  after what it does for the user. Do not reuse an id unless asked to update
+  that skill.
+- `description`: one sentence, in the words a user would say.
+- `cap_groups`: `cap_mpx_lua` for a script skill; otherwise the groups whose
+  tools it calls (`cap_robot`, `cap_display`, `cap_mpx_skill`, `cap_music`).
 - `manage_mode`: `runtime` for skills you create.
+- Refer to the script by its absolute path, `/fs/agent/skills/<skill_id>/scripts/<name>.lua`,
+  everywhere: in SKILL.md, `write_file` and `lua_run_script`.
 
 ## Register it
 
-Right after writing the file, call `register_skill` with
-`{"skill_id":"<skill_id>","file":"<skill_id>/SKILL.md"}`. To update a skill,
-rewrite the file and call `register_skill` again; to remove one, call
-`unregister_skill`. Report the tool's result as it is; if writing or
-registering failed, say so and do not claim the skill exists.
-
-Then try it once if the user is there to see it, and tell them the skill id.
+Call `register_skill` with `{"skill_id":"<skill_id>","file":"<skill_id>/SKILL.md"}`.
+To update a skill, rewrite its files and register again; to remove one, call
+`unregister_skill` (and `delete_file` its script). Report the tool's result as
+it is; if writing or registering failed, say so and do not claim the skill
+exists. Then tell the user the skill id, and that the script is in the app's
+Files page if they want to change it.

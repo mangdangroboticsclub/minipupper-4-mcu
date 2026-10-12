@@ -655,10 +655,14 @@ Pupper/Cloud badge per conversation. Service-worker cache `v12-claw`,
 
 - Voice -> local agent handoff (and the broader cloud <-> local handoff).
 - ~~`mpx_display_draw` (needs `cap_lua`)~~ -- done natively in Phase 6 (`display_draw`).
-- The ESP-Claw skills that mention Lua scripts (`skills_lab_downloader`,
-  `skill_creator`) are in the system image because `cap_skill_mgr` ships
-  them; without `cap_lua` their scripts cannot run. Harmless, but the agent
-  may offer them. Filtering them out of the image is a small CMake step.
+- ~~The ESP-Claw skills that mention Lua scripts (`skills_lab_downloader`,
+  `skill_creator`) are in the system image~~ -- not harmless: following
+  `skill_creator`, the agent wrote `require("arg_schema")` scripts that fail
+  in the robot's Lua. The top-level CMakeLists now drops skill_builder's
+  three skills from the image (`mpx_prune_system_skills`), and
+  `main/skills/mpx_skill_creator` replaces skill_creator: skills whose
+  scripts target the robot's own Lua, run by the agent's `lua_run_script`
+  (`main/agent/agent_lua.cc`) and from the app's Files page.
 - Moving the PWA's `.gz` assets from the app image into the `system`
   partition would give the app slot ~0.7 MB back.
 
