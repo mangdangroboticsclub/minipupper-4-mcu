@@ -98,7 +98,8 @@ SysMemStats mem_stats(std::uint32_t caps)
 void fill_task(SysTaskLoad &out, const TaskStatus_t &t, std::uint8_t cpu_pct)
 {
     std::snprintf(out.name, sizeof(out.name), "%s", t.pcTaskName);
-    out.core       = taskVALID_CORE_ID(t.xCoreID) ? static_cast<std::int8_t>(t.xCoreID) : -1;
+    const BaseType_t core = xTaskGetCoreID(t.xHandle);
+    out.core       = taskVALID_CORE_ID(core) ? static_cast<std::int8_t>(core) : -1;
     out.cpu_pct    = cpu_pct;
     out.stack_free = t.usStackHighWaterMark;
 }
