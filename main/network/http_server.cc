@@ -31,6 +31,7 @@
 #include "sdkconfig.h"
 #include "robot/robot.h"
 #include "robot/driver_board.h"
+#include "util/sys_monitor.h"
 #include "util/trace_ring.h"
 #include "wasm/registry.h"
 #include "wasm/wasm_sandbox.h"
@@ -1838,6 +1839,17 @@ static esp_err_t api_wifi_status(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* GET /v1/system/stats — CPU, RAM and task load; see util/sys_monitor.h.
+ * Serves the monitor's latest sample, so it costs no more than a copy. */
+static esp_err_t api_system_stats(httpd_req_t *req)
+{
+    const std::string body = util::sys_monitor_json();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, body.c_str(), body.size());
+    return ESP_OK;
+}
+
 /* GET /v1/wifi/scan — networks the robot can hear, strongest first.
  *
  * {"ok":true,"networks":[{"ssid","rssi","bars":1..3,"secure":bool},...]}
@@ -2539,9 +2551,9 @@ bool start_http_server()
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    // 51 register_api() + up to 12 register_static() + 2 websockets + 4
+    // 52 register_api() + up to 12 register_static() + 2 websockets + 4
     // marketplace wildcard methods + 5 display routes (http_display.cc) + 6
-    // voice routes (http_voice.cc) = 80.
+    // voice routes (http_voice.cc) = 81.
     // See the note on register_uri() - this number is load-bearing, and being
     // one short deletes a route without saying so. Each slot is a pointer, so
     // the headroom is cheap.
@@ -2682,6 +2694,7 @@ bool start_http_server()
     // ── Register WiFi config API endpoints ──
     register_api(s_server, "GET",  "/v1/wifi/status",          HTTP_GET,  api_wifi_status);
     register_api(s_server, "GET",  "/v1/pi/status",            HTTP_GET,  api_pi_status);
+    register_api(s_server, "GET",  "/v1/system/stats",         HTTP_GET,  api_system_stats);
     register_api(s_server, "GET",  "/v1/wifi/scan",            HTTP_GET,  api_wifi_scan);
     register_api(s_server, "POST", "/v1/wifi/connect",         HTTP_POST, api_wifi_connect);
     register_api(s_server, "POST", "/v1/wifi/disconnect",      HTTP_POST, api_wifi_disconnect);

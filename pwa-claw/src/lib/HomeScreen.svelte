@@ -10,6 +10,7 @@
   import SkillsManagement from "./SkillsManagement.svelte";
   import SettingsPage from "./SettingsPage.svelte";
   import WifiSheet from "./WifiSheet.svelte";
+  import SystemMonitor from "./SystemMonitor.svelte";
 
   let { network } = $props();
 
@@ -267,11 +268,14 @@
               <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
             </button>
             <img class="logo" src="/md.svg" alt="MangDang" />
-            {#if desktop}<span></span>{:else}
-            <button type="button" class="round" onclick={enterWide} aria-label="Landscape controller">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="3"/><path d="M8 10v4M6 12h4M16 11h.01M18 13h.01"/></svg>
-            </button>
-            {/if}
+            <div class="head-right">
+              <SystemMonitor {online} />
+              {#if !desktop}
+              <button type="button" class="round" onclick={enterWide} aria-label="Landscape controller">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="3"/><path d="M8 10v4M6 12h4M16 11h.01M18 13h.01"/></svg>
+              </button>
+              {/if}
+            </div>
           </header>
 
           {#if network?.linkState === "offline"}
@@ -399,8 +403,8 @@
   .wifi-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .caret { color: var(--sub); flex-shrink: 0; }
   .logo { height: 16px; width: auto; display: block; }
+  .head-right { justify-self: end; display: flex; align-items: center; gap: 8px; }
   .round {
-    justify-self: end;
     width: 40px; height: 40px; border-radius: 20px; border: none; background: var(--ground); color: var(--ink);
     display: grid; place-items: center; cursor: pointer;
   }

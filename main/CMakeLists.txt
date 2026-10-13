@@ -49,6 +49,7 @@ set(sources
     "voice/voice_glue.cc"
     "platform/shared_i2c.cc"
     "util/trace_ring.cc"
+    "util/sys_monitor.cc"
     "lua/lua_vm.cc"
     "lua/lua_bindings.cc"
     "lua/lua_display.cc"

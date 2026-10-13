@@ -243,6 +243,42 @@ config APP_LUA_TASK_STACK_SIZE
 
 endif  # APP_LUA_ENABLE
 
+# ── System monitor: CPU, RAM and task load ───────────────────────────
+
+config APP_SYSMON_ENABLE
+    bool "System monitor (CPU, RAM and task load)"
+    default y
+    select FREERTOS_GENERATE_RUN_TIME_STATS
+    help
+        A low-priority task (main/util/sys_monitor.cc) samples per-core
+        CPU load, internal RAM, PSRAM and the busiest tasks. The latest
+        sample is served at GET /v1/system/stats (the PWA's monitor
+        widget) and a summary is printed to the serial log.
+
+        Turns on FreeRTOS run-time stats, which costs one timer read per
+        context switch.
+
+if APP_SYSMON_ENABLE
+
+config APP_SYSMON_SAMPLE_MS
+    int "Sample period (ms)"
+    range 500 60000
+    default 2000
+    help
+        How often the task table and heaps are sampled. The PWA widget's
+        CPU figures cover the last period.
+
+config APP_SYSMON_LOG_INTERVAL_S
+    int "Serial log interval (s, 0 = never)"
+    range 0 3600
+    default 30
+    help
+        How often a summary goes to the serial log. CPU in that line is
+        averaged over the whole interval. A task with under 512 bytes of
+        stack headroom is reported as a warning on the same schedule.
+
+endif  # APP_SYSMON_ENABLE
+
 # ── Audio: ES7210 microphones + MAX98357A speaker on I2S0 ───────────
 
 config APP_AUDIO_ENABLE

@@ -18,6 +18,7 @@
 #include "robot/mpx_robot.h"
 #include "robot/robot.h"
 #include "sdk/wasm_host_functions.h"
+#include "util/sys_monitor.h"
 #include "voice/voice_glue.h"
 #include "wasm/registry.h"
 #include "wasm/wasm_sandbox.h"
@@ -70,6 +71,14 @@ extern "C" void app_main(void)
 {
 	init_nvs();
 	log_internal_heap("boot");
+
+	// ── System monitor: CPU / RAM / task load to the log and the PWA ──
+	// First, so its log lines cover everything the rest of boot allocates.
+#if CONFIG_APP_SYSMON_ENABLE
+	if (!util::sys_monitor_start()) {
+		ESP_LOGW(TAG, "System monitor failed to start");
+	}
+#endif
 
 	// ── Robot HAL (servo bus, gait task on Core 1) ─────────────
 	mpx_robot_set_skill_hooks(&s_skill_hooks);
