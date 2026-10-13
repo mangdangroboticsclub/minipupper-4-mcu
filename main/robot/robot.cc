@@ -1530,7 +1530,7 @@ uint16_t get_servo_current(int servo_id)
 // Servo Studio holds the bus.
 
 namespace {
-enum PowerState { PS_BOOT = 0, PS_GLIDE, PS_ON, PS_LOWER, PS_OFF };
+enum PowerState { PS_BOOT = 0, PS_GLIDE, PS_ON, PS_LOWER, PS_OFF, PS_HOLD };
 
 constexpr uint32_t SOFT_START_MS = 2500;
 constexpr uint32_t WAKE_MS       = 1200;
@@ -1550,6 +1550,7 @@ uint32_t  s_rest_after_s = REST_DEFAULT_S;
 bool      s_rest_loaded;
 volatile bool s_rest_now;       // `servo sleep`
 volatile bool s_wake_now;       // `servo wake`, or any motion request
+volatile bool s_hold_now;       // `servo hold` -- power down at low current
 
 float ease_in_out(float u)
 {
@@ -1639,12 +1640,15 @@ const char *power_state_name()
         case PS_GLIDE: return "moving into place";
         case PS_ON:    return "holding";
         case PS_LOWER: return "lying down";
+        case PS_HOLD:  return "powered down (low current hold)";
         default:       return "resting (servos off)";
     }
 }
 
 bool servos_resting() { return s_ps == PS_OFF || s_ps == PS_LOWER; }
+bool servos_holding() { return s_ps == PS_HOLD; }
 void rest_now()       { s_rest_now = true; }
+void hold_servos()    { s_hold_now = true; }
 void wake_servos()    { s_wake_now = true; s_last_activity_us = esp_timer_get_time(); }
 
 // Lower the body to the crouch: the plain IK at REST_Z, computed into the
@@ -1736,7 +1740,11 @@ void flush()
         start_glide(pos, SOFT_START_MS);
         break;
     case PS_ON:
-        if (s_rest_now ||
+        if (s_hold_now) {
+            ESP_LOGI(TAG, "servos: powered down -- holding at %u mA",
+                     static_cast<unsigned>(SERVO_HOLD_CURRENT_MA));
+            s_ps = PS_HOLD;
+        } else if (s_rest_now ||
             (s_rest_after_s > 0 && !busy &&
              now - s_last_activity_us > static_cast<int64_t>(s_rest_after_s) * 1000000)) {
             ESP_LOGI(TAG, "servos: %s -- lying down, then servos off",
@@ -1746,6 +1754,12 @@ void flush()
             s_glide_t0 = now;
             s_glide_ms = LOWER_MS;
             s_ps = PS_LOWER;
+        }
+        break;
+    case PS_HOLD:
+        if (moved || busy || s_wake_now) {
+            ESP_LOGI(TAG, "servos: waking from powered-down -- current cap restored");
+            s_ps = PS_ON;
         }
         break;
     case PS_LOWER:
@@ -1761,6 +1775,14 @@ void flush()
     }
     s_rest_now = false;
     s_wake_now = false;
+    s_hold_now = false;
+
+    // Powered down: keep the servos in position control but drop the current
+    // cap so they can only nudge. Where the low cap can't hold the pose the
+    // joint sags of its own accord -- exactly the "powered down" feel.
+    if (s_ps == PS_HOLD) {
+        for (int i = 0; i < 12; ++i) cur[i] = SERVO_HOLD_CURRENT_MA;
+    }
 
     if (s_ps == PS_OFF) {
         driver_board_sync_idle();          // limp, but still reporting

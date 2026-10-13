@@ -75,6 +75,22 @@ config APP_SERVO_BAUD_RATE
     help
         Was: the SCSCL bus baud rate. Unused - see the note above.
 
+config APP_SERVO_HOLD_CURRENT_MA
+    int "Servo hold (powered-down) current limit (mA)"
+    range 0 1500
+    default 50
+    help
+        When the robot is powered down (the controller's Power button, or
+        POST /v1/robot/power {"action":"hold"}), the servos do NOT go fully
+        limp. They stay in position control with the current cap lowered to
+        this value. The legs keep their pose if this is enough to hold it;
+        otherwise they sag naturally as gravity wins against the low cap.
+
+        This is the per-servo MAX current in milliamps, not a forced draw: a
+        lightly loaded joint still only sources what it needs. 0 disables the
+        hold and powers the servos fully off (limp), exactly like the old
+        behaviour.
+
 config APP_STA_AUTO_CONNECT
     bool "Auto-connect to saved STA network on boot"
     default y

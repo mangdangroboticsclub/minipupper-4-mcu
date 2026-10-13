@@ -296,17 +296,34 @@
     if (navigator.vibrate) { try { navigator.vibrate(20); } catch {} }
   }
 
+  // ── Power ─────────────────────────────────────────────────
   // Power gates every control. Off by default so a stray touch on a freshly
   // opened page cannot move the robot.
+  //
+  // Toggling off tells the firmware to power the servos down: they stay in
+  // position control but drop to the low hold current (SERVO_HOLD_CURRENT_MA),
+  // so the legs keep their pose where that holds them and sag otherwise.
+  // Toggling on wakes them back to full current.
   let powered = $state(false);
+  async function sendPower(action) {
+    try {
+      await fetch("/v1/robot/power", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+    } catch { /* ignore */ }
+  }
   function togglePower() {
     if (powered) {
       move = makeStick();
       look = makeStick();
       stopAll();
       sendLook(0, 0);
-    } else if (navigator.vibrate) {
-      try { navigator.vibrate(12); } catch {}
+      sendPower("hold");
+    } else {
+      sendPower("wake");
+      if (navigator.vibrate) { try { navigator.vibrate(12); } catch {} }
     }
     powered = !powered;
   }

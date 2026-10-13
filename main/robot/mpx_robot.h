@@ -179,7 +179,9 @@ void        mpx_robot_set_rest_after(uint32_t seconds);
 uint32_t    mpx_robot_rest_after(void);
 const char *mpx_robot_power_state(void);   /*!< "holding", "resting (servos off)", ... */
 bool        mpx_robot_servos_resting(void);
+bool        mpx_robot_servos_holding(void);
 void        mpx_robot_rest_now(void);
+void        mpx_robot_hold(void);
 void        mpx_robot_wake(void);
 
 /* ── Calibration ───────────────────────────────────────────────────────── */
