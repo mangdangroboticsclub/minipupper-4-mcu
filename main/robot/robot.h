@@ -248,6 +248,13 @@ constexpr int SERVO_POWER_PIN = SERVO_POWER_EN_PIN;
 // GET /v1/studio/status as current pinned at the cap.
 constexpr uint16_t SERVO_CURRENT_MAX_MA = 1500;
 
+// Current cap sent while the robot is "powered down" (the controller's Power
+// button, POST /v1/robot/power {"action":"hold"}). The servos stay in
+// position control but can draw at most this much, so the legs keep their
+// pose where this holds them and sag naturally where it does not. 0 = fully
+// off (limp). Configured via APP_SERVO_HOLD_CURRENT_MA in menuconfig.
+constexpr uint16_t SERVO_HOLD_CURRENT_MA = CONFIG_APP_SERVO_HOLD_CURRENT_MA;
+
 // ── Servo overlay ────────────────────────────────────────────
 //
 // An additive per-servo trim, in degrees, applied to the outgoing frame in
@@ -684,6 +691,11 @@ const char *power_state_name();
 bool        servos_resting();
 void        rest_now();
 void        wake_servos();
+// Powered down at SERVO_HOLD_CURRENT_MA (low current hold) instead of the
+// full limp that rest_now() gives. Any movement request or wake_servos()
+// brings the normal current cap back.
+void        hold_servos();
+bool        servos_holding();
 
 // ── Per‑leg IK helpers ───────────────────────────────────────
 

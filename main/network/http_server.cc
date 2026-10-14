@@ -1087,15 +1087,19 @@ static esp_err_t api_robot_look(httpd_req_t *req)
  * GET  -> {"ok":true,"rest_after_s":300,"state":"holding","resting":false}
  * POST {"rest_after_s":N}   0 = never rest; saved on the robot
  * POST {"action":"rest"}    lie down and switch the servos off now
+ * POST {"action":"hold"}    power down: drop the current cap to the
+ *                            configured hold value while staying in position
+ *                            control — the controller's Power button
  * POST {"action":"wake"}    stand back up */
 static void send_power_json(httpd_req_t *req)
 {
-    char resp[160];
+    char resp[220];
     std::snprintf(resp, sizeof(resp),
-                  R"({"ok":true,"rest_after_s":%lu,"state":"%s","resting":%s})",
+                  R"({"ok":true,"rest_after_s":%lu,"state":"%s","resting":%s,"holding":%s})",
                   static_cast<unsigned long>(robot::rest_after()),
                   robot::power_state_name(),
-                  robot::servos_resting() ? "true" : "false");
+                  robot::servos_resting() ? "true" : "false",
+                  robot::servos_holding() ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, -1);
 }
@@ -1122,13 +1126,15 @@ static esp_err_t api_robot_power_post(httpd_req_t *req)
 
     if (action == "rest") {
         robot::rest_now();
+    } else if (action == "hold") {
+        robot::hold_servos();
     } else if (action == "wake") {
         robot::wake_servos();
     } else if (rest_after >= 0) {
         robot::set_rest_after(static_cast<uint32_t>(rest_after));
     } else {
         httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_send(req, "expected rest_after_s or action rest|wake", -1);
+        httpd_resp_send(req, "expected rest_after_s or action rest|hold|wake", -1);
         return ESP_OK;
     }
     ESP_LOGI(TAG, "POST /v1/robot/power  action=%s rest_after_s=%d",

@@ -131,7 +131,9 @@ void        mpx_robot_set_rest_after(uint32_t s) { robot::set_rest_after(s); }
 uint32_t    mpx_robot_rest_after(void)           { return robot::rest_after(); }
 const char *mpx_robot_power_state(void)          { return robot::power_state_name(); }
 bool        mpx_robot_servos_resting(void)       { return robot::servos_resting(); }
+bool        mpx_robot_servos_holding(void)       { return robot::servos_holding(); }
 void        mpx_robot_rest_now(void)             { robot::rest_now(); }
+void        mpx_robot_hold(void)                 { robot::hold_servos(); }
 void        mpx_robot_wake(void)                 { robot::wake_servos(); }
 
 /* ── Configuration ─────────────────────────────────────────────────────── */

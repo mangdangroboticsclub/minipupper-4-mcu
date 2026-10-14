@@ -142,21 +142,10 @@
   let look = $state(makeStick());
   const stickOf = (which) => (which === "move" ? move : look);
 
-  // The right stick turns the robot on the spot (minipupperesp's right pad)
-  // or moves the head. Tap its caption to switch; the choice is remembered.
-  const RIGHT_MODE_KEY = "mpx.rightStick";
-  function loadRightMode() {
-    try { return localStorage.getItem(RIGHT_MODE_KEY) === "look" ? "look" : "turn"; } catch { return "turn"; }
-  }
-  let rightMode = $state(loadRightMode());
-  function toggleRightMode() {
-    if (look.active) return;
-    if (rightMode === "look") sendLook(0, 0);
-    else { joyT = 0; joyStopIfIdle(); }
-    rightMode = rightMode === "turn" ? "look" : "turn";
-    try { localStorage.setItem(RIGHT_MODE_KEY, rightMode); } catch { /* private mode */ }
-  }
-  const turning = () => rightMode === "turn" && look.active;
+  // The right stick moves the head (look); turning is on the shoulder buttons.
+  // While a shoulder Turn button is held, zeroing the move stick must not send
+  // `none` (that would cancel the turn).
+  const turning = () => pressed.has("turn-l") || pressed.has("turn-r");
 
   function stickDown(e, which) {
     const s = stickOf(which);
@@ -187,10 +176,6 @@
       joyF = 0; joyS = 0;
       if (!turning()) sendGait("none"); // zero joy alone doesn't halt walking
       joyStopIfIdle();
-    } else if (rightMode === "turn") {
-      joyT = 0;
-      if (!move.active) sendGait("none");
-      joyStopIfIdle();
     } else {
       sendLook(0, 0);
     }
@@ -202,13 +187,11 @@
     // Turned 90° clockwise, the pad's right is the screen's down.
     let dx = rotated ? sy : sx;
     let dy = rotated ? -sx : sy;
-    const turnStick = which === "look" && rightMode === "turn";
-    if (turnStick) dy = 0;      // turning uses the left-right axis only
     const dist = Math.hypot(dx, dy);
     if (dist > s.r) { dx = (dx / dist) * s.r; dy = (dy / dist) * s.r; }
     let nx = s.r > 0 ? +(dx / s.r).toFixed(4) : 0;
     let ny = s.r > 0 ? +(dy / s.r).toFixed(4) : 0;
-    const dz = which === "move" || turnStick ? DEADZONE : LOOK_DEADZONE;
+    const dz = which === "move" ? DEADZONE : LOOK_DEADZONE;
     const mag = Math.hypot(nx, ny);
     // The knob follows the finger even inside the deadzone; only the command
     // is held at zero there.
@@ -220,14 +203,6 @@
       joyF = -ny;
       joyS = -nx;
       if (mag < dz) joyStopIfIdle(); else joyStartTimer();
-    } else if (turnStick) {
-      // Stick right -> turn right (firmware: t > 0 turns left). Past the
-      // deadzone the turn rate runs 0.1..1, so a small push is a slow turn
-      // (and is above the firmware's 0.08 start threshold).
-      const a = Math.abs(nx);
-      const t = a < dz ? 0 : Math.sign(nx) * Math.min(1, 0.1 + 0.9 * (a - dz) / (1 - dz));
-      joyT = t === 0 ? 0 : -(+t.toFixed(3));
-      if (joyT === 0) joyStopIfIdle(); else joyStartTimer();
     } else {
       sendLook(nx, ny);
     }
@@ -296,17 +271,34 @@
     if (navigator.vibrate) { try { navigator.vibrate(20); } catch {} }
   }
 
+  // ── Power ─────────────────────────────────────────────────
   // Power gates every control. Off by default so a stray touch on a freshly
   // opened page cannot move the robot.
+  //
+  // Toggling off tells the firmware to power the servos down: they stay in
+  // position control but drop to the low hold current (SERVO_HOLD_CURRENT_MA),
+  // so the legs keep their pose where that holds them and sag otherwise.
+  // Toggling on wakes them back to full current.
   let powered = $state(false);
+  async function sendPower(action) {
+    try {
+      await fetch("/v1/robot/power", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+    } catch { /* ignore */ }
+  }
   function togglePower() {
     if (powered) {
       move = makeStick();
       look = makeStick();
       stopAll();
       sendLook(0, 0);
-    } else if (navigator.vibrate) {
-      try { navigator.vibrate(12); } catch {}
+      sendPower("hold");
+    } else {
+      sendPower("wake");
+      if (navigator.vibrate) { try { navigator.vibrate(12); } catch {} }
     }
     powered = !powered;
   }
@@ -365,7 +357,7 @@
       class:active={s.active}
       role="slider"
       tabindex="0"
-      aria-label={which === "move" ? "Move stick: drag to walk" : rightMode === "turn" ? "Turn stick: drag left or right to turn" : "Look stick: drag to look around"}
+      aria-label={which === "move" ? "Move stick: drag to walk" : "Look stick: drag to look around"}
       aria-valuemin="0"
       aria-valuemax="100"
       aria-valuenow={Math.round(Math.min(1, Math.hypot(s.nx, s.ny)) * 100)}
@@ -376,9 +368,7 @@
     >
       <span class="well-ring" aria-hidden="true"></span>
       <span class="knob" class:held={s.active} style="transform: translate({s.dx}px, {s.dy}px)" aria-hidden="true">
-        {#if which === "look" && rightMode === "turn"}
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>
-        {:else if which === "look"}
+        {#if which === "look"}
           <span class="knob-eyes"><i></i><i></i></span>
         {:else}
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/></svg>
@@ -388,16 +378,7 @@
     {#if which === "move"}
       <span class="cap">Move</span>
     {:else}
-      <button
-        type="button"
-        class="cap cap-toggle"
-        onclick={toggleRightMode}
-        aria-label={rightMode === "turn" ? "Right stick turns the robot. Switch to look" : "Right stick moves the head. Switch to turn"}
-        title="Tap to switch Turn / Look"
-      >
-        {rightMode === "turn" ? "Turn" : "Look"}
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7h12l-3-3M17 17H5l3 3"/></svg>
-      </button>
+      <span class="cap">Look</span>
     {/if}
   </div>
 {/snippet}
@@ -718,14 +699,6 @@
   }
   .knob.held { transition: none; }
   .knob svg { width: 34%; height: 34%; }
-  .cap-toggle {
-    display: inline-flex; align-items: center; gap: 5px;
-    padding: 3px 9px; margin: -3px 0;
-    border: 1.5px solid rgba(17, 17, 17, 0.22); border-radius: 999px;
-    background: transparent; font-family: inherit; cursor: pointer;
-  }
-  .cap-toggle svg { width: 11px; height: 11px; }
-  .cap-toggle:active { background: rgba(17, 17, 17, 0.08); }
   .knob-eyes { display: flex; gap: 10%; width: 32%; justify-content: center; }
   .knob-eyes i { width: 9px; height: 16px; border-radius: 3px; background: var(--ink); }
 
