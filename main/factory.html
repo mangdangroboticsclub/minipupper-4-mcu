@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Factory test</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--ink:#1d2330;--mute:#6b7280;--line:#dfe3ea;--acc:#2563eb;--ok:#15803d;--bad:#b91c1c;--warn:#b45309;--term:#0f172a;--termink:#cfe3ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{position:sticky;top:0;z-index:2;background:var(--ink);color:#fff;padding:10px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+header h1{font-size:1.1rem;margin:0;font-weight:700;letter-spacing:.2px}
+header .host{color:#aab3c5;font-size:.85rem}
+.chip{margin-left:auto;font-size:.78rem;padding:3px 9px;border-radius:99px;background:#374151;color:#e5e7eb;white-space:nowrap}
+.chip.on{background:#166534;color:#dcfce7}.chip.off{background:#7c2d12;color:#ffedd5}
+main{max-width:640px;margin:0 auto;padding:12px 16px 40px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:12px 0}
+.card h2{font-size:1rem;margin:0 0 4px}
+.card p.note{margin:0 0 10px;color:var(--mute);font-size:.85rem}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
+label.f{display:flex;flex-direction:column;font-size:.75rem;color:var(--mute);gap:2px}
+input,select{font:inherit;height:44px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:#fff;color:var(--ink);min-width:0}
+input[type=number]{width:92px}
+select{min-width:180px}
+button{font:inherit;font-weight:600;height:44px;padding:0 16px;border:0;border-radius:8px;background:#e5e7eb;color:var(--ink);cursor:pointer;touch-action:manipulation}
+button.p{background:var(--acc);color:#fff}
+button.s{background:var(--bad);color:#fff}
+button.g{background:var(--ok);color:#fff}
+button:disabled{opacity:.45}
+pre{margin:8px 0 0;background:var(--term);color:var(--termink);border-radius:8px;padding:10px;font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow-x:auto;max-height:420px;overflow-y:auto}
+pre:empty{display:none}
+.msg{font-size:.85rem;color:var(--mute);min-height:1.2em;margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Factory test</h1><span class="host" id="host"></span>
+  <span class="chip" id="cli">CLI ?</span>
+</header>
+<main>
+
+<div class="card">
+  <h2>Servo</h2>
+  <p class="note">Pick the servo every test below uses. Only run one test at a time.</p>
+  <div class="row">
+    <select id="sid">
+      <option value="1">1 &nbsp;FR hip</option><option value="2">2 &nbsp;FR thigh</option><option value="3">3 &nbsp;FR calf</option>
+      <option value="4">4 &nbsp;FL hip</option><option value="5">5 &nbsp;FL thigh</option><option value="6">6 &nbsp;FL calf</option>
+      <option value="7">7 &nbsp;RR hip</option><option value="8">8 &nbsp;RR thigh</option><option value="9">9 &nbsp;RR calf</option>
+      <option value="10">10 RL hip</option><option value="11">11 RL thigh</option><option value="12">12 RL calf</option>
+    </select>
+  </div>
+  <div class="row">
+    <label class="f">angle (deg)<input id="deg" type="number" step="0.1" value="155"></label>
+    <button class="p" id="go">Go</button>
+    <span class="msg" id="gomsg"></span>
+  </div>
+  <div class="row" id="presets"></div>
+  <div class="row"><a href="#" id="pedit" style="font-size:.85rem">Edit buttons</a></div>
+  <div id="peditbox" style="display:none">
+    <div class="row" id="pinputs"></div>
+    <div class="row"><button class="p" id="psave">Save</button><span class="msg" id="pmsg"></span></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>RPM test</h2>
+  <p class="note">5&deg; &rarr; 305&deg; &rarr; 5&deg; at full power. The robot times how long the servo takes from 35&deg; to 275&deg;: RPM = 240&deg; &divide; time &divide; 6. Leg off / horn free.</p>
+  <div class="row">
+    <label class="f">cycles<select id="rpmn" style="min-width:90px"><option>1</option><option>2</option><option>5</option><option>10</option></select></label>
+    <button class="p" id="rpm" style="align-self:flex-end">Run RPM test</button>
+    <button class="s" id="rpmstop" style="align-self:flex-end">Stop</button>
+  </div>
+  <div class="msg" id="rpmmsg"></div>
+  <pre id="rpmout"></pre>
+</div>
+
+<div class="card">
+  <h2>Spin test <small style="font-weight:400;color:var(--mute)">(like Dynamixel &ldquo;no load speed&rdquo;)</small></h2>
+  <p class="note">Spins the servo round and round at a fixed current, waits 1 s, then counts turns: RPM = turns &divide; minutes. Up, then down. <b>Horn free / leg off, and only a servo that turns 360&deg; by hand</b> &mdash; if it does not turn, it stops by itself after 2 s.</p>
+  <div class="row">
+    <label class="f">current mA<input id="spma" type="number" value="1400" step="100"></label>
+    <label class="f">turns<input id="sptn" type="number" value="10"></label>
+    <button class="p" id="spin" style="align-self:flex-end">Run spin test</button>
+  </div>
+  <div class="msg" id="spinmsg"></div>
+  <pre id="spinout"></pre>
+</div>
+
+<div class="card">
+  <h2>Torque test <span style="font-weight:400;font-size:.9rem;color:var(--mute)">(position mode)</span></h2>
+  <p class="note">Reads where the servo is, moves it <i>move</i>&deg; from there (up if it fits in 0&ndash;310&deg;, else down) with the current below, holds it, goes back gently (300 mA), then goes limp so you can turn the horn by hand.</p>
+  <div class="row">
+    <label class="f">move &deg;<input id="hmove" type="number" step="1" value="100" style="width:80px"></label>
+    <label class="f">mA<input id="hma" type="number" step="100" value="1400" style="width:90px"></label>
+    <label class="f">hold s<input id="hsec" type="number" value="2" style="width:64px"></label>
+  </div>
+  <div class="row"><button class="p" id="hold">Run torque test</button>
+    <span style="font-size:1.05rem">angle now: <b id="hlive">&ndash;</b></span></div>
+  <div class="msg" id="holdmsg"></div>
+</div>
+
+<div class="card">
+  <h2>Movement</h2>
+  <p class="note">Walks left on the normal gait (leaves CLI mode while walking). Robot on the floor, legs on.</p>
+  <div class="row"><button class="g" id="left">&larr; Left</button><button class="s" id="lstop">Stop</button></div>
+  <div class="msg" id="leftmsg"></div>
+</div>
+
+</main>
+
+<script>
+(function(){
+var $=function(i){return document.getElementById(i);};
+var busy=0,leftOn=0;
+$('host').textContent=location.host||'';
+function sid(){return parseInt($('sid').value,10)||1;}
+try{var v=localStorage.getItem('ft_sid');if(v)$('sid').value=v;}catch(e){}
+$('sid').onchange=function(){try{localStorage.setItem('ft_sid',$('sid').value);}catch(e){}};
+function J(u){return fetch(u,{cache:'no-store'}).then(function(r){return r.json();});}
+function T(u){return fetch(u,{cache:'no-store'}).then(function(r){return r.text();});}
+function chip(on){var c=$('cli');c.textContent=on?'CLI mode':'walking';c.className='chip '+(on?'on':'off');}
+function lock(on){busy=on;['go','rpm','spin','left','hold'].forEach(function(i){$(i).disabled=!!on;});}
+function f2(x){return (Math.round(x*100)/100).toFixed(2);}
+function pad(s,n){s=String(s);while(s.length<n)s+=' ';return s;}
+
+/* the factory page lives in CLI mode */
+J('/api/walk?go=stop').then(function(d){chip(d.climode);}).catch(function(){$('cli').textContent='offline';});
+
+/* ---- servo ---- */
+function goTo(d){
+  if(!isFinite(d))return;
+  $('deg').value=d;
+  $('gomsg').textContent='';
+  J('/api/direct?id='+sid()+'&deg='+d+'&cur=300').then(function(r){
+    if(!r.ok)$('gomsg').textContent='failed: '+(r.err||'?');
+  }).catch(function(){$('gomsg').textContent='request failed';});
+}
+$('go').onclick=function(){goTo(parseFloat($('deg').value));};
+
+/* ---- saved angle buttons: kept on the robot (/api/presets) ---- */
+function showPresets(a){
+  $('presets').innerHTML=a.map(function(x){return '<button data-a="'+x+'">'+x+'&deg;</button>';}).join('');
+  $('pinputs').innerHTML=a.map(function(x){return '<input type="number" step="0.1" min="0" max="310" value="'+x+'" style="width:84px">';}).join('');
+  Array.prototype.forEach.call($('presets').children,function(b){b.onclick=function(){goTo(parseFloat(b.getAttribute('data-a')));};});
+}
+J('/api/presets').then(function(d){if(d.ok)showPresets(d.angles);}).catch(function(){});
+$('pedit').onclick=function(e){e.preventDefault();var b=$('peditbox');b.style.display=b.style.display==='none'?'block':'none';};
+$('psave').onclick=function(){
+  var v=Array.prototype.map.call($('pinputs').children,function(i){return i.value.trim();});
+  $('pmsg').textContent='saving...';
+  J('/api/presets?set='+v.join(',')).then(function(d){
+    if(!d.ok){$('pmsg').textContent=d.err||'not saved';return;}
+    showPresets(d.angles);$('pmsg').textContent='saved on the robot';
+  }).catch(function(){$('pmsg').textContent='request failed';});
+};
+
+/* ---- RPM: /api/speed out and back, 1 / 2 / 5 / 10 cycles ---- */
+var rpmStop=0;
+$('rpmstop').onclick=function(){rpmStop=1;$('rpmmsg').textContent='stopping after this move...';};
+function rpmReport(id,n,rows,done){
+  var L=['servo '+id+'   timed from 35 to 275 deg   x'+n+' cycle'+(n>1?'s':'')+(done?'':'   (stopped early)'),
+         ' cyc  dir      RPM     deg/s   ms (35->275)'];
+  rows.forEach(function(r){
+    L.push(' '+pad(r.c,4)+' '+pad(r.dir,6)+pad(f2(r.d.rpm),9)+pad(r.d.deg_per_s.toFixed(0),8)+r.d.ms_10_90.toFixed(0));
+  });
+  if(rows.length<2)return L.join('\n');
+  function avg(dir){var v=rows.filter(function(r){return !dir||r.dir===dir;}).map(function(r){return r.d.rpm;});
+    var s=0;v.forEach(function(x){s+=x;});return v.length?{m:s/v.length,lo:Math.min.apply(null,v),hi:Math.max.apply(null,v)}:null;}
+  var all=avg(),out=avg('out'),back=avg('back');
+  L.push('');
+  L.push('  RPM   mean '+f2(all.m)+'   min '+f2(all.lo)+'   max '+f2(all.hi));
+  if(out&&back){var sp=Math.abs(out.m-back.m)/all.m*100;
+    L.push('  out '+f2(out.m)+'  back '+f2(back.m)+'  ->  '+sp.toFixed(1)+'% apart'+(sp>10?'  <-- one way is binding':'  (even)'));}
+  return L.join('\n');
+}
+$('rpm').onclick=function(){
+  if(busy)return;lock(1);rpmStop=0;
+  var id=sid(),n=parseInt($('rpmn').value,10)||1,rows=[],k=0;
+  $('rpmout').textContent='';
+  function leg(a,b){return J('/api/speed?id='+id+'&a='+a+'&b='+b).then(function(d){if(!d.ok)throw new Error(d.err||'failed');return d;});}
+  function finish(done){
+    $('rpmout').textContent=rpmReport(id,n,rows,done);
+    $('rpmmsg').textContent=done?'done':'stopped after '+rows.length+' moves';lock(0);
+  }
+  function next(){
+    if(rpmStop||k>=n)return finish(k>=n);
+    k++;$('rpmmsg').textContent='servo '+id+': cycle '+k+' / '+n+' ...';
+    return leg(5,305).then(function(d1){rows.push({c:k,dir:'out',d:d1});$('rpmout').textContent=rpmReport(id,n,rows,1);
+      if(rpmStop)return finish(0);
+      return leg(305,5).then(function(d2){rows.push({c:k,dir:'back',d:d2});$('rpmout').textContent=rpmReport(id,n,rows,1);return next();});});
+  }
+  next().catch(function(e){$('rpmmsg').textContent='RPM test failed: '+(e.message||e)+(rows.length?' (results so far below)':'');
+    if(rows.length){$('rpmout').textContent=rpmReport(id,n,rows,0);}lock(0);});
+};
+
+/* ---- Spin test: /api/spin up, then down ---- */
+$('spin').onclick=function(){
+  if(busy)return;lock(1);
+  var id=sid(),ma=$('spma').value,tn=$('sptn').value,res=[];
+  $('spinout').textContent='';$('spinmsg').textContent='servo '+id+': spinning up ...';
+  function one(dir){return J('/api/spin?id='+id+'&ma='+ma+'&turns='+tn+'&dir='+dir).then(function(d){
+    if(!d.ok)throw new Error(d.err||'failed');res.push(d);return d;});}
+  function show(){
+    var L=['servo '+id+'   '+ma+' mA   '+tn+' turns each way',' dir    RPM      time for '+tn+' turns'];
+    res.forEach(function(d){L.push(' '+pad(d.dir>0?'up':'down',7)+pad(f2(d.rpm),9)+d.seconds.toFixed(3)+' s');});
+    if(res.length==2){var m=(res[0].rpm+res[1].rpm)/2,sp=Math.abs(res[0].rpm-res[1].rpm)/m*100;
+      L.push('');L.push(' mean '+f2(m)+' RPM   up/down '+sp.toFixed(1)+'% apart'+(sp>10?'  <-- one way is binding':'  (even)'));}
+    $('spinout').textContent=L.join('\n');
+  }
+  one(1).then(function(){show();$('spinmsg').textContent='servo '+id+': spinning down ...';return one(-1);})
+   .then(function(){show();$('spinmsg').textContent='done - servo is limp';lock(0);})
+   .catch(function(e){show();$('spinmsg').textContent='spin test stopped: '+(e.message||e);lock(0);});
+};
+
+/* ---- Torque test: /api/hold  read angle, move, hold, back gently ---- */
+$('hold').onclick=function(){
+  if(busy)return;
+  var id=sid(),mv=$('hmove').value,ma=$('hma').value,s=$('hsec').value;
+  lock(1);$('holdmsg').textContent='servo '+id+': moving '+mv+'\u00b0 at '+ma+' mA, holding '+s+' s ...';
+  J('/api/hold?id='+id+'&move='+mv+'&ma='+ma+'&secs='+s).then(function(d){
+    $('holdmsg').textContent=d.ok?'start '+d.start+'\u00b0 \u2192 target '+d.target+'\u00b0, reached '+(d.reached<0?'?':d.reached+'\u00b0')+' - back at '+d.start+'\u00b0, now limp':'failed: '+(d.err||'?');lock(0);
+  }).catch(function(){$('holdmsg').textContent='request failed';lock(0);});
+};
+
+/* live angle: ask about 3 times a second (not while a test runs - the robot is busy) */
+function live(){
+  if(busy||document.hidden){setTimeout(live,300);return;}
+  J('/api/angle?id='+sid()).then(function(d){
+    $('hlive').textContent=d.ok?d.angle.toFixed(1)+'\u00b0':(d.err==='blind spot'?'? (blind spot)':'\u2013');
+  }).catch(function(){$('hlive').textContent='\u2013';}).then(function(){setTimeout(live,300);});
+}
+live();
+
+/* ---- Left / Stop: /api/walk (the robot leaves CLI mode to walk, and comes back to it on Stop) ---- */
+$('left').onclick=function(){
+  if(busy||leftOn)return;
+  $('leftmsg').textContent='starting...';
+  J('/api/walk?go=left').then(function(d){
+    if(!d.ok){$('leftmsg').textContent='cannot walk: '+(d.err||'?');return;}
+    leftOn=1;chip(d.climode);$('leftmsg').textContent='walking left - press Stop';
+  }).catch(function(){$('leftmsg').textContent='request failed';});
+};
+$('lstop').onclick=function(){
+  $('leftmsg').textContent='stopping...';
+  J('/api/walk?go=stop').then(function(d){leftOn=0;chip(d.climode);$('leftmsg').textContent='stopped - standing, back in CLI mode';})
+   .catch(function(){$('leftmsg').textContent='request failed';});
+};
+
+})();
+</script>
+</body>
+</html>

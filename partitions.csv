@@ -1,0 +1,7 @@
+# minipupperesp partition table: the same nvs + phy_init as "single app large" (so the saved
+# settings / calibration in NVS stay where they are), but a 4 MB app instead of 1.5 MB -
+# room for many more motion tables. The flash is 16 MB.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x400000,
