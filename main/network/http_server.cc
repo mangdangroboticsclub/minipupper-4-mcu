@@ -16,6 +16,7 @@
 #include <dirent.h>
 
 #include "esp_event.h"
+#include "esp_http_client.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -1253,6 +1254,92 @@ static esp_err_t api_pi_status(httpd_req_t *req)
     }
     httpd_resp_send(req, buf, -1);
     return ESP_OK;
+}
+
+/* POST /v1/pi/power — {"action":"shutdown"|"reboot"}: switch the Raspberry
+ * Pi off (or restart it) cleanly, so pulling the power can't corrupt its SD
+ * card. The robot forwards the request over the network to the Pi's
+ * pi_power service (tools/pi/pi_power.py) at the IP the Pi announces in
+ * HOST_INFO. Not over the J-PI UART: the ROS bridge and RL policies read that
+ * port, and a second reader on the Pi would steal their bytes.
+ *
+ * Answers {"ok":true,...} once the Pi has accepted, or ok:false with
+ * error = pi_not_seen | pi_unreachable | bad_token | pi_refused. */
+static esp_err_t send_pi_power_json(httpd_req_t *req, const char *status,
+                                    bool ok, const char *action,
+                                    const char *pi_ip, const char *error)
+{
+    char resp[200];
+    if (ok) {
+        std::snprintf(resp, sizeof(resp),
+                      R"({"ok":true,"action":"%s","pi_ip":"%s"})", action, pi_ip);
+    } else {
+        std::snprintf(resp, sizeof(resp),
+                      R"({"ok":false,"action":"%s","pi_ip":"%s","error":"%s"})",
+                      action, pi_ip, error);
+    }
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send(req, resp, -1);
+    return ESP_OK;
+}
+
+static esp_err_t api_pi_power(httpd_req_t *req)
+{
+    char buf[96] = {};
+    int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (len > 0) buf[len] = 0;
+    const std::string action = json_get_str(buf, "action");
+    if (action != "shutdown" && action != "reboot") {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_send(req, "expected action shutdown|reboot", -1);
+        return ESP_OK;
+    }
+
+#if CONFIG_APP_PI_LINK_ENABLE
+    char pi_ip[16] = "";
+    if (!pi_link::ip(pi_ip, sizeof(pi_ip))) {
+        ESP_LOGW(TAG, "POST /v1/pi/power  %s: no HOST_INFO, Pi IP unknown", action.c_str());
+        return send_pi_power_json(req, "409 Conflict", false, action.c_str(), "", "pi_not_seen");
+    }
+
+    char url[80];
+    std::snprintf(url, sizeof(url), "http://%s:%d/%s",
+                  pi_ip, CONFIG_APP_PI_POWER_PORT, action.c_str());
+
+    esp_http_client_config_t cfg = {};
+    cfg.url = url;
+    cfg.method = HTTP_METHOD_POST;
+    cfg.timeout_ms = 3000;          // the HTTP server task waits: keep it short
+    cfg.disable_auto_redirect = true;
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        return send_pi_power_json(req, "500 Internal Server Error", false,
+                                  action.c_str(), pi_ip, "no_memory");
+    }
+    esp_http_client_set_header(client, "X-MPX-Token", CONFIG_APP_PI_POWER_TOKEN);
+    esp_http_client_set_post_field(client, "", 0);
+    const esp_err_t err = esp_http_client_perform(client);
+    const int status = (err == ESP_OK) ? esp_http_client_get_status_code(client) : 0;
+    esp_http_client_cleanup(client);
+
+    ESP_LOGI(TAG, "POST /v1/pi/power  %s -> %s: %s, HTTP %d",
+             action.c_str(), url, esp_err_to_name(err), status);
+
+    if (err != ESP_OK) {
+        return send_pi_power_json(req, "502 Bad Gateway", false, action.c_str(), pi_ip, "pi_unreachable");
+    }
+    if (status == 403) {
+        return send_pi_power_json(req, "502 Bad Gateway", false, action.c_str(), pi_ip, "bad_token");
+    }
+    if (status != 200) {
+        return send_pi_power_json(req, "502 Bad Gateway", false, action.c_str(), pi_ip, "pi_refused");
+    }
+    return send_pi_power_json(req, "200 OK", true, action.c_str(), pi_ip, "");
+#else
+    return send_pi_power_json(req, "503 Service Unavailable", false, action.c_str(), "", "pi_link_disabled");
+#endif
 }
 
 /* POST /v1/robot/config — update robot configuration */
@@ -2694,6 +2781,7 @@ bool start_http_server()
     // ── Register WiFi config API endpoints ──
     register_api(s_server, "GET",  "/v1/wifi/status",          HTTP_GET,  api_wifi_status);
     register_api(s_server, "GET",  "/v1/pi/status",            HTTP_GET,  api_pi_status);
+    register_api(s_server, "POST", "/v1/pi/power",             HTTP_POST, api_pi_power);
     register_api(s_server, "GET",  "/v1/system/stats",         HTTP_GET,  api_system_stats);
     register_api(s_server, "GET",  "/v1/wifi/scan",            HTTP_GET,  api_wifi_scan);
     register_api(s_server, "POST", "/v1/wifi/connect",         HTTP_POST, api_wifi_connect);

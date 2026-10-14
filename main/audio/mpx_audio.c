@@ -156,6 +156,19 @@ static bool     s_cap_open;   /* defined here so the output side can see it */
  * garbled, muffled reply during hands-free (mic open, 4 channels) that was
  * perfectly clear after `voice talk` (mic closed, 2 channels). */
 static uint8_t  s_out_slot_bits = 16;
+
+/* Slot width each channel's DMA ring is sized for RIGHT NOW. Unlike
+ * s_out_slot_bits these follow the hardware exactly, through every codec
+ * open and reconfigure, because the I2S driver keeps a channel's DMA
+ * buffers allocated across disable/close and only reallocates them
+ * (free first, then allocate) when the slot width changes. The microphone's
+ * RAM guard (mpx_audio_capture_start) needs to know what is already held:
+ * after a 4-channel wake-word capture both rings stay at 32-bit size
+ * (~11.5 KB each), so a following 16-bit capture SHRINKS them and needs no
+ * new DMA memory at all -- while a guard that only looks at the free heap
+ * sees the 23 KB those rings hold as "missing" and refuses. */
+static uint8_t  s_dma_rx_bits = 16;
+static uint8_t  s_dma_tx_bits = 16;
 static int32_t *s_out_wide;   /* conversion buffer for the 32-bit case */
 #define AUDIO_OUT_WIDE_FRAMES  512
 static void *audio_alloc(size_t size);   /* defined with the streaming code below */
@@ -188,6 +201,7 @@ static esp_err_t audio_out_configure(uint32_t rate)
                         "cannot set slot format");
     s_out_cfg_rate = rate;
     s_out_slot_bits = 16;
+    s_dma_tx_bits = 16;
 
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx), TAG, "cannot enable TX");
     s_out_running = true;
@@ -568,12 +582,46 @@ void mpx_audio_set_volume_transient(int percent)
  * so a caller can push frames through Opus and a socket without paying an
  * open/close per block. */
 
-/* What reopening both I2S channels needs in internal DMA RAM: 6 descriptors
- * x 240 frames x 8 bytes (32-bit stereo slots) for RX and again for TX, less
- * the TX buffers the reconfigure frees, plus margin. Below this,
- * capture_start refuses (see there). */
-#define MPX_AUDIO_MIN_DMA_FREE   (20 * 1024)
-#define MPX_AUDIO_MIN_DMA_BLOCK  (4 * 1024)
+/* The I2S DMA ring per channel: I2S_CHANNEL_DEFAULT_CONFIG's 6 descriptors
+ * x 240 frames, two slots per frame. 16-bit slots: 5760 bytes a channel;
+ * 32-bit: 11520. Each descriptor buffer is its own allocation. */
+#define MPX_AUDIO_DMA_DESC_NUM    6u
+#define MPX_AUDIO_DMA_FRAME_NUM   240u
+#define MPX_AUDIO_DMA_DESC_BYTES(bits)  (MPX_AUDIO_DMA_FRAME_NUM * 2u * ((bits) / 8u))
+#define MPX_AUDIO_DMA_RING_BYTES(bits)  (MPX_AUDIO_DMA_DESC_NUM * MPX_AUDIO_DMA_DESC_BYTES(bits))
+/* Headroom on top of the growth itself, for the codec open and whatever else
+ * allocates internal DMA memory at the same moment. */
+#define MPX_AUDIO_DMA_MARGIN      (8 * 1024)
+
+/* Slot width esp_codec_dev gives both channels for a capture of `channels`
+ * (four channels ride in two 32-bit slots; see s_out_slot_bits). */
+static inline uint8_t capture_slot_bits(uint8_t channels)
+{
+    return (channels > 2) ? 32 : 16;
+}
+
+/* New internal DMA memory a codec open at `channels` will need: only the
+ * rings that have to GROW. A ring that stays the same size is not touched,
+ * and one that shrinks is freed before its replacement is allocated. */
+static size_t capture_dma_growth(uint8_t channels)
+{
+    const uint8_t bits = capture_slot_bits(channels);
+    size_t grow = 0;
+    if (bits > s_dma_rx_bits) {
+        grow += MPX_AUDIO_DMA_RING_BYTES(bits) - MPX_AUDIO_DMA_RING_BYTES(s_dma_rx_bits);
+    }
+    if (bits > s_dma_tx_bits) {
+        grow += MPX_AUDIO_DMA_RING_BYTES(bits) - MPX_AUDIO_DMA_RING_BYTES(s_dma_tx_bits);
+    }
+    return grow;
+}
+
+/* After esp_codec_dev_open: both rings are now sized for this capture. */
+static void capture_note_opened(uint8_t channels)
+{
+    s_dma_rx_bits = capture_slot_bits(channels);
+    s_dma_tx_bits = s_dma_rx_bits;
+}
 
 static uint8_t  s_cap_channels = 1;
 static uint8_t  s_cap_pick;
@@ -592,20 +640,36 @@ esp_err_t mpx_audio_capture_start(uint32_t sample_rate, uint8_t channels, uint8_
         return ESP_OK;
     }
 
-    /* Opening the codec reconfigures both I2S channels, and the driver
-     * reallocates their DMA buffers (internal RAM, ~12 KB each at 32-bit
-     * slots). If that allocation fails, esp_codec_dev still enables the
-     * half-configured channel and the chip faults in i2s_tx_channel_start.
-     * So refuse here, with the numbers, instead of rebooting. */
+    /* Opening the codec reconfigures both I2S channels, and when the slot
+     * width changes the driver reallocates their DMA buffers (internal RAM,
+     * ~11.5 KB a channel at 32-bit slots). If that allocation fails,
+     * esp_codec_dev still enables the half-configured channel and the chip
+     * faults in i2s_tx_channel_start. So refuse here, with the numbers,
+     * instead of rebooting.
+     *
+     * Only GROWTH needs checking. The rings stay allocated between captures,
+     * so a 16-bit capture right after the 32-bit wake-word one (the
+     * hands-free follow-up turn) gives memory back rather than taking any.
+     * Checking a flat 20 KB here instead refused exactly that turn: the
+     * free heap was low precisely because the 32-bit rings were holding
+     * the memory the 16-bit open was about to release. */
     {
-        const size_t dma_free    = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-        const size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-        if (dma_free < MPX_AUDIO_MIN_DMA_FREE || dma_largest < MPX_AUDIO_MIN_DMA_BLOCK) {
-            ESP_LOGE(TAG, "not opening the microphone: internal DMA RAM %u free, %u largest "
-                          "(needs %u / %u) -- see the internal RAM notes in sdkconfig.defaults",
-                     (unsigned)dma_free, (unsigned)dma_largest,
-                     (unsigned)MPX_AUDIO_MIN_DMA_FREE, (unsigned)MPX_AUDIO_MIN_DMA_BLOCK);
-            return ESP_ERR_NO_MEM;
+        const size_t grow = capture_dma_growth(channels);
+        if (grow > 0) {
+            const size_t need_free   = grow + MPX_AUDIO_DMA_MARGIN;
+            const size_t need_block  = MPX_AUDIO_DMA_DESC_BYTES(capture_slot_bits(channels));
+            const size_t dma_free    = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+            const size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+            if (dma_free < need_free || dma_largest < need_block) {
+                ESP_LOGE(TAG, "not opening the microphone: internal DMA RAM %u free, %u largest "
+                              "(needs %u / %u to widen the I2S rings %u/%u -> %u-bit) -- see the "
+                              "internal RAM notes in sdkconfig.defaults",
+                         (unsigned)dma_free, (unsigned)dma_largest,
+                         (unsigned)need_free, (unsigned)need_block,
+                         (unsigned)s_dma_rx_bits, (unsigned)s_dma_tx_bits,
+                         (unsigned)capture_slot_bits(channels));
+                return ESP_ERR_NO_MEM;
+            }
         }
     }
 
@@ -620,6 +684,7 @@ esp_err_t mpx_audio_capture_start(uint32_t sample_rate, uint8_t channels, uint8_
 
     rc = esp_codec_dev_open(s_mic->codec_dev, &fs);
     ESP_RETURN_ON_FALSE(rc == 0, ESP_FAIL, TAG, "codec open failed: rc=%d", rc);
+    capture_note_opened(channels);
 
     if (esp_codec_dev_set_in_channel_gain(s_mic->codec_dev, fs.channel_mask,
                                           s_mic_gain_db) != 0) {
@@ -932,6 +997,7 @@ esp_err_t mpx_audio_record_wav(const char *rel_path, uint32_t seconds,
         ESP_LOGE(TAG, "try a different channel count: `audio rec 5 0 2`");
         return ESP_FAIL;
     }
+    capture_note_opened(channels);
 
     chunk = audio_alloc(AUDIO_CHUNK_BYTES);
     mono  = audio_alloc(AUDIO_CHUNK_BYTES / channels);

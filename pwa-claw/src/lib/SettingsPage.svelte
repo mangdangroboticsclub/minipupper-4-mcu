@@ -119,6 +119,63 @@
     return power.resting ? `${when} · resting now` : when;
   });
 
+  // ── Shut down / restart the Pi (/v1/pi/power -> tools/pi/pi_power.py) ──
+  // phase: idle | confirm-shutdown | confirm-reboot | sending | done | error
+  let piPower = $state({ phase: "idle", action: "", msg: "", gone: false });
+  let piPowerOpen = $state(false);
+
+  const PI_POWER_ERRORS = {
+    pi_not_seen: "The robot hasn't heard from the Pi, so it doesn't know its address. Is pi_announce running?",
+    pi_unreachable: "Couldn't reach the Pi. Is pi_power installed on it, and are the robot and the Pi on the same Wi‑Fi?",
+    bad_token: "The Pi refused: the token doesn't match (APP_PI_POWER_TOKEN in the firmware vs /etc/default/pi-power on the Pi).",
+    pi_refused: "The Pi refused the request.",
+    pi_link_disabled: "This firmware was built without the Pi link.",
+  };
+
+  async function sendPiPower(action) {
+    piPower = { phase: "sending", action, msg: "", gone: false };
+    try {
+      const r = await fetch("/v1/pi/power", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      if (r.status === 404) {
+        piPower = { phase: "error", action, msg: "This firmware has no Pi power control yet. Update the robot.", gone: false };
+        return;
+      }
+      const j = await r.json().catch(() => ({}));
+      if (j.ok) {
+        piPower = { phase: "done", action, msg: "", gone: false };
+      } else {
+        piPower = { phase: "error", action, msg: PI_POWER_ERRORS[j.error] || `Failed (${j.error || "HTTP " + r.status}).`, gone: false };
+      }
+    } catch {
+      piPower = { phase: "error", action, msg: "Couldn't reach the robot.", gone: false };
+    }
+  }
+
+  // After the request, watch the Pi's address: it disappears a few seconds
+  // after pi_announce / the bridge stop (HOST_INFO goes stale after 6 s).
+  $effect(() => {
+    if (piPower.phase !== "done") return;
+    if (!piIp && !piPower.gone) {
+      piPower.gone = true;
+    } else if (piIp && piPower.gone && piPower.action === "reboot") {
+      piPower = { phase: "idle", action: "", msg: "", gone: false };   // back up
+      piPowerOpen = false;
+    }
+  });
+
+  const piPowerLabel = $derived.by(() => {
+    const { phase, action, gone } = piPower;
+    if (phase === "sending") return action === "reboot" ? "Asking the Pi to restart…" : "Asking the Pi to shut down…";
+    if (phase === "done" && action === "reboot") return gone ? "Restarting…" : "Restart requested";
+    if (phase === "done") return gone ? "Shut down · wait for the green light to stop" : "Shutting down…";
+    if (phase === "error") return "Didn't work · tap for details";
+    return "Switch the Pi off safely before unplugging it";
+  });
+
   function back() {
     page = page === "upload" ? "files" : null;
   }
@@ -140,6 +197,7 @@
 {#snippet iWifi()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M2 8.5a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1.2" fill="currentColor"/></svg>{/snippet}
 {#snippet iHotspot()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="2"/><path d="M8 8a6 6 0 0 0 0 8M16 8a6 6 0 0 1 0 8M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/></svg>{/snippet}
 {#snippet iPi()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h4v4H7zM14 9h3M14 13h3"/></svg>{/snippet}
+{#snippet iPower()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 3v9"/><path d="M6.3 7.2a8 8 0 1 0 11.4 0"/></svg>{/snippet}
 {#snippet iAi()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>{/snippet}
 {#snippet iCal()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 20l4-9 5 3 5-9"/><circle cx="9" cy="11" r="1.6" fill="currentColor"/><circle cx="14" cy="14" r="1.6" fill="currentColor"/></svg>{/snippet}
 {#snippet iStudio()}<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 4v16M12 4v16M18 4v16"/><path d="M4 9h4M10 14h4M16 7h4" stroke-width="2.6"/></svg>{/snippet}
@@ -192,6 +250,42 @@
                 {/if}
               </span>
             </div>
+            {#if piIp || piPower.phase !== "idle"}
+              {@render row({ icon: iPower, dark: true, title: "Shut down Pi", desc: piPowerLabel, expanded: piPowerOpen, onclick: () => (piPowerOpen = !piPowerOpen) })}
+              {#if piPowerOpen}
+                <div class="rest">
+                  {#if piPower.phase === "confirm-shutdown" || piPower.phase === "confirm-reboot"}
+                    {@const reboot = piPower.phase === "confirm-reboot"}
+                    <p class="note strong">{reboot ? "Restart the Raspberry Pi?" : "Shut down the Raspberry Pi?"}</p>
+                    <p class="note">ROS, the RL policy and anything else running on the Pi will stop. If the Pi is driving the robot, the robot stops and stands.</p>
+                    <div class="rest-actions">
+                      <button type="button" class="act" class:danger={!reboot} onclick={() => sendPiPower(reboot ? "reboot" : "shutdown")}>{reboot ? "Yes, restart" : "Yes, shut down"}</button>
+                      <button type="button" class="act ghost" onclick={() => (piPower = { phase: "idle", action: "", msg: "", gone: false })}>Cancel</button>
+                    </div>
+                  {:else if piPower.phase === "sending"}
+                    <p class="note">Asking the Pi…</p>
+                  {:else if piPower.phase === "done" && piPower.action === "shutdown"}
+                    {#if piPower.gone}
+                      <p class="note strong ok">The Pi has gone offline.</p>
+                      <p class="note">Wait until its green activity light stops flashing (about 10–20 s more). Then it's safe to switch off or unplug it.</p>
+                    {:else}
+                      <p class="note">The Pi is shutting down. Don't unplug it yet…</p>
+                    {/if}
+                  {:else if piPower.phase === "done"}
+                    <p class="note">The Pi is restarting. It will be back here in about a minute.</p>
+                  {:else}
+                    {#if piPower.phase === "error"}
+                      <p class="note err">{piPower.msg}</p>
+                    {/if}
+                    <div class="rest-actions">
+                      <button type="button" class="act danger" disabled={!piIp} onclick={() => (piPower = { phase: "confirm-shutdown", action: "", msg: "", gone: false })}>Shut down</button>
+                      <button type="button" class="act ghost" disabled={!piIp} onclick={() => (piPower = { phase: "confirm-reboot", action: "", msg: "", gone: false })}>Restart</button>
+                    </div>
+                    <p class="note">Needs the pi_power service on the Pi (tools/pi/README.md).</p>
+                  {/if}
+                </div>
+              {/if}
+            {/if}
           </div>
         </section>
       {/if}
@@ -316,4 +410,10 @@
   .rest-actions { display: flex; }
   .act { height: 44px; border-radius: 22px; border: none; background: var(--ink); color: #fff; padding: 0 18px; font-size: 14px; font-weight: 700; cursor: pointer; }
   .act:disabled, .seg button:disabled { opacity: 0.6; }
-  .note { font-size: 13px; line-height: 1.45; color: var(--sub); }</style>
+  .note { font-size: 13px; line-height: 1.45; color: var(--sub); }
+  .note.strong { color: var(--ink); font-weight: 700; font-size: 14px; }
+  .note.ok { color: #1E7B34; }
+  .note.err { color: #B3261E; font-weight: 600; }
+  .rest-actions { gap: 8px; }
+  .act.danger { background: #B3261E; }
+  .act.ghost { background: var(--hair); color: var(--ink); }</style>

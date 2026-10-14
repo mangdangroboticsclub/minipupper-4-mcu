@@ -109,3 +109,45 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now pi-announce
 journalctl -u pi-announce -f      # check it
 ```
+
+## 7. Shut down / restart the Pi from the app (`pi_power`)
+
+Pulling the power on a running Pi can corrupt its SD card. With `pi_power`
+installed, **Settings → Raspberry Pi → Shut down Pi** switches the Pi off
+cleanly (there is a Restart button too).
+
+How it works: the app calls `POST /v1/pi/power {"action":"shutdown"|"reboot"}`
+on the robot. The robot forwards it over the network to
+`http://<Pi IP>:8091/shutdown` (or `/reboot`), using the IP the Pi announces
+(section 6). `pi_power` checks the token, answers, and runs `systemctl
+poweroff` a second later. It doesn't use the J-PI UART, because the bridge and
+RL policies read that port and a second reader would steal their bytes. So the
+robot and the Pi must be on the **same network**, and `pi_announce` (or the
+bridge) must be running so the robot knows the Pi's IP.
+
+Install on the Pi (copy the three files over first):
+
+```
+sudo cp pi_power.py /usr/local/bin/
+sudo cp pi-power.service /etc/systemd/system/
+sudo cp pi-power.default /etc/default/pi-power
+sudo nano /etc/default/pi-power          # set your own PI_POWER_TOKEN
+sudo systemctl daemon-reload
+sudo systemctl enable --now pi-power
+curl http://localhost:8091/ping          # {"ok": true}
+```
+
+Then set the same token in the firmware: `idf.py menuconfig` → App Config →
+"Pi power service token" (`APP_PI_POWER_TOKEN`; the port is
+`APP_PI_POWER_PORT`, default 8091) and flash it. If `ufw` is on, allow the
+port: `sudo ufw allow 8091/tcp`.
+
+After **Shut down**, the app shows "gone offline" once the Pi stops
+announcing itself. Wait until the Pi's green activity LED stops flashing
+(about 10–20 s more), then it's safe to unplug.
+
+| App says | Fix |
+|---|---|
+| hasn't heard from the Pi | `pi_announce` isn't running (section 6) |
+| couldn't reach the Pi | `pi-power` not running, firewall, or robot on another network (e.g. its own hotspot) |
+| token doesn't match | `APP_PI_POWER_TOKEN` ≠ `PI_POWER_TOKEN` in `/etc/default/pi-power` |

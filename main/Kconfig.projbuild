@@ -336,6 +336,25 @@ config APP_PI_LINK_REQUIRE_HOST_PIN
         yellow HOST_PRESENT wire high. Turn off only for bench tests with
         a bare UART and no IO3 wire.
 
+config APP_PI_POWER_PORT
+    int "Pi power service port (tools/pi/pi_power.py)"
+    range 1 65535
+    default 8091
+    help
+        The app's "Shut down Pi" / "Restart Pi" buttons ask the robot,
+        and the robot asks the Pi's pi_power service at
+        http://<Pi IP>:<this port>. The Pi's IP comes from HOST_INFO
+        (pi_announce or the bridge), so both must be on the same network.
+        Must match PI_POWER_PORT in /etc/default/pi-power on the Pi.
+
+config APP_PI_POWER_TOKEN
+    string "Pi power service token"
+    default "mpx-pi-power"
+    help
+        Shared secret sent as X-MPX-Token. Must match PI_POWER_TOKEN in
+        /etc/default/pi-power on the Pi. Change it on both sides so other
+        devices on the network can't switch the Pi off.
+
 config APP_RL_LINK_ENABLE
     bool "RL host link (mp4-link protocol) on the Pi UART"
     default y
