@@ -1,0 +1,2 @@
+dependencies:
+  espressif/mcp-c-sdk: "^2.0.0"

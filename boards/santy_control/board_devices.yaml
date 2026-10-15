@@ -1,0 +1,160 @@
+# Devices for the Santy Control board.
+#
+# Source: Santy_Control_1201.pdf, sheets 2 and 3.
+version: 1.0.0
+devices:
+  # ---------------------------------------------------------------- display
+  # Same panel and same pins as the MP4 board, with ONE difference that
+  # matters: chip select.
+  #
+  # On the MP4 board LCD_CS is driven by IO9. On this board IO9 is
+  # IO9_DVP_D7 -- a camera data line -- and the LCD_CS net carries no IOxx
+  # prefix at all, unlike every GPIO-driven signal on the schematic. It is
+  # strapped by R17/R18 (R18 marked NC) rather than driven, so there is no
+  # GPIO to name here.
+  #
+  # cs_gpio_num: -1 means esp_lcd never toggles CS, which is correct when the
+  # panel is the only device on the bus and its CS is tied active. If the
+  # panel stays blank, this is the first line to question -- confirm on the
+  # board which side R17 ties LCD_CS to.
+  - name: display_lcd
+    chip: st7789
+    type: display_lcd
+    sub_type: spi
+    version: default
+    config:
+      mirror_x: true
+      mirror_y: false
+      swap_xy: true
+      invert_color: true
+      x_max: 320
+      y_max: 240
+      io_spi_config:
+        cs_gpio_num: -1               # strapped, not driven -- see above
+        dc_gpio_num: 39               # IO39_LCD_DC
+        spi_mode: 2
+        pclk_hz: 80000000             # drop to 40 MHz if the panel tears
+        lcd_cmd_bits: 8
+        lcd_param_bits: 8
+        flags:
+          sio_mode: true              # no MISO on J4
+      lcd_panel_config:
+        # J4 pin 3 is RESET, tied to the board RESET net rather than a GPIO,
+        # so -1 makes esp_lcd issue a software reset over SPI instead.
+        reset_gpio_num: -1
+        bits_per_pixel: 16
+        rgb_ele_order: LCD_RGB_ELEMENT_ORDER_RGB
+        data_endian: LCD_RGB_DATA_ENDIAN_BIG
+        vendor_config: NULL
+    peripherals:
+      - name: spi_display
+
+  - name: lcd_brightness
+    type: ledc_ctrl
+    version: default
+    config:
+      default_percent: 80
+    peripherals:
+      - name: ledc_backlight
+
+  # ------------------------------------------------------------------ audio
+  # MAX98357A (U7): class-D amplifier straight off I2S, no control interface.
+  # SD_MODE is held by R24 (1 MOhm) and GAIN reaches only test point TP1
+  # through R27 -- so no I2C binding, no PA-enable GPIO, and `chip: internal`.
+  #
+  # Consequence: esp_codec_dev_set_out_vol() is a NO-OP on this board.
+  # Volume must be applied to the samples in software before I2S.
+  - name: audio_dac
+    chip: internal
+    type: audio_codec
+    version: default
+    config:
+      adc_enabled: false
+      dac_enabled: true
+      dac_max_channel: 2
+      dac_channel_mask: "11"
+      dac_init_gain: 0
+      mclk_enabled: false
+    peripherals:
+      - name: i2s_audio_out
+
+  # ES7210 (U8), four-channel microphone ADC.
+  #
+  #   MIC1 <- ZTS6216 analog microphone (MIC2, right on the schematic)
+  #   MIC2 <- ZTS6216 analog microphone (MIC1)
+  #   MIC3 <- amplifier OUTP/OUTN through the R31/R32/R35/R36 divider
+  #                                        <-- ECHO CANCELLATION REFERENCE
+  #   MIC4 <- unused
+  #
+  # Identical in arrangement to the MP4 board and to esp_box_3, so the mask
+  # and labels are the same. 'RE' is ESP-Claw's label for the reference
+  # channel and the list reads MSB..LSB, i.e. [mic4, mic3, mic2, mic1].
+  #
+  # Nothing consumes the reference yet -- there is no AFE in this firmware.
+  # It is declared now so adding echo cancellation later is additive.
+  - name: audio_adc
+    chip: es7210
+    type: audio_codec
+    version: default
+    config:
+      adc_enabled: true
+      dac_enabled: false
+      adc_max_channel: 4
+      adc_channel_mask: "0111"
+      adc_channel_labels: ['NA', 'RE', 'FR', 'FL']
+      adc_init_gain: 30
+      mclk_enabled: true
+    peripherals:
+      - name: i2s_audio_in
+      - name: i2c_master
+        # The schematic annotates ES7210_I2C_ADD: 0x41, which is the 7-bit
+        # form; 0x82 is the 8-bit write address the codec driver wants.
+        #
+        # This also settles the open question on the MP4 board, where the
+        # AD0/AD1 straps were ambiguous in the PDF and 0x82 was a best guess
+        # among four candidates. Two boards from the same design lineage,
+        # one of them stating the address outright.
+        address: 0x82
+        frequency: 400000
+
+  # --------------------------------------------------------------- buttons
+  # BOOT (SW2, also a strapping pin) and WAKE (SW1 on connector J2) -- the
+  # same two pins as the MP4 board, IO0 and IO21.
+  #
+  # Purely descriptive: nothing in ESP-Claw reads this config. It lands in the
+  # generated board metadata, which becomes the board_hardware_info skill the
+  # agent reads at runtime, so it exists to tell the model which buttons the
+  # board has. lua_module_button takes explicit GPIO numbers from Lua.
+  - name: board_buttons
+    chip: gpio_button
+    type: custom
+    version: 1.0.0
+    init_skip: true
+    config:
+      boot_gpio_num: 0
+      wake_gpio_num: 21
+      active_level: 0
+
+# ---------------------------------------------------------------------------
+# DELIBERATELY NOT DECLARED
+#
+# IMU -- QMI8658A at 7-bit 0x6a on the shared I2C bus (U6, INT1 on the
+# schematic). It is left out because `mpx_imu` speaks Bosch BMI270 and
+# nothing here speaks QMI8658A: declaring it as `imu_sensor` would hand the
+# BMI270 driver a chip that does not answer its register map, turning a
+# missing feature into a confusing one. `selftest --i2c` still finds 0x6a and
+# reports it, which is the useful half.
+#
+# Camera -- a DVP connector (J5) occupies IO3..IO9 and IO15..IO18 plus
+# IO46. Enabling it means CONFIG_ESP_BOARD_DEV_CAMERA_SUPPORT and the
+# esp_video component. Not needed for voice.
+#
+# Motors -- two DC motors through a DRV8833 (U9) on IO19/IO20 (A) and
+# IO47/IO48 (B). There is no motor device type in esp_board_manager, and
+# these are not servos, so mpx_robot cannot drive them.
+#
+#   *** IO19 and IO20 are the ESP32-S3 native USB pins. ***
+#
+# Because they drive Motor A here, this board has NO USB-Serial-JTAG. The
+# console must be UART0 through the CH340K, which is what
+# sdkconfig.defaults.board selects.

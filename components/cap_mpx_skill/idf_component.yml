@@ -1,0 +1,6 @@
+## IDF Component Manager Manifest File
+dependencies:
+  claw_cap:
+    path: ../../third-party/esp-claw/components/claw_modules/claw_cap
+  espressif/cjson:
+    version: "^1.7.19"

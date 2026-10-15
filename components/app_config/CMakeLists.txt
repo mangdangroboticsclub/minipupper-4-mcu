@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "app_config.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        app_claw
+        settings
+    PRIV_REQUIRES
+        mbedtls
+        log
+)

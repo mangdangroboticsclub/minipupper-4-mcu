@@ -1,38 +1,8 @@
-# Hardware inventory of the MangDang MPX / MP4 ESP32-S3 core board, for
-# ESP-Claw's cap_boards (third-party/esp-claw/components/claw_capabilities/
-# cap_boards). Its CMakeLists.txt runs tools/generate_board_skill.py on
-# `${CMAKE_SOURCE_DIR}/components/gen_bmgr_codes/gen_board_metadata.yaml`
-# -- the file ESP-Claw's board manager would generate -- and turns it into
-# the `board_hardware_info` skill the agent reads before touching GPIOs.
-#
-# This firmware has no board manager (the pins are in
-# main/robot/board_config.h), so the file is written by hand and only has
-# to agree with board_config.h. This directory has no CMakeLists.txt on
-# purpose: it is not a component, just where cap_boards looks.
 version: 1
-board: mpx_esp32_core
+board: mp4_esp32_core
 chip: esp32s3
-manufacturer: MangDang
-description: Mini Pupper MPX quadruped core board (ESP32-S3-WROOM-1-N16R8). Twelve servos on four AT32 driver boards over SPI2, BMI270 IMU, ST7789 320x240 screen, ES7210 microphones and a MAX98357A speaker, a Raspberry Pi header (J-PI).
 
 devices:
-  servo_bus:
-    type: custom
-    peripherals:
-    - spi_servo
-    io:
-      cs_front_right: 7
-      cs_front_left: 4
-      cs_rear_right: 15
-      cs_rear_left: 5
-
-  imu_sensor:
-    type: custom
-    peripherals:
-    - i2c_master
-    io:
-      int1_gpio_num: 10
-
   display_lcd:
     type: display_lcd
     sub_type: spi
@@ -44,49 +14,57 @@ devices:
 
   lcd_brightness:
     type: ledc_ctrl
-    io:
-      backlight_gpio_num: 42
+    peripherals:
+    - ledc_backlight
 
   audio_dac:
     type: audio_codec
     peripherals:
-    - i2s_audio
+    - i2s_audio_out
 
   audio_adc:
     type: audio_codec
     peripherals:
-    - i2s_audio
+    - i2s_audio_in
     - i2c_master
 
-  pi_link:
+  imu_sensor:
     type: custom
     peripherals:
-    - uart_pi
-    io:
-      host_present_gpio_num: 3
-      slave_out_gpio_num: 11
+    - i2c_master
 
   board_buttons:
     type: custom
-    io:
-      boot_button_gpio_num: 0
-      wake_button_gpio_num: 21
 
 peripherals:
-  spi_servo:
-    type: spi
-    role: master
-    io:
-      mosi_io_num: 6
-      miso_io_num: 17
-      sclk_io_num: 16
-
   i2c_master:
     type: i2c
     role: master
     io:
       sda_io_num: 1
       scl_io_num: 2
+
+  i2s_audio_out:
+    type: i2s
+    role: master
+    format: std-out
+    io:
+      mclk: 38
+      bclk: 14
+      ws: 13
+      dout: 45
+      din: 12
+
+  i2s_audio_in:
+    type: i2s
+    role: master
+    format: std-in
+    io:
+      mclk: 38
+      bclk: 14
+      ws: 13
+      dout: 45
+      din: 12
 
   spi_display:
     type: spi
@@ -95,19 +73,7 @@ peripherals:
       mosi_io_num: 40
       sclk_io_num: 41
 
-  i2s_audio:
-    type: i2s
-    role: master
-    format: std
+  ledc_backlight:
+    type: ledc
     io:
-      mclk: 38
-      bclk: 14
-      ws: 13
-      dout: 45
-      din: 12
-
-  uart_pi:
-    type: uart
-    io:
-      tx_io_num: 18
-      rx_io_num: 8
+      gpio_num: 42

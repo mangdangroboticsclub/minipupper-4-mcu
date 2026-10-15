@@ -1,0 +1,5 @@
+board: santy_control
+chip: esp32s3
+version: 1.0.0
+description: "Santy Control - ESP32-S3 audio/camera/motor board (ES7210 + MAX98357A)"
+manufacturer: "MangDang"

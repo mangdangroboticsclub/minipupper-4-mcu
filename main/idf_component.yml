@@ -1,105 +1,234 @@
 ## IDF Component Manager Manifest File
+##
+## ESP-Claw lives in the git submodule at third-party/esp-claw and is pulled in
+## component-by-component with `path:` dependencies -- the same mechanism
+## esp-mosaico-claw uses. Nothing here uses EXTRA_COMPONENT_DIRS, and no file
+## inside the submodule is ever edited, so bumping the pin is a submodule
+## checkout rather than a merge.
+##
+##   rules:   hard requirement, gated on Kconfig (dep is absent otherwise)
+##   matches: optional inclusion when the condition holds
 dependencies:
-  ## Required IDF version
-  ##
-  ## 5.5.x is what this project is built and locked against. Do not move to
-  ## IDF 6 without re-testing the servo bus: the SPI driver's transaction
-  ## semantics and the i2c_master API are both on that path.
-  idf:
-    version: '>=5.4.0,<6.0.0'
-  espressif/wasm-micro-runtime: ^1.3.2~1
-  joltwallet/littlefs: ^1.22.1
-  espressif/lua: ^5.5.0
+  espressif/esp_board_manager:
+    version: "^0.6"
+    public: true
 
-  ## ── Audio (local-claw): ES7210 microphone ADC driver + the esp_codec_dev
-  ## framework around it. The MAX98357A needs no codec at all; audio/
-  ## mpx_audio.c writes to the I2S TX channel directly. Same version line
-  ## mpv2-claw builds with (1.6.x).
-  espressif/esp_codec_dev: ^1.6.2
+  espressif/ramfs:
+    version: "^0.1"
 
-  ## ── Display (local-claw): ST7789 face + GIFs ────────────────
-  ## LVGL pinned to the 9.5 line mpv2-claw's face code was written against
-  ## (it uses LVGL's bundled AnimatedGIF decoder directly, whose header path
-  ## and API moved between minor versions). esp_lvgl_port does the LVGL
-  ## task, tick and esp_lcd flush; the ST7789 driver itself is in ESP-IDF.
-  ## esp_new_jpeg decodes the Raspberry Pi's camera frames (pi_video ->
-  ## cap_display_show_jpeg); without it that call answers NOT_SUPPORTED.
-  lvgl/lvgl: ">=9.5.0,<9.6.0"
-  espressif/esp_lvgl_port: ^2.6.0
-  espressif/esp_new_jpeg: ^1.0.2
-
-  ## ── Voice (local-claw): wake word, the voice gateway, music ──
-  ## Pulled in unconditionally, not gated on CONFIG_APP_VOICE_ENABLE: the
-  ## component manager evaluates `rules:` from build/config/sdkconfig.json,
-  ## which does not exist on the first configure pass, and mpv2-claw spent
-  ## a note the length of this file on the two-pass dance that follows. A
-  ## voice-off build compiles these and links none of them (main's sources
-  ## are what is gated, in CMakeLists.txt).
-  ##
-  ## esp-sr: AFE (AEC + VAD) and WakeNet ("Hi ESP"). Its models are packed
-  ## into srmodels.bin and flashed to the `model` partition (CONFIG_MODEL_IN_FLASH).
-  espressif/esp-sr: ^2.5.2
-  ## The xiaozhi author's Opus wrappers: libopus plus OpusEncoderWrapper /
-  ## OpusDecoderWrapper. The far end is a xiaozhi-protocol server that
-  ## expects exactly this framing. ~2.4.0 as mpv2-claw pins it.
-  78/esp-opus-encoder: "~2.4.0"
-  espressif/esp_websocket_client: ^1.4.0
-  ## Internet radio for cap_music: HTTP(S) in, MP3/AAC/M4A/FLAC/WAV decoded,
-  ## resampled to 16 kHz mono by its own converters (sdkconfig.defaults).
-  espressif/esp_audio_simple_player: ^0.9.6
-
-  ## ── IMU: BMI270 + BMM150 ─────────────────────────────────
-  ##
-  ## The BMI270 will not produce a sample until an 8 KB Bosch configuration
-  ## image has been uploaded into its feature engine, and that image is a Bosch
-  ## binary blob. So this is driven through the Bosch Sensor API rather than by
-  ## poking registers, which is what the QMI8658C on the Mini Pupper 2 board
-  ## needed and what robot/imu.cc used to be.
-  ##
-  ## Do NOT swap these for lbuque/bmi270_bmm150_sensor, convenient as its
-  ## combined API looks: it is built on the LEGACY i2c_bus component, and
-  ## putting the legacy and new I2C drivers on one port is unsupported.
-  espressif2022/bmi270: ^1.1.0
-  ## Same shape of problem: bmi270.h declares bmi270_i2c_config_t with an
-  ## i2c_bus_handle_t, so the header does not parse without i2c_bus.h even
-  ## though nothing calls into the component. Only the sensor API
-  ## (bmi2.c/bmi270.c, which is what this component actually is) is used.
-  espressif/i2c_bus: '*'
-  ## Used for bmm150.c - the chip's register map and, more to the point, its
-  ## trim-register compensation maths. Its bmm150_aux_adapter is NOT used: that
-  ## wrapper only tunnels register reads and never sets up the BMI270's AUX
-  ## interface, which is what the magnetometer actually needs.
-  tangyumei3535/bmm150_sensorapi: ^1.0.0
-
-  ## ── The on-device agent (local-claw, Phase 5): ESP-Claw ──────
-  ## third-party/esp-claw is Espressif's agent framework, vendored the way
-  ## mpv2-claw carries it (its components/ tree only; see
-  ## .cursor/PORT_NOTES.md for what was left out and why). Never edit it.
-  ## app_claw is the application shell: it pulls in the agent core, the
-  ## capability registry, the event router, sessions, memory, skills and
-  ## every capability that is switched on in sdkconfig (its own
-  ## idf_component.yml gates each one on APP_CLAW_CAP_*). The rest are the
-  ## pieces main/ calls directly, declared so they are this component's
-  ## requirements rather than something app_claw happens to bring along:
-  ##   http_reuse    claw_core REQUIRES it by name and does not depend on
-  ##                 it in its manifest; the app has to supply it.
-  ##   claw_core     claw_paths_set(): where the agent's files live.
-  ##   claw_cap      the descriptor types main/agent/agent_caps.cc fills.
-  ##   cap_im_local  the "web" chat channel the PWA's chat is bridged to.
-  ##   claw_event_router  its header, for the stack-size override in
-  ##                 main/agent/claw_overrides.c.
-  ## Declared unconditionally, like the voice stack above: `rules:` are
-  ## evaluated from sdkconfig.json, which the first configure pass does not
-  ## have, and main's REQUIRES names them.
+  # ---- ESP-Claw (submodule, pinned) ------------------------------------
   app_claw:
     path: ../third-party/esp-claw/components/common/app_claw
+
+  captive_dns:
+    path: ../third-party/esp-claw/components/common/captive_dns
+
+  claw_utils:
+    path: ../third-party/esp-claw/components/claw_modules/claw_utils
+
   http_reuse:
     path: ../third-party/esp-claw/components/common/http_reuse
-  claw_core:
-    path: ../third-party/esp-claw/components/claw_modules/claw_core
-  claw_cap:
-    path: ../third-party/esp-claw/components/claw_modules/claw_cap
-  cap_im_local:
-    path: ../third-party/esp-claw/components/claw_capabilities/cap_im_local
-  claw_event_router:
-    path: ../third-party/esp-claw/components/claw_modules/claw_event_router
+
+  settings:
+    path: ../third-party/esp-claw/components/common/settings
+
+  wifi_manager:
+    path: ../third-party/esp-claw/components/common/wifi_manager
+
+  system_ui:
+    rules:
+    - if: $CONFIG{ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT} == True
+    path: ../third-party/esp-claw/components/common/system_ui
+
+  # Keep LVGL below 9.6.0 for as long as this tree builds on ESP-IDF 5.5.4.
+  #
+  # Three separate manifests (display_service, system_ui, lua_module_lvgl) ask
+  # for lvgl/lvgl ^9.5.0 and display_service asks for espressif/esp_lvgl_adapter
+  # "*". With CONFIG_ESP_LVGL_ADAPTER_LVGL_THREAD_STACK_IN_PSRAM=y -- set in
+  # sdkconfig.defaults, for the internal-heap reasons documented there -- the
+  # adapter rewrites LVGL's FreeRTOS thread create/delete calls to
+  # xTaskCreateWithCaps()/vTaskDeleteWithCaps() by matching LVGL's source text
+  # literally. LVGL 9.6.0 changed exactly that text: the bare atomic.h include
+  # it looks for gained an `#ifdef ESP_PLATFORM` branch around
+  # freertos/atomic.h. The adapter then aborts the configure with
+  #
+  #     esp_lvgl_adapter: unsupported LVGL FreeRTOS stack hook layout
+  #
+  # which names a file inside managed_components/ and so reads like a fault in
+  # this project rather than the version skew it is.
+  #
+  # esp_lvgl_adapter 0.7.2 fixes the hook for 9.6 but requires IDF >= 5.5.5,
+  # and 0.7.0 is therefore the newest version the solver will accept here. The
+  # upper bound can go once the IDF pin moves to 5.5.5 or newer.
+  #
+  # The downgrade also drags an sdkconfig along that was generated while 9.6.0
+  # *was* the resolved version, and LVGL's Kconfig changed underneath it: 9.6.0
+  # defaults LV_ASSERT_HANDLER_INCLUDE to "" (deprecated there, in favour of
+  # LV_ASSERT_CUSTOM_INCLUDE) where 9.5.0 defaults it to "assert.h" and then
+  # includes it unconditionally from src/misc/lv_assert.h. That default is a
+  # plain user setting, so it survives the version change, and the first LVGL
+  # object to be compiled stops with
+  #
+  #     error: empty filename in #include
+  #     #define CONFIG_LV_ASSERT_HANDLER_INCLUDE ""
+  #
+  # reported against build/config/sdkconfig.h, naming no LVGL file at all.
+  # sdkconfig.defaults pins that key to "assert.h".
+  #
+  # The pin is deliberately unconditional. The component manager's first pass
+  # runs before any Kconfig value is known, so a `matches:` on the display
+  # symbol hides the bound there: pass one resolved 9.6.0 into the lock, pass
+  # two 9.5.0, and every configure re-downloaded LVGL twice -- which is also
+  # how a fresh sdkconfig picked up 9.6.0's empty default. A board without a
+  # display now compiles LVGL it never links.
+  lvgl/lvgl:
+    version: ">=9.5.0,<9.6.0"
+
+  esp_video:
+    path: ../third-party/esp-claw/components/common/esp_video
+    matches:
+    - if: $CONFIG{ESP_BOARD_DEV_CAMERA_SUPPORT} == True
+
+  # ---- Product-owned components ----------------------------------------
+  app_config:
+    path: ../components/app_config
+
+  http_server:
+    path: ../components/http_server
+
+  cmd_wifi:
+    path: ../components/cmd_wifi
+
+  # ---- The quadruped ----------------------------------------------------
+  mpx_robot:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_robot
+
+  mpx_util:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_util
+
+  mpx_wasm:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_wasm
+
+  # ---- Robot capability groups ------------------------------------------
+  # Registered from app_main through app_capabilities_register_external_group(),
+  # which is the one extension point a downstream ESP-Claw product actually
+  # needs. Nothing in app_claw is edited.
+  cap_robot:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/cap_robot
+
+  cap_mpx_skill:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/cap_mpx_skill
+
+  cap_display:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    - if: $CONFIG{ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT} == True
+    path: ../components/cap_display
+
+  # The `selftest` console command. Declared here like every other local
+  # component: main only reaches a component's headers through a dependency,
+  # and dropping a new directory into components/ does not always make CMake
+  # reconfigure, so relying on auto-discovery fails in a way that looks like a
+  # missing file.
+  mpx_selftest:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_selftest
+
+  # Microphone and speaker: recording, playback and the `audio` console
+  # command. Phase 1 of docs/voice-plan.md. Present whenever the board
+  # declares audio devices, and harmless when it does not -- every entry
+  # point returns ESP_ERR_NOT_SUPPORTED with no codec.
+  mpx_audio:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_audio
+
+  # Opus, and later the WebSocket to the voice server. Phase 2 of
+  # docs/voice-plan.md.
+  mpx_voice_link:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_voice_link
+
+  # The MCP bridge: JSON-RPC tool calls over the xiaozhi socket, dispatched
+  # into claw_cap_call(). Phase 3 of docs/voice-plan.md.
+  mpx_mcp_ws:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_mcp_ws
+
+  # Station-side Wi-Fi tuning (all-channel scan, strongest AP first, driver
+  # retries) on top of the submodule's wifi_manager. Not gated: every build
+  # of this firmware has to reach a home router.
+  mpx_wifi_tune:
+    path: ../components/mpx_wifi_tune
+
+  # RL walk policies run on the robot itself (mpv2-uros).
+  mpx_policy:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_policy
+
+  # micro-ROS: the robot as a ROS 2 node over Wi-Fi (mpv2-uros).
+  mpx_uros:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_uros
+
+  # Raspberry Pi UART link (tools/pi/README.md). Gated on MP4_ROBOT_ENABLE like
+  # the rest of the robot stack; MP4_PI_LINK_ENABLE decides whether main.c
+  # actually opens the UART.
+  mpx_pi_link:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../components/mpx_pi_link
+
+  # Acoustic front end, WakeNet and VAD (MultiNet is not used: the cloud is
+  # the brain). Large: it brings esp-dl and esp-dsp with it, and the first
+  # build downloads several hundred MB.
+  #
+  # This is the only `rules:`-gated entry that is a *managed* component,
+  # and that needs care. `$CONFIG{...}` is evaluated from
+  # build/config/sdkconfig.json only, and on the first pass of every
+  # configure the component manager deliberately does not load that file:
+  # every rule here reads as false, esp-sr is left out, the manager exits 10
+  # and ESP-IDF's project.cmake runs idf_build_process() again with the
+  # generated config. For the `path:` entries above that first pass is
+  # harmless -- everything under ../components is auto-discovered anyway --
+  # but a component that hard-REQUIRES `espressif__esp-sr` in its
+  # CMakeLists.txt fails requirement expansion on that first pass, before
+  # the retry. So nothing may REQUIRE esp-sr directly; attach it with
+  # idf_component_optional_requires() after registration instead. See
+  # components/mpx_voice_wake/CMakeLists.txt.
+  espressif/esp-sr:
+    version: "^2.5.2"
+    rules:
+      - if: $CONFIG{MP4_VOICE_ENABLE} == True
+
+  # AEC + VAD + WakeNet over the microphone, wired to barge-in. Phase 4 of
+  # docs/voice-plan.md (first cut -- see the component's own header for what
+  # is and is not wired up yet).
+  mpx_voice_wake:
+    rules:
+    - if: $CONFIG{MP4_VOICE_ENABLE} == True
+    path: ../components/mpx_voice_wake
+
+  # Music on the speaker (internet radio / audio URLs), sharing it with voice:
+  # the music_play / music_stop tools and the `music` console command.
+  cap_music:
+    rules:
+    - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    - if: $CONFIG{MP4_VOICE_ENABLE} == True
+    path: ../components/cap_music
+

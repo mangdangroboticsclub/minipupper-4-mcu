@@ -1,0 +1,5 @@
+board: mp4_esp32_core
+chip: esp32s3
+version: 1.0.0
+description: "MangDang MP4 ESP32 CORE - quadruped core board with TFT, mic array and speaker"
+manufacturer: "MangDang"

@@ -5,11 +5,14 @@ the same wire protocol, pins, baud rate and behaviour as the mpv2 firmware. The
 ROS 2 bridge that drives an mpv2 robot (SLAM, navigation, tracking, dance,
 music…) drives this firmware unchanged.
 
-- Firmware side: `main/pi/` (protocol in `pi_protocol.h`, identical to
-  mpv2's `main/pi/pi_protocol.h`). The same UART also speaks mp4-link's RL
-  host protocol for `python -m mp3link` policies: see `main/pi/RL_LINK.md`.
+- Firmware side: `components/mpx_pi_link` (protocol in `src/pi_protocol.h`,
+  identical to mpv2's `main/pi/pi_protocol.h`).
 - Pi side: `ros2jazzympv2/mini_pupper_esp_bridge` (its `protocol.py` mirrors
   `pi_protocol.h`, protocol version 1).
+
+`mp4_link.py` in this folder is the **old** text-line test link (PING/HELLO at
+115200). The firmware no longer speaks it; use the ROS bridge or its
+`esp_link_test` instead.
 
 ## 1. Wires: six of them
 
@@ -41,12 +44,12 @@ ls -l /dev/ttyAMA0      # Pi 5: GPIO14/15 UART
 
 `mini_pupper_esp_bridge/config/esp_bridge.yaml` must match the firmware:
 
-| Bridge parameter | Firmware (menuconfig → App Config) | Default |
+| Bridge parameter | Firmware (menuconfig → App Config → MP4 Robot) | Default |
 |---|---|---|
-| `baud` | `APP_PI_LINK_UART_BAUD` | 921600 |
-| `heartbeat_hz` | must beat `APP_PI_LINK_TIMEOUT_MS` | 20 Hz vs 300 ms |
-| `state_rate_hz` | `APP_PI_LINK_STATE_HZ` (used when the host asks for none) | 50 |
-| `host_present_gpio` | IO3 must be HIGH for control (`APP_PI_LINK_REQUIRE_HOST_PIN`) | 17 |
+| `baud` | `MP4_PI_LINK_UART_BAUD` | 921600 |
+| `heartbeat_hz` | must beat `MP4_PI_LINK_TIMEOUT_MS` | 20 Hz vs 300 ms |
+| `state_rate_hz` | `MP4_PI_LINK_STATE_HZ` (used when the host asks for none) | 50 |
+| `host_present_gpio` | IO3 must be HIGH for control (`MP4_PI_LINK_REQUIRE_HOST_PIN`) | 17 |
 | `take_control: false` | the robot stays on the app; telemetry still flows ("monitor") | true |
 
 Then `ros2 launch mini_pupper_esp_bridge esp_bridge.launch.py`, or the bringup
@@ -54,11 +57,17 @@ launch you use with mpv2.
 
 ## 4. Check it on the robot
 
-Open `http://<robot-ip>/v1/pi/status` in a browser: state (standalone /
-monitor / slave), IO3 level, heartbeat, frame counters, the Pi's IP and
-hostname, music and camera stats, and the RL link (`rl`).
+Serial console:
 
-| `/v1/pi/status` shows | Meaning |
+```
+pi            # state (standalone / monitor / slave), IO3 level, heartbeat,
+              # frame counters, the Pi's IP and hostname, music and camera stats
+pi json       # the same as GET /v1/pi/status
+```
+
+Or open `http://<robot-ip>/v1/pi/status` in a browser.
+
+| `pi` shows | Meaning |
 |---|---|
 | `standalone`, rx 0 frames | nothing heard: bridge not running, wrong baud, or TX/RX swapped |
 | mostly CRC errors | the two sides use different baud rates |
@@ -85,7 +94,7 @@ While the Pi is in control:
 
 Telemetry to the Pi:
 - STATE (servo angles commanded and measured, IMU, executed velocity) at 50 Hz;
-- INFO at 1 Hz (firmware "mpx-dog", robot UUID);
+- INFO at 1 Hz (firmware "mpv2-claw", robot UUID);
 - DIAG at 5 Hz (servo temperatures and currents, link counters);
 - EVENTs (link up/down, rejected commands, protocol mismatch).
 
@@ -97,8 +106,8 @@ nothing else, so the screen shows `<robot IP> | Pi <pi IP>` as soon as the Pi
 has booted. No heartbeat, no reading, no HOST_PRESENT line: it cannot change
 who controls the robot, even while the bridge runs. (The first version sent
 "monitor" heartbeats; with a bridge it could not see, the robot flipped in and
-out of ROS control.) Needs firmware that shows the IP for HOST_INFO alone
-(this one, mpv2-claw or mpv2).
+out of ROS control.) Needs the mpv2-claw or mpv2 firmware that shows the IP
+for HOST_INFO alone.
 
 Install on the Pi (copy the two files over first, e.g. with `scp`):
 
@@ -109,45 +118,3 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now pi-announce
 journalctl -u pi-announce -f      # check it
 ```
-
-## 7. Shut down / restart the Pi from the app (`pi_power`)
-
-Pulling the power on a running Pi can corrupt its SD card. With `pi_power`
-installed, **Settings → Raspberry Pi → Shut down Pi** switches the Pi off
-cleanly (there is a Restart button too).
-
-How it works: the app calls `POST /v1/pi/power {"action":"shutdown"|"reboot"}`
-on the robot. The robot forwards it over the network to
-`http://<Pi IP>:8091/shutdown` (or `/reboot`), using the IP the Pi announces
-(section 6). `pi_power` checks the token, answers, and runs `systemctl
-poweroff` a second later. It doesn't use the J-PI UART, because the bridge and
-RL policies read that port and a second reader would steal their bytes. So the
-robot and the Pi must be on the **same network**, and `pi_announce` (or the
-bridge) must be running so the robot knows the Pi's IP.
-
-Install on the Pi (copy the three files over first):
-
-```
-sudo cp pi_power.py /usr/local/bin/
-sudo cp pi-power.service /etc/systemd/system/
-sudo cp pi-power.default /etc/default/pi-power
-sudo nano /etc/default/pi-power          # set your own PI_POWER_TOKEN
-sudo systemctl daemon-reload
-sudo systemctl enable --now pi-power
-curl http://localhost:8091/ping          # {"ok": true}
-```
-
-Then set the same token in the firmware: `idf.py menuconfig` → App Config →
-"Pi power service token" (`APP_PI_POWER_TOKEN`; the port is
-`APP_PI_POWER_PORT`, default 8091) and flash it. If `ufw` is on, allow the
-port: `sudo ufw allow 8091/tcp`.
-
-After **Shut down**, the app shows "gone offline" once the Pi stops
-announcing itself. Wait until the Pi's green activity LED stops flashing
-(about 10–20 s more), then it's safe to unplug.
-
-| App says | Fix |
-|---|---|
-| hasn't heard from the Pi | `pi_announce` isn't running (section 6) |
-| couldn't reach the Pi | `pi-power` not running, firewall, or robot on another network (e.g. its own hotspot) |
-| token doesn't match | `APP_PI_POWER_TOKEN` ≠ `PI_POWER_TOKEN` in `/etc/default/pi-power` |

@@ -1,0 +1,382 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MangDang design system  --  "machined hardware, friendly face"
+   ───────────────────────────────────────────────────────────────────────────
+   Dark by default: the app is the robot's own colours, near-black with the
+   yellow eyes. Light is the same system on a grey ground.
+
+   Surfaces are built like hardware: an outer shell with a hairline and a
+   large radius, an inner core with a top highlight and a concentric smaller
+   radius (.shell / .core below). Nothing sits flat on the ground.
+
+   One accent. The yellow (#FFE605, the eyes) means "alive": the primary
+   action, the active tab, a live control, a glow. It is never a background.
+
+   Radii: shell 24, card 20, control 14, pill. Motion: one spring curve.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+@font-face {
+  font-family: "Outfit";
+  font-style: normal;
+  font-weight: 300 800;
+  font-display: swap;
+  src: url("/fonts/outfit-latin-wght.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg:          #0B0B0D;
+  --bg-glow:     radial-gradient(120% 60% at 50% -10%, rgba(255, 230, 5, 0.07), transparent 60%);
+  --shell:       #141416;   /* outer bezel                                 */
+  --surface-1:   #1A1A1E;   /* card core                                   */
+  --surface-2:   #232328;   /* fields, secondary buttons, tracks           */
+  --surface-3:   #2D2D33;   /* pressed, thumbs                             */
+  --line:        rgba(255, 255, 255, 0.07);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --highlight:   rgba(255, 255, 255, 0.06);   /* inset top edge of a core   */
+
+  --text-1:      #F5F5F6;
+  --text-2:      #A3A3AB;
+  --text-3:      #6C6C75;
+
+  --accent:      #FFE605;
+  --accent-ink:  #141414;
+  --accent-ui:   #FFE605;
+  --accent-soft: rgba(255, 230, 5, 0.12);
+  --accent-line: rgba(255, 230, 5, 0.40);
+  --accent-glow: 0 0 0 4px rgba(255, 230, 5, 0.14), 0 0 28px rgba(255, 230, 5, 0.25);
+
+  --solid:       #F5F5F6;
+  --solid-ink:   #0B0B0D;
+
+  --ok:          #45D483;
+  --ok-soft:     rgba(69, 212, 131, 0.14);
+  --warn:        #FFB020;
+  --warn-soft:   rgba(255, 176, 32, 0.14);
+  --danger:      #FF6363;
+  --danger-soft: rgba(255, 99, 99, 0.14);
+  --info:        #6AB0FF;
+  --info-soft:   rgba(106, 176, 255, 0.14);
+
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 10px 30px rgba(0, 0, 0, 0.35);
+  --shadow-pop:  0 24px 60px rgba(0, 0, 0, 0.6);
+  --shadow-key:  0 2px 0 rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+
+  --r-shell: 24px;
+  --r-lg:    20px;
+  --r-md:    16px;
+  --r-sm:    12px;
+  --r-pill:  999px;
+
+  --ease:      cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-out:  cubic-bezier(0.16, 1, 0.3, 1);
+
+  --font-sans: "Outfit", ui-rounded, "SF Pro Rounded", -apple-system, BlinkMacSystemFont,
+               "Segoe UI Variable Text", "Segoe UI", Roboto, system-ui, sans-serif;
+  --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg:          #EFEFF2;
+  --bg-glow:     radial-gradient(120% 60% at 50% -10%, rgba(255, 230, 5, 0.18), transparent 60%);
+  --shell:       #E4E4E9;
+  --surface-1:   #FFFFFF;
+  --surface-2:   #F1F1F4;
+  --surface-3:   #E3E3E8;
+  --line:        rgba(17, 17, 20, 0.07);
+  --line-strong: rgba(17, 17, 20, 0.14);
+  --highlight:   rgba(255, 255, 255, 0.9);
+
+  --text-1:      #131316;
+  --text-2:      #5B5B64;
+  --text-3:      #8E8E98;
+
+  --accent-ink:  #141414;
+  --accent-ui:   #7E7000;
+  --accent-soft: rgba(255, 230, 5, 0.25);
+  --accent-line: rgba(180, 160, 0, 0.5);
+  --accent-glow: 0 0 0 4px rgba(255, 230, 5, 0.30), 0 0 24px rgba(255, 230, 5, 0.35);
+
+  --solid:       #131316;
+  --solid-ink:   #FFFFFF;
+
+  --ok:          #1D9A55;
+  --warn:        #B96F00;
+  --danger:      #D93A3A;
+  --info:        #2A7BD2;
+
+  --shadow-card: 0 1px 2px rgba(17, 17, 20, 0.04), 0 10px 30px rgba(17, 17, 20, 0.08);
+  --shadow-pop:  0 24px 60px rgba(17, 17, 20, 0.22);
+  --shadow-key:  0 2px 0 rgba(17, 17, 20, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+/* ── Global Resets ───────────────────────────────────────────── */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100svh;
+  height: 100dvh;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--bg);
+  background-image: var(--bg-glow);
+  background-repeat: no-repeat;
+  color: var(--text-1);
+  font-size: 15px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* A breath of grain over everything: fixed, inert, and cheap. It is what
+   keeps large dark areas from reading as flat vector fill. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 60;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 1 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  background-size: 160px 160px;
+}
+:root[data-theme="light"] body::after { opacity: 0.05; mix-blend-mode: multiply; }
+
+button, input, select, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* ── Shared primitives ──────────────────────────────────────────
+   .shell + .core is the double bezel every major container uses: the
+   shell is the tray, the core is the plate sitting in it.             */
+
+.shell {
+  background: var(--shell);
+  border: 1px solid var(--line);
+  border-radius: var(--r-shell);
+  padding: 6px;
+  box-shadow: var(--shadow-card);
+}
+.core {
+  background: var(--surface-1);
+  border-radius: calc(var(--r-shell) - 6px);
+  box-shadow: inset 0 1px 0 var(--highlight);
+}
+
+.md-card {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: inset 0 1px 0 var(--highlight), var(--shadow-card);
+}
+
+.md-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 22px;
+  border-radius: var(--r-pill);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: -0.005em;
+  border: 1px solid transparent;
+  transition: transform 220ms var(--ease), background-color 220ms var(--ease), box-shadow 220ms var(--ease);
+  user-select: none;
+}
+.md-btn:active { transform: scale(0.97); }
+.md-btn-primary   { background: var(--accent); color: var(--accent-ink); box-shadow: 0 8px 24px rgba(255, 230, 5, 0.18); }
+.md-btn-solid     { background: var(--solid);  color: var(--solid-ink); }
+.md-btn-secondary { background: var(--surface-2); color: var(--text-1); border-color: var(--line); box-shadow: inset 0 1px 0 var(--highlight); }
+.md-btn-ghost     { background: transparent; color: var(--text-2); }
+.md-btn-danger    { background: var(--danger-soft); color: var(--danger); }
+.md-btn:disabled  { opacity: 0.45; pointer-events: none; }
+/* The trailing icon of a primary button sits in its own little disc. */
+.md-btn-icon {
+  width: 30px;
+  height: 30px;
+  margin-right: -10px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.12);
+  transition: transform 300ms var(--ease);
+}
+.md-btn:active .md-btn-icon { transform: translateX(2px); }
+
+.md-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.md-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: var(--r-pill);
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--surface-2);
+  color: var(--text-2);
+  border: 1px solid var(--line);
+}
+
+/* The robot's eyes, blinking. Any element with .eyes-blink squashes on the
+   Y axis every few seconds; it is the one animation that runs unprompted,
+   because it is the robot, not decoration. */
+@keyframes eyes-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  95%           { transform: scaleY(0.08); }
+}
+.eyes-blink { animation: eyes-blink 4.6s var(--ease) infinite; transform-origin: 50% 55%; }
+
+/* ── Selection ──────────────────────────────────────────────── */
+
+::selection {
+  background-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* ── Utilities ──────────────────────────────────────────────── */
+
+/* Hide scrollbar in WebKit / Blink / Firefox while keeping scrollable */
+.hide-scrollbar {
+  -ms-overflow-style: none;        /* Internet Explorer / Edge */
+  scrollbar-width: none;           /* Firefox */
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;                   /* Chrome / Safari / Opera */
+}
+
+/* Touch‑friendly tap targets */
+.touch-manipulation {
+  touch-action: manipulation;
+}
+
+/* ── Markdown body (chat bot messages) ──────────────────────── */
+
+.markdown-body p {
+  margin-bottom: 0.5em;
+}
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.25em;
+  margin: 0.4em 0;
+}
+.markdown-body li {
+  margin-bottom: 0.2em;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  font-weight: 600;
+  margin-top: 0.6em;
+  margin-bottom: 0.3em;
+  color: var(--text-1);
+}
+.markdown-body h1 { font-size: 1.1rem; }
+.markdown-body h2 { font-size: 1.05rem; }
+.markdown-body h3 { font-size: 1rem; }
+
+.markdown-body strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.markdown-body code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background-color: var(--surface-2);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+}
+
+.markdown-body pre {
+  margin: 0.5em 0;
+  padding: 0.75em;
+  background-color: var(--surface-2);
+  border-radius: var(--r-sm);
+  overflow-x: auto;
+  border: 1px solid var(--line);
+}
+.markdown-body pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.8rem;
+  color: var(--text-1);
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.75em;
+  margin: 0.5em 0;
+  color: var(--text-2);
+}
+
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 0.75em 0;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.9em;
+  width: 100%;
+}
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--line);
+  padding: 0.35em 0.6em;
+  text-align: left;
+}
+.markdown-body th {
+  background-color: var(--surface-2);
+  font-weight: 600;
+  color: var(--text-1);
+}

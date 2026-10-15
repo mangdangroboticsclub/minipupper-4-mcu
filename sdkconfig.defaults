@@ -1,264 +1,221 @@
-# Project sdkconfig defaults.
-# Seeded so a fresh `idf.py reconfigure` / `fullclean` keeps these values.
-
-# Settings that lived only in the committed sdkconfig until Phase 5, when
-# sdkconfig had to be regenerated (ESP-Claw's Kconfig, the partition table,
-# XIP) and they would otherwise have silently fallen back to their Kconfig
-# defaults: the product's AP name and cloud ingress, WebSocket support in
-# esp_http_server (the PWA chat and the Pi link ride on it), 240 MHz, and
-# the Wi-Fi/lwIP buffer trims from the Phase 4 internal-RAM work.
-CONFIG_APP_AP_SSID="MPX-Dog 01"
-CONFIG_APP_CHAT_SERVER_IP="35.220.215.160"
+# This file was generated using idf.py save-defconfig. It can be edited manually.
+# Espressif IoT Development Framework (ESP-IDF) 5.5.1 Project Minimal Configuration
+#
+CONFIG_FREERTOS_HZ=1000
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_8MB.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
 CONFIG_HTTPD_WS_SUPPORT=y
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
-CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
-
-# The HTTP server (network/http_server.cc) sets max_open_sockets = 12, which
-# needs LWIP_MAX_SOCKETS >= 12 + 3 (internal) = 15. Default 10 caused
-# "max_open_sockets is too large (max allowed 7)" and the server failed to
-# start. 16 left a little headroom for the websocket chat + PWA serving;
-# Phase 5 (the on-device agent) adds the LLM's HTTP client and the agent's
-# own HTTP requests on top, so 20, as mpv2-claw.
-CONFIG_LWIP_MAX_SOCKETS=20
-
-# Socket recycling.  With frequent PWA polling (wifi/status, robot/status,
-# marketplace), the default TIME_WAIT of 2*MSL = 2*60 s = 120 s made closed
-# sockets linger for two minutes and exhaust the 16-socket pool ("Failed to
-# create socket", accept errno 23).  Shorten MSL to 10 s (TIME_WAIT ~20 s) and
-# enable SO_LINGER so the marketplace proxy can force an immediate close.
-CONFIG_LWIP_TCP_MSL=10000
-CONFIG_LWIP_SO_LINGER=y
-
-# External PSRAM. Board is ESP32-S3-WROOM-1-N16R8 = 8 MB OCTAL PSRAM (see
-# partitions.csv). It was disabled, so the WASM sandbox's 128 KB linear
-# memory fell back to internal DRAM and every skill failed with
-# "Failed to instantiate". Enabling octal PSRAM gives it 8 MB to work in.
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
-CONFIG_SPIRAM_TYPE_AUTO=y
-CONFIG_SPIRAM_SPEED_80M=y
-CONFIG_SPIRAM_BOOT_INIT=y
-CONFIG_SPIRAM_USE_MALLOC=y
-
-# local-claw: internal RAM is the scarce resource once the screen, audio and
-# the wake word are up -- with small mallocs forced internal (it was 16384)
-# the robot booted with 2 KB of internal RAM left, and the Wi-Fi driver could
-# not get packet buffers ("wifi:m f null", phones dropped off the AP). Same
-# policy as mpv2-claw, which runs the same voice and display code: plain
-# malloc() may use PSRAM at any size, Wi-Fi/lwIP and mbedTLS buffers prefer
-# it, and 64 KB of internal RAM stays reserved for what must be internal
-# (DMA, task stacks, the Wi-Fi driver's static buffers).
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
-CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
-CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
-
-# local-claw, Phase 5: the on-device agent (ESP-Claw, third-party/esp-claw)
-# runs its tasks on PSRAM stacks -- claw_task_create() asks for
-# MALLOC_CAP_SPIRAM whenever FREERTOS_TASK_CREATE_ALLOW_EXT_MEM is on, with no
-# Kconfig to say otherwise -- and those tasks read and write files, which is
-# flash. Without XIP a flash access from a PSRAM-stacked task disables the
-# cache and IDF asserts (cache_utils.c: esp_task_stack_is_sane_cache_disabled).
-# With XIP the code and .rodata execute from PSRAM and the cache is never
-# switched off for a flash read, so any task may touch the filesystem. This
-# retires the "a PSRAM-stacked task must never touch flash" rule from the
-# earlier phases (.cursor/PORT_NOTES.md). The price: the app's ~2.6 MB of
-# code and ~1.9 MB of .rodata are copied into PSRAM at boot (about 4.5 MB of
-# the 8 MB), the same trade mpv2-claw makes. .bss and .noinit may live in
-# PSRAM too, which is where ESP-Claw's EXT_RAM_BSS_ATTR buffers want to be.
-CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
 CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY=y
-
-# Phase 5: app_main now also brings up the agent (JSON config, skill scan);
-# 3584 bytes was tight already. mpv2-claw's value. The read-only `system`
-# partition adds a VFS mount (the default of 8 is close to full with the
-# console, lwIP, eventfd and two LittleFS mounts).
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
-CONFIG_VFS_MAX_COUNT=12
-
-# Phase 5: ESP-Claw's own switches. The agent core, the web chat channel
-# (cap_im_local), files, memory, sessions, the scheduler, the skill manager,
-# subagents and cap_system (time sync, device info) stay at their defaults
-# (on). Off, and why:
-#   CLI          -- there is no esp_console in this firmware; the robot is
-#                   driven from the PWA and /v1, not a serial prompt.
-#   CAP_LUA      -- ESP-Claw's Lua is georgik/lua, this firmware's is
-#                   espressif/lua (main/lua): two Lua components cannot be
-#                   linked at once. The robot's own Lua stays; the agent does
-#                   not get a Lua tool. (Takes the lua_* modules with it.)
-#   IM_QQ/FEISHU/TG/WECHAT -- chat platforms the robot does not use; each is
-#                   a long-polling task and a chunk of .rodata.
-#   MCP_CLIENT/SERVER -- the robot's tools are registered natively
-#                   (main/agent/agent_caps.cc); the voice gateway's MCP goes
-#                   through voice_tools.cc, not ESP-Claw.
-#   LLM_INSPECT  -- image inspection; the robot has no camera of its own.
-#   WEB_SEARCH   -- needs a Brave/Tavily key there is no settings page for.
-#   ROUTER_MGR   -- the agent editing its own event routes is not something
-#                   the robot's users asked for; the rules file is seeded.
-# MEMORY_MODE_FULL as mpv2-claw: the extraction passes go to the same
-# gateway and are what makes "remember that I..." work across sessions.
-# Stage verbosity VERBOSE: the "Round N: tool(...)" notes become the step
-# lines in the PWA's activity panel. Subagents capped at 2 (each is another
-# agent core with a 16 KB stack).
-CONFIG_APP_CLAW_ENABLE_CLI=n
-CONFIG_APP_CLAW_CAP_LUA=n
-# The Lua drivers and modules are separate symbols that do NOT depend on
-# APP_CLAW_CAP_LUA, and app_lua_modules.c includes each enabled one's
-# header unconditionally -- while the components themselves (lua_modules/,
-# not vendored) only enter the build through manifest rules that also need
-# CAP_LUA. Every one must be off, or the build stops at
-# "lua_driver_adc.h: No such file or directory".
-CONFIG_APP_CLAW_LUA_DRIVER_ADC=n
-CONFIG_APP_CLAW_LUA_DRIVER_GPIO=n
-CONFIG_APP_CLAW_LUA_DRIVER_I2C=n
-CONFIG_APP_CLAW_LUA_DRIVER_MCPWM=n
-CONFIG_APP_CLAW_LUA_DRIVER_PCNT=n
-CONFIG_APP_CLAW_LUA_DRIVER_RMT=n
-CONFIG_APP_CLAW_LUA_DRIVER_TOUCH=n
-CONFIG_APP_CLAW_LUA_DRIVER_UART=n
-CONFIG_APP_CLAW_LUA_MODULE_AUDIO=n
-CONFIG_APP_CLAW_LUA_MODULE_BOARD_MANAGER=n
-CONFIG_APP_CLAW_LUA_MODULE_BUTTON=n
-CONFIG_APP_CLAW_LUA_MODULE_BLE=n
-CONFIG_APP_CLAW_LUA_MODULE_BLE_HID=n
-CONFIG_APP_CLAW_LUA_MODULE_CAMERA=n
-CONFIG_APP_CLAW_LUA_MODULE_CAPABILITY=n
-CONFIG_APP_CLAW_LUA_MODULE_DELAY=n
-CONFIG_APP_CLAW_LUA_MODULE_DISPLAY=n
-CONFIG_APP_CLAW_LUA_MODULE_ENVIRONMENTAL_SENSOR=n
-CONFIG_APP_CLAW_LUA_MODULE_EVENT_PUBLISHER=n
-CONFIG_APP_CLAW_LUA_MODULE_HTTP_SERVER=n
-CONFIG_APP_CLAW_LUA_MODULE_JSON=n
-CONFIG_APP_CLAW_LUA_MODULE_THREAD=n
-CONFIG_APP_CLAW_LUA_MODULE_FUEL_GAUGE=n
-CONFIG_APP_CLAW_LUA_MODULE_IMAGE=n
-CONFIG_APP_CLAW_LUA_MODULE_IMU=n
-CONFIG_APP_CLAW_LUA_MODULE_IR=n
-CONFIG_APP_CLAW_LUA_MODULE_KNOB=n
-CONFIG_APP_CLAW_LUA_MODULE_LCD=n
-CONFIG_APP_CLAW_LUA_MODULE_LCD_TOUCH=n
-CONFIG_APP_CLAW_LUA_MODULE_LEDC=n
-CONFIG_APP_CLAW_LUA_MODULE_LED_STRIP=n
-CONFIG_APP_CLAW_LUA_MODULE_LVGL=n
-CONFIG_APP_CLAW_LUA_MODULE_MAGNETOMETER=n
-CONFIG_APP_CLAW_LUA_MODULE_SCI=n
-CONFIG_APP_CLAW_LUA_MODULE_STORAGE=n
-CONFIG_APP_CLAW_LUA_MODULE_SYSTEM=n
-CONFIG_APP_CLAW_LUA_MODULE_VISION=n
-CONFIG_APP_CLAW_CAP_IM_QQ=n
-CONFIG_APP_CLAW_CAP_IM_FEISHU=n
-CONFIG_APP_CLAW_CAP_IM_TG=n
-CONFIG_APP_CLAW_CAP_IM_WECHAT=n
-CONFIG_APP_CLAW_CAP_MCP_CLIENT=n
-CONFIG_APP_CLAW_CAP_MCP_SERVER=n
-CONFIG_APP_CLAW_CAP_LLM_INSPECT=n
-CONFIG_APP_CLAW_CAP_WEB_SEARCH=n
-CONFIG_APP_CLAW_CAP_ROUTER_MGR=n
-CONFIG_APP_CLAW_MEMORY_MODE_FULL=y
+CONFIG_SPIRAM_MEMTEST=n
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=3
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_RX_BA_WIN=3
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_VOLUME_COUNT=3
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=2048
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_HEAP_TASK_TRACKING=n
+CONFIG_LWIP_LOCAL_HOSTNAME="esp-claw"
+CONFIG_LWIP_MAX_SOCKETS=20
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=16
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_HARDWARE_AES=n
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_MMAP_FILE_NAME_LENGTH=32
 CONFIG_CLAW_CORE_STAGE_VERBOSITY_VERBOSE=y
-CONFIG_CLAW_AGENT_MGR_MAX_SUBAGENTS=2
-# ESP-Claw's HTTP connection reuse (http_reuse) is off, as on mpv2-claw:
-# the component must be in the build (claw_core REQUIRES it), the feature
-# is not wanted -- https://github.com/espressif/esp-claw/issues/101
-CONFIG_HTTP_REUSE_ENABLE=n
-
-# local-claw: the mpv2 movement players (robot/moves_mpe.inc) pace their 5 ms
-# frames with vTaskDelay(1) against esp_timer. At the IDF default of 100 Hz a
-# tick is 10 ms, so every table move would play at half speed and the jumps
-# would not leave the ground. mpv2 / mpv2-claw run at 1000 Hz; so does this.
-CONFIG_FREERTOS_HZ=1000
-
-# local-claw: 6 MB app + a 1 MB esp-sr model partition (see partitions.csv).
-CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
-
-# local-claw: LVGL for the ST7789 face (main/display). Same choices as
-# mpv2-claw's build: RGB565, the C library allocator (so a 150 KB GIF frame
-# buffer lands in PSRAM through the normal malloc policy instead of LVGL's
-# fixed pool), the stdio file driver on drive letter 'S' (83) so the GIF
-# decoder streams "S:/fs/display/x.gif", and LVGL's bundled GIF decoder,
-# which cap_display_face.c drives directly. Widgets the face does not use
-# are left at LVGL's defaults; they cost flash only when referenced.
-CONFIG_LV_CONF_SKIP=y
-CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LWIP_SNTP_MAX_SERVERS=2
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
 CONFIG_LV_USE_CLIB_SPRINTF=y
-CONFIG_LV_DEF_REFR_PERIOD=33
+CONFIG_VFS_MAX_COUNT=12
+CONFIG_LV_USE_TINY_TTF=y
+CONFIG_LV_TINY_TTF_FILE_SUPPORT=y
+CONFIG_LV_TINY_TTF_CACHE_GLYPH_CNT=128
+CONFIG_LV_TINY_TTF_CACHE_KERNING_CNT=256
+# Display page: GIF animations streamed from the storage partition
+# ("S:/fatfs/display/x.gif" -> stdio). GIF decodes to an RGB565 buffer in PSRAM.
+CONFIG_LV_ASSERT_HANDLER_INCLUDE="assert.h"
+CONFIG_LV_USE_GIF=y
 CONFIG_LV_USE_FS_STDIO=y
 CONFIG_LV_FS_STDIO_LETTER=83
 CONFIG_LV_FS_STDIO_PATH=""
 CONFIG_LV_FS_STDIO_CACHE_SIZE=4096
-CONFIG_LV_USE_GIF=y
-CONFIG_LV_USE_CANVAS=y
-CONFIG_LV_USE_LINE=y
-CONFIG_LV_USE_IMAGE=y
-CONFIG_LV_USE_LABEL=y
-CONFIG_LV_FONT_MONTSERRAT_14=y
-# Medium and large text for display_draw (main/skills/mpx_display_draw) and
-# Lua's display.text() sizes.
-CONFIG_LV_FONT_MONTSERRAT_28=y
-CONFIG_LV_FONT_MONTSERRAT_48=y
-CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
-CONFIG_LV_BUILD_EXAMPLES=n
-CONFIG_LV_BUILD_DEMOS=n
+CONFIG_MDNS_TASK_CREATE_FROM_SPIRAM=y
+CONFIG_MDNS_MEMORY_ALLOC_SPIRAM=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
 
-# local-claw: voice (main/voice). esp-sr's models: WakeNet 9 "Hi ESP", the
-# medium VADNet, WebRTC noise suppression (no model), no command recogniser;
-# packed into srmodels.bin and flashed to the `model` partition. Same set as
-# mpv2-claw's build; the AFE input layout they were measured with is in
-# mpx_voice_wake.c (WAKE_FORMAT_4CH).
-CONFIG_MODEL_IN_FLASH=y
-CONFIG_AFE_INTERFACE_V1=y
-CONFIG_SR_WN_WN9_HIESP=y
-CONFIG_SR_VADN_VADNET1_MEDIUM=y
-CONFIG_SR_NSN_WEBRTC=y
-CONFIG_SR_MN_CN_NONE=y
-CONFIG_SR_MN_EN_NONE=y
+# The LCD panel's own SPI DMA transmit buffer is internal-RAM-only by
+# hardware necessity, and there is nothing in this project that can move
+# it -- it belongs to the ESP-Claw LCD driver. What IS movable is
+# everything competing with it for that same internal, DMA-capable heap.
+# The LVGL render thread's own task stack is one of those competitors and
+# has no DMA requirement of its own (it is plain CPU-touched code, not a
+# hardware transmit buffer), so it is safe to push to PSRAM -- freeing
+# real internal headroom for the buffer that actually needs to be there.
+# Found this while chasing "spi_master: Failed to allocate priv TX
+# buffer" / "Draw bitmap failed: ESP_ERR_NO_MEM" flooding the log any time
+# a websocket (voice or OTA) stays open for a while: `voice connect`
+# logged the internal heap's largest free block at only 9216 bytes even
+# BEFORE the socket opened, which is too tight a margin for this firmware's
+# full feature set (Wi-Fi + LVGL + I2S + TLS) to share reliably.
+CONFIG_ESP_LVGL_ADAPTER_LVGL_THREAD_STACK_IN_PSRAM=y
 
-# local-claw: music (voice/cap_music.c). The player's own converters turn
-# whatever the station sends into 16 kHz mono 16-bit, the voice rate -- the
-# microphone shares the I2S clock and the wake word listens at 16 kHz, so
-# the speaker cannot run at anything else. cap_music.c refuses to compile
-# with a different RESAMPLE_DEST_RATE.
-CONFIG_ESP_AUDIO_SIMPLE_PLAYER_HTTP_EN=y
-CONFIG_ESP_AUDIO_SIMPLE_PLAYER_FILE_EN=y
-CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN=y
+#
+# BLE: OFF.
+#
+# Nothing in this firmware uses the radio for Bluetooth. The only BLE
+# consumers anywhere in ESP-Claw are lua_module_ble and lua_module_ble_hid,
+# and both are off (CONFIG_APP_CLAW_LUA_MODULE_BLE / _BLE_HID are not set).
+# With CONFIG_BT_ENABLED=y the controller and NimBLE host are still linked,
+# and the controller reserves its static working memory in internal .bss at
+# boot whether or not anything ever calls esp_bt_controller_init() -- that
+# is tens of KB of the one memory this firmware is short of (see the
+# ALWAYSINTERNAL notes in boards/*/sdkconfig.defaults.board), plus the
+# Wi-Fi/BT coexistence code it drags into IRAM. Found while bringing the
+# esp-sr audio front end up on mp4_esp32_core: the LCD's SPI DMA bounce
+# buffer could no longer be allocated once the AFE was created.
+#
+# To turn BLE back on for a Lua BLE skill, set CONFIG_BT_ENABLED=y and
+# restore the NimBLE sizing below (kept here, commented, so it is not lost):
+CONFIG_BT_ENABLED=n
+# CONFIG_BT_ENABLED=y
+# CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
+# CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=n
+# CONFIG_BTDM_CTRL_MODE_BTDM=n
+# CONFIG_BT_BLUEDROID_ENABLED=n
+# CONFIG_BT_NIMBLE_ENABLED=y
+# CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+# CONFIG_BT_NIMBLE_MAX_BONDS=2
+# CONFIG_BT_NIMBLE_MAX_CCCDS=2
+# CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+# CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+# CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT=n
+# CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
+# CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=6
+# CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=12
+# CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=12
+# CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=15
+# CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=64
+# CONFIG_BT_NIMBLE_ATT_MAX_PREP_ENTRIES=15
+# CONFIG_BT_NIMBLE_GATT_CLIENT=n
+# CONFIG_BT_NIMBLE_DYNAMIC_SERVICE=y
+# CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# CONFIG_BT_ALARM_MAX_NUM=20
+# CONFIG_BT_NIMBLE_PRINT_ERR_NAME=n
+# CONFIG_BT_CTRL_BLE_MAX_ACT=2
+# CONFIG_BT_CTRL_ADV_DUP_FILT_MAX=1
+# CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_SUPP=n
+# CONFIG_BT_CTRL_BLE_SCAN_DUPL=n
+
+# Wi-Fi static TX buffers: 8, not the default 16.
+#
+# With CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y the driver cannot use dynamic
+# TX buffers (Kconfig forbids the combination), so every static buffer is
+# ~1.6 KB of internal DMA memory allocated at esp_wifi_init() and never
+# returned: 16 of them is ~26 KB. The 32 cache TX buffers (in PSRAM) absorb
+# bursts from the TCP/IP stack before a static buffer is even needed, and
+# this firmware's traffic is an Opus voice stream plus a couple of PWA
+# websockets, not a bulk transfer, so 8 leaves headroom. Same reasoning as
+# the RX buffer counts above.
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+
+# See https://github.com/espressif/esp-claw/issues/101
+CONFIG_HTTP_REUSE_ENABLE=n
+
+# Audio Decoder Configuration
+CONFIG_AUDIO_DECODER_AAC_SUPPORT=y
+CONFIG_AUDIO_DECODER_MP3_SUPPORT=y
+CONFIG_AUDIO_DECODER_G711_SUPPORT=n
+CONFIG_AUDIO_DECODER_AMRNB_SUPPORT=n
+CONFIG_AUDIO_DECODER_AMRWB_SUPPORT=n
+CONFIG_AUDIO_DECODER_FLAC_SUPPORT=y
+CONFIG_AUDIO_DECODER_OPUS_SUPPORT=n
+CONFIG_AUDIO_DECODER_VORBIS_SUPPORT=n
+CONFIG_AUDIO_DECODER_ADPCM_SUPPORT=n
+CONFIG_AUDIO_DECODER_ALAC_SUPPORT=n
+CONFIG_AUDIO_DECODER_PCM_SUPPORT=n
+CONFIG_AUDIO_DECODER_SBC_SUPPORT=n
+CONFIG_AUDIO_DECODER_LC3_SUPPORT=n
+CONFIG_AUDIO_DECODER_G722_SUPPORT=n
+
+# Audio Encoder Configuration
+CONFIG_AUDIO_ENCODER_AAC_SUPPORT=y
+CONFIG_AUDIO_ENCODER_G711_SUPPORT=n
+CONFIG_AUDIO_ENCODER_AMRNB_SUPPORT=n
+CONFIG_AUDIO_ENCODER_AMRWB_SUPPORT=n
+CONFIG_AUDIO_ENCODER_OPUS_SUPPORT=n
+CONFIG_AUDIO_ENCODER_ADPCM_SUPPORT=n
+CONFIG_AUDIO_ENCODER_ALAC_SUPPORT=n
+CONFIG_AUDIO_ENCODER_PCM_SUPPORT=n
+CONFIG_AUDIO_ENCODER_SBC_SUPPORT=n
+CONFIG_AUDIO_ENCODER_LC3_SUPPORT=n
+CONFIG_AUDIO_ENCODER_G722_SUPPORT=n
+# For IDF 6: Support Cross-signed SSL Certificate
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
+
+# Vision/Image: Pixel Convert Support
+CONFIG_PIX_CVT_RGB565_TO_RGB565_SUPPORT=n
+CONFIG_PIX_CVT_RGB565_TO_RGB888_SUPPORT=n
+CONFIG_PIX_CVT_RGB565_TO_GRAY_SUPPORT=y
+CONFIG_PIX_CVT_RGB565_TO_HSV_SUPPORT=y
+CONFIG_PIX_CVT_RGB888_TO_RGB888_SUPPORT=n
+CONFIG_PIX_CVT_RGB888_TO_RGB565_SUPPORT=n
+CONFIG_PIX_CVT_RGB888_TO_GRAY_SUPPORT=n
+CONFIG_PIX_CVT_RGB888_TO_HSV_SUPPORT=y
+CONFIG_PIX_CVT_GRAY_TO_GRAY_SUPPORT=n
+CONFIG_PIX_CVT_HSV_TO_HSV_MASK_SUPPORT=n
+CONFIG_PIX_CVT_YUV_TO_RGB888_SUPPORT=n
+CONFIG_PIX_CVT_YUV_TO_RGB565_SUPPORT=n
+CONFIG_PIX_CVT_YUV_TO_GRAY_SUPPORT=n
+CONFIG_PIX_CVT_YUV_TO_HSV_SUPPORT=n
+CONFIG_PIX_CVT_YUV_TO_YUV_SUPPORT=n
+
+# IDF's system event task runs every Wi-Fi and IP handler, including
+# wifi_manager's. The default 2304 bytes is sized for IDF's own handlers; this
+# firmware chains a log-capture vprintf hook onto every ESP_LOGx, which costs
+# a few hundred bytes on whichever task logs. Headroom, not a fix -- the fix
+# is that main.c does its network-status work on its own task (see
+# main_net_status_task), so nothing heavy runs here.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# ---- Internal RAM: code that does not need to be in IRAM ------------------
+#
+# On the ESP32-S3, IRAM and DRAM are carved out of the same 512 KB of SRAM,
+# so every KB of code that lives in IRAM is a KB the heap does not get. A
+# -Og debug build of this firmware loads ~134 KB into IRAM. These are the
+# standard IDF "reduce IRAM usage" knobs: they move code that is never run
+# with the flash cache disabled out to flash (which, with
+# CONFIG_SPIRAM_XIP_FROM_PSRAM above, actually executes from PSRAM).
+#
+# -Os rather than -Og: a smaller IRAM footprint, a smaller app image (the
+# debug build had 4% of its 5 MB OTA slot left), and faster code -- -Og
+# is the least optimised of the three and esp-sr's AEC/WakeNet inference
+# is CPU-bound. Backtraces still resolve; only single-stepping gets worse.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+# Not CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH: it is only ~4 KB, and it is
+# unsafe if anything calls the heap from an IRAM ISR while the cache is off
+# (an OTA or NVS write), which is not something worth auditing for 4 KB.
+
+# Music (components/cap_music): the simple player hands out 16 kHz mono
+# 16-bit -- the voice rate, because the speaker and the always-listening
+# microphone share one I2S clock on this board.
 CONFIG_AUDIO_SIMPLE_PLAYER_RESAMPLE_DEST_RATE=16000
 CONFIG_ESP_AUDIO_SIMPLE_PLAYER_CH_CVT_EN=y
 CONFIG_AUDIO_SIMPLE_PLAYER_CH_CVT_DEST=1
 CONFIG_ESP_AUDIO_SIMPLE_PLAYER_BIT_CVT_EN=y
 CONFIG_AUDIO_SIMPLE_PLAYER_BIT_CVT_DEST_16BIT=y
-# ---- Internal RAM: mpv2-claw's budget (Phase 6) ---------------------------
-#
-# With the agent, Wi-Fi, LVGL and esp-sr all in one image, internal RAM runs
-# out before voice starts: the I2S driver could not allocate its DMA buffers
-# when the wake word opened the microphone ("i2s_alloc_dma_desc: allocate DMA
-# buffer failed"), and esp_codec_dev then enabled the half-configured channel
-# and the robot rebooted in i2s_tx_channel_start. These are mpv2-claw's
-# settings for the same board and the same feature set (its
-# sdkconfig.defaults has the full reasoning for each).
-#
-# Wi-Fi buffers. With SPIRAM_TRY_ALLOCATE_WIFI_LWIP the static RX and TX
-# buffers are ~1.6 KB of internal DMA memory each, held forever: 3 + 8
-# instead of 10 + 16 is ~24 KB back. Traffic is an Opus stream and a few
-# PWA sockets, not bulk transfers.
-CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=3
-CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=6
-CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
-CONFIG_ESP_WIFI_RX_BA_WIN=3
-# Wi-Fi code out of IRAM: on the S3, IRAM and DRAM share the same SRAM, so
-# every KB of IRAM is a KB the heap does not get.
-CONFIG_ESP_WIFI_IRAM_OPT=n
-CONFIG_ESP_WIFI_RX_IRAM_OPT=n
-# Same idea: -Os (smaller IRAM footprint and image, faster than -Og for
-# esp-sr's inference) and FreeRTOS / ringbuffer code in flash (which runs
-# from PSRAM with SPIRAM_XIP_FROM_PSRAM).
-CONFIG_COMPILER_OPTIMIZATION_SIZE=y
-CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
-CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
-# The system event task runs every Wi-Fi/IP handler; 2304 is sized for
-# IDF's own handlers only.
-CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# mpv2-uros: no Raspberry Pi; the robot is a ROS 2 node itself (components/mpx_uros).
+# CONFIG_MP4_PI_LINK_ENABLE is not set

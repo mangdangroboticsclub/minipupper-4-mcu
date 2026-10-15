@@ -1,0 +1,17 @@
+## IDF Component Manager Manifest File
+##
+## esp_audio_simple_player is already in the build for ESP-Claw's Lua audio
+## module; the version range matches that module's manifest so both resolve
+## to the same copy.
+dependencies:
+  claw_cap:
+    path: ../../third-party/esp-claw/components/claw_modules/claw_cap
+  espressif/cjson:
+    version: "^1.7.19"
+  espressif/esp_audio_simple_player: ^0.9.6
+  mpx_audio:
+    path: ../mpx_audio
+  mpx_voice_link:
+    path: ../mpx_voice_link
+  mpx_voice_wake:
+    path: ../mpx_voice_wake

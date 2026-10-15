@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pi_announce -- show this Pi's IP on the robot's screen from boot.
 
-The robot (mpx-dog, mpv2 or mpv2-claw firmware) shows the Pi's IP next to its own while
+The robot (mpv2 / mpv2-claw firmware) shows the Pi's IP next to its own while
 HOST_INFO frames keep arriving on the J-PI link. Normally only the ROS bridge
 sends them. This small service sends one every 2 s from boot -- and NOTHING
 else:
@@ -22,7 +22,7 @@ program write at the same time the worst case is one frame failing its CRC.
 It stays quiet while another program it can see has the port open, since
 the bridge sends its own HOST_INFO.
 
-Needs mpx-dog, mpv2-claw or mpv2 firmware that shows the address for HOST_INFO
+Needs the mpv2-claw (or mpv2) firmware that shows the address for HOST_INFO
 alone, in any link state. The wire format is mini_pupper_esp_bridge's
 protocol.py (pi_protocol.h), version 1.
 """

@@ -1,0 +1,14 @@
+## The Opus wrappers used by the reference firmware for this board.
+##
+## 78/esp-opus-encoder is the xiaozhi author's component: libopus plus thin
+## C++ wrappers (OpusEncoderWrapper, OpusDecoderWrapper, OpusResampler).
+## Matching it matters because the far end of this socket is a xiaozhi server
+## that expects exactly the framing this library produces.
+dependencies:
+  78/esp-opus-encoder: "~2.4.0"
+
+  ## Already in the build via ESP-Claw's cap_im_platform, but declared here
+  ## too: relying on another component's dependency means this one breaks
+  ## the day that component is disabled, for reasons that would take a while
+  ## to trace back.
+  espressif/esp_websocket_client: "^1.4.0"

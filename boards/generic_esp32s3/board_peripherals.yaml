@@ -1,0 +1,21 @@
+# Deliberately almost empty.
+#
+# The MP4 board declares an ST7789, an ES7210 and a BMI270, and
+# esp_board_manager_init() is ESP_ERROR_CHECK'd in main.c -- so on hardware
+# where those chips are absent, device init fails and the board panics into a
+# boot loop. Nothing here can fail that way, because nothing here needs a chip
+# to be present.
+#
+# One I2C master is kept so `selftest --i2c --other-board` has a bus to scan.
+# GPIO 1 and 2 match the MP4 board; on a devkit they are ordinary pins and
+# probing them with nothing attached simply finds nothing.
+version: 1.0.0
+peripherals:
+  - name: i2c_master
+    type: i2c
+    role: master
+    config:
+      port: 0
+      pins:
+        sda: 1
+        scl: 2

@@ -1,0 +1,14 @@
+## IDF Component Manager Manifest File
+##
+## display_service and lvgl only enter the build because system_ui and the
+## Lua display modules ask for them by path. This component asks for itself,
+## so it does not quietly depend on one of those being enabled.
+dependencies:
+  claw_cap:
+    path: ../../third-party/esp-claw/components/claw_modules/claw_cap
+  display_service:
+    path: ../../third-party/esp-claw/components/common/display_service
+  lvgl/lvgl:
+    version: "^9.5.0"
+  espressif/cjson:
+    version: "^1.7.19"

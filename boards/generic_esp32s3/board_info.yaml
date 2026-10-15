@@ -1,0 +1,5 @@
+board: generic_esp32s3
+chip: esp32s3
+version: 1.0.0
+description: "Any ESP32-S3 devkit - for exercising ESP-Claw without MP4 hardware"
+manufacturer: "generic"

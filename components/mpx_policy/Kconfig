@@ -1,0 +1,29 @@
+menu "RL policy on the robot (mpx_policy)"
+
+    config MP4_POLICY_ENABLE
+        bool "Run RL walk policies on the ESP32-S3 (`policy` console command)"
+        default y
+
+    config MP4_POLICY_ROBOT
+        string "This robot (a policy for another one needs `force`)"
+        default "sku1"
+        depends on MP4_POLICY_ENABLE
+        help
+            Compared with the robot named in a policy file. A policy trained
+            on another robot's model (another body, other servos) can do
+            anything on this one, so it does not start without `force`.
+
+    config MP4_POLICY_INTERNAL_RESERVE_KB
+        int "Keep the network in internal RAM if this much (KB) stays free"
+        default 96
+        range 0 1024
+        depends on MP4_POLICY_ENABLE
+        help
+            The network's weights (about 130 KB) are read in full at every
+            50 Hz step. From internal RAM that takes well under a
+            millisecond; from PSRAM several. The policy goes to internal
+            RAM when, after it, at least this much internal RAM is still
+            free (Wi-Fi, TLS and the tasks need it); otherwise to PSRAM.
+            0: always PSRAM.
+
+endmenu

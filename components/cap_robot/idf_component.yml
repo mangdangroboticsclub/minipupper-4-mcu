@@ -1,0 +1,12 @@
+## IDF Component Manager Manifest File
+##
+## A component has to declare what its CMake REQUIRES names. claw_cap does
+## reach the build anyway -- app_claw pulls it in -- but relying on that means
+## this component only builds while something else happens to want the same
+## thing, and the failure when that changes is "unknown name: claw_cap" from
+## the requirement expander, which points at the wrong file.
+dependencies:
+  claw_cap:
+    path: ../../third-party/esp-claw/components/claw_modules/claw_cap
+  espressif/cjson:
+    version: "^1.7.19"

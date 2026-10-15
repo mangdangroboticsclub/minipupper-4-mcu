@@ -1,0 +1,12 @@
+idf_component_register(
+    SRCS
+        "src/cap_robot.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        claw_cap
+        mpx_robot
+        mpx_wasm
+    PRIV_REQUIRES
+        espressif__cjson
+)

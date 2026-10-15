@@ -1,0 +1,21 @@
+{
+  "name": "MPX-Dog Robot Control",
+  "short_name": "MPX-Dog",
+  "description": "Offline-first control interface for the MPX quadruped robot",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "background_color": "#1e1e2e",
+  "theme_color": "#1e1e2e",
+  "categories": ["robotics", "utilities"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": []
+}

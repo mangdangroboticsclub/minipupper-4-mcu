@@ -1,0 +1,89 @@
+# Generic ESP32-S3 devkit: ESP-Claw, the web UI and the agent, with none of
+# the MP4 hardware.
+
+# 8 MB flash. Safe on a 16 MB module too -- it simply uses less of it, and
+# CONFIG_ESPTOOLPY_FLASHSIZE is what picks the partition table.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# ---- PSRAM ------------------------------------------------------------
+#
+# Required, not an optimisation. ESP-Claw's scheduler, event router, Lua VM
+# and agent buffers all expect external RAM; without it app_claw_start()
+# returns ESP_ERR_NO_MEM long before the ~512 KB of internal SRAM is actually
+# exhausted, because what runs out first is one contiguous block.
+#
+# Octal, because that is what the 8 MB modules use: WROOM-1 N8R8 and N16R8 are
+# ...R8 = 8 MB octal. The 2 MB ...R2 parts are quad. Guessing the mode wrong
+# is not a build error -- the module simply is not found at boot.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_MEMTEST=n
+
+# PSRAM is REQUIRED for this firmware. There is no graceful degradation here
+# and attempting one was a mistake worth recording.
+#
+# SPIRAM_IGNORE_NOTFOUND was set here so a devkit without PSRAM would warn and
+# boot. To make that legal, XIP_FROM_PSRAM had to come off -- IGNORE_NOTFOUND
+# cannot rescue a boot that has already placed data at a fixed PSRAM address.
+# Turning XIP off is what produced this crash:
+#
+#   assert failed: spi_flash_disable_interrupts_caches_and_other_cpu
+#   cache_utils.c:127 (esp_task_stack_is_sane_cache_disabled())
+#
+# ESP-Claw puts task stacks in PSRAM by default -- claw_task_memory_caps()
+# returns MALLOC_CAP_SPIRAM for every policy except INTERNAL_ONLY, and
+# cap_mcp_server does it with no Kconfig guard at all. A flash read from such
+# a task disables the instruction cache, and with the cache off its own stack
+# is unreachable. XIP_FROM_PSRAM is what makes that safe: with code running
+# from PSRAM the cache is never disabled for a flash read. It is not an
+# optimisation, it is load-bearing, which is why the project-wide
+# sdkconfig.defaults sets it.
+#
+# So: keep the project's PSRAM settings, and let a board with no PSRAM fail
+# loudly at boot with "PSRAM not found" rather than crash later inside a file
+# read. Without PSRAM app_claw_start() returns ESP_ERR_NO_MEM anyway, so there
+# was never a working headless configuration to preserve.
+CONFIG_SPIRAM_IGNORE_NOTFOUND=n
+
+# Kept on so the `selftest` console command is built. Its robot checks report
+# nothing found, which is the correct answer here; mpx_robot_init() failing is
+# non-fatal by design.
+CONFIG_MP4_ROBOT_ENABLE=y
+
+# Off. esp-sr's models need a 2904K "model" partition that only exists in
+# partitions_16MB.csv, and none of it is testable without microphones.
+CONFIG_MP4_VOICE_ENABLE=n
+
+# No panel, so nothing should try to drive one.
+CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=n
+CONFIG_APP_CLAW_SYSTEM_UI_ENABLE=n
+
+# No codecs on this board.
+CONFIG_CODEC_ES7210_SUPPORT=n
+
+# Console on UART0, with USB-Serial-JTAG as a secondary sink.
+#
+# Not USB-Serial-JTAG as the primary. Devkits differ in which USB socket is
+# wired to what: some expose only a CH340/CP2102 on U0TXD/U0RXD, some expose
+# only the ESP32-S3's native USB, and some expose both as two COM ports. If
+# the console is USB-JTAG-only and you are watching the UART bridge, you see
+# the ROM bootloader (which always prints on UART0) and then nothing at all --
+# no second-stage bootloader banner, no app log, no panic backtrace. A crash
+# then looks like a silent boot loop.
+#
+# UART0 primary is the setting that is right on every devkit, and the
+# secondary sink means the native-USB port still shows the same output when
+# there is one. Log goes to both; keyboard input for the console commands
+# comes from UART0.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# Hold on panic instead of rebooting instantly. On an unknown board the
+# backtrace is the whole point, and a 0-second reboot delay scrolls it past.
+# The MP4 build keeps the reboot -- a robot should recover on its own.
+CONFIG_ESP_SYSTEM_PANIC_PRINT_HALT=y

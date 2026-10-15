@@ -1,0 +1,35 @@
+dependencies:
+  espressif/cjson:
+    version: "^1.7.19"
+  cap_im_local:
+    path: ../../third-party/esp-claw/components/claw_capabilities/cap_im_local
+
+  lua_module_http_server:
+    rules:
+      - if: $CONFIG{APP_CLAW_CAP_LUA} == True
+      - if: $CONFIG{APP_CLAW_LUA_MODULE_HTTP_SERVER} == True
+    path: ../../third-party/esp-claw/components/lua_modules/lua_module_http_server
+
+  # The /v1 robot API lives in this component; declare what it needs rather
+  # than relying on main pulling the same things in.
+  mpx_robot:
+    rules:
+      - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../mpx_robot
+
+  mpx_wasm:
+    rules:
+      - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../mpx_wasm
+
+  mpx_util:
+    rules:
+      - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+    path: ../mpx_util
+
+  # /v1/lua is a front door onto ESP-Claw's Lua runtime, not a second one.
+  cap_lua:
+    rules:
+      - if: $CONFIG{MP4_ROBOT_ENABLE} == True
+      - if: $CONFIG{APP_CLAW_CAP_LUA} == True
+    path: ../../third-party/esp-claw/components/claw_capabilities/cap_lua

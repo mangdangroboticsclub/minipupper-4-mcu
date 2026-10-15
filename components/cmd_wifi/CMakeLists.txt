@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS
+        "cmd_wifi.c"
+    INCLUDE_DIRS
+        "."
+    PRIV_REQUIRES
+        console
+        app_config
+        wifi_manager
+        mpx_wifi_tune
+)

@@ -1,0 +1,145 @@
+# MangDang MP4 ESP32 CORE board defaults
+# SoC: ESP32-S3-WROOM-1-N16R8 (16 MB QIO flash + 8 MB octal PSRAM)
+
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Flash: 16 MB, QIO 80 MHz.
+# tools/cmake/flash_partition_defaults.cmake scrapes FLASHSIZE from this file
+# and auto-selects partitions_16MB.csv, so do not set the partition table here.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Octal PSRAM, 80 MHz.
+#
+# ALWAYSINTERNAL is 0: every plain malloc() goes to PSRAM, and internal RAM
+# is only handed out to callers that ask for it by capability (task stacks,
+# DMA buffers, FreeRTOS objects, anything using MALLOC_CAP_INTERNAL/DMA).
+# That is what the project-level sdkconfig.defaults -- and upstream ESP-Claw
+# -- already say; this file used to override it to 256, on the reasoning
+# that halving the IDF default of 512 was enough. It was, until esp-sr's
+# audio front end came up: with 256 the boot log read
+#
+#   heap [after agent]:     internal 16039 free / 14848 largest
+#   heap [after wake init]: internal  1995 free /  1152 largest
+#
+# and every LCD flush failed for want of a ~5 KB DMA bounce buffer. The
+# agent, Lua, cJSON and LWIP make thousands of sub-256-byte allocations
+# that have no business in the one memory the hardware actually needs;
+# at 0 they all move out. The cost is PSRAM latency on small allocations,
+# which upstream ESP-Claw lives with on the same chip.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_MEMTEST=n
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Cache sizes: IDF defaults (16 KB instruction, 32 KB data), same as Santy
+# Control -- NOT the 32 KB / 64 KB this file used to set.
+#
+# Cache is carved out of the same 512 KB of internal SRAM the heap lives in,
+# so the bigger caches cost 48 KB of internal heap. On the first boot of the
+# ported voice stack that was the difference between Santy Control starting
+# and this board dying at the console REPL: "heap [before agent]: internal
+# 18531 free / 18432 largest", then esp_console_new_repl_uart() failing with
+# ESP_FAIL because a 10 KB task stack could not be allocated. The larger
+# caches came from the earlier on-device MultiNet configuration; with
+# recognition in the cloud there is nothing here that needs them more than
+# it needs the RAM. Spelled out rather than left to the defaults so the
+# Board Manager's sdkconfig consistency check notices if they drift.
+CONFIG_ESP32S3_INSTRUCTION_CACHE_16KB=y
+CONFIG_ESP32S3_DATA_CACHE_32KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_32B=y
+
+# Audio codecs.
+# CODEC_DUMMY_SUPPORT backs `chip: internal` on audio_dac -- the MAX98357A has
+# no control interface, so there is nothing to drive but I2S.
+CONFIG_CODEC_DUMMY_SUPPORT=y
+CONFIG_CODEC_ES7210_SUPPORT=y
+# esp_codec_dev takes an i2c_master_bus_handle_t rather than the legacy port.
+CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
+
+# Board device gates
+CONFIG_ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT=y
+CONFIG_ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT=y
+
+# IMU: OFF on purpose.
+#
+# ESP-Claw's lua_module_imu has a perfectly good BMI270 backend, but mpx_robot
+# also needs the IMU -- the gait loop and the skill event watcher both read it
+# at 10-20 Hz -- and two owners calling bmi270_sensor_create() on one chip is
+# not a thing that works. mpx_robot owns it, and Lua reaches it through
+# lua_module_mpx_robot instead.
+CONFIG_APP_CLAW_LUA_MODULE_IMU=n
+
+# The magnetometer is a separate chip with no second owner, so the stock
+# module is fine.
+# The BMM150 sits behind the BMI270's auxiliary master (ASCX/ASDX), not on
+# the main I2C bus, so this module has nothing it can reach. Reading it needs
+# a BMI2_AUX sensor config on the BMI270 instead.
+CONFIG_APP_CLAW_LUA_MODULE_MAGNETOMETER=n
+
+# Quadruped stack
+CONFIG_MP4_ROBOT_ENABLE=y
+CONFIG_MP4_ROBOT_SERVO_BOARD_VARIANT=1
+
+# Servos OFF for now: this board is on the bench with only the display and
+# the speaker/mics connected, no servo harness. With no driver boards
+# answering, driver_board_init() only produces an ESP_ERR_NO_MEM on the SPI3
+# bus and a "Driver board init FAILED" line, and the gait task never starts
+# anyway -- but it still claims SPI3 and its DMA buffers before Wi-Fi and the
+# agent get their turn at internal RAM. Set this back to y (or delete the
+# line: it defaults to y) once the harness is plugged in.
+CONFIG_MP4_ROBOT_SERVO_ENABLE=y
+
+# Console is the CH340K USB-UART bridge on U0TXD/U0RXD (GPIO 43/44).
+# The native USB pins IO19/IO20 go to bare test points, so USB-Serial-JTAG --
+# which nearly every other ESP-Claw board selects -- is NOT available here.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# The PWA opens two WebSockets per browser tab and polls on top of that.
+# The app-level sdkconfig.defaults already sets CONFIG_LWIP_MAX_SOCKETS=20;
+# these two are the TIME_WAIT fixes the MPX-Dog firmware needed before its
+# socket pool would survive a reconnect storm. Same fix as
+# boards/santy_control/sdkconfig.defaults.board.
+CONFIG_LWIP_TCP_MSL=5000
+CONFIG_LWIP_SO_LINGER=y
+
+# -- Voice: cloud-as-brain (docs/voice-plan.md) --------------------------
+#
+# This board's board_peripherals.yaml/board_devices.yaml pins are identical
+# to Santy Control's for I2C, I2S and the display, so the same voice stack
+# (components/mpx_voice_link, components/mpx_voice_wake) runs unchanged here.
+#
+# Explicitly on, even though MP4_VOICE_ENABLE defaults to y in
+# main/Kconfig.projbuild -- worth stating rather than relying on the default.
+CONFIG_MP4_VOICE_ENABLE=y
+
+# ---- Offline voice models (see CONFIG_MP4_VOICE_ENABLE above) ----------
+#
+# These pack into the 1024K "model" partition (partitions_16MB.csv -- it was
+# 2904K when MultiNet lived there). WakeNet + VAD only, matching
+# Santy Control: docs/voice-plan.md's Option A (cloud-as-brain) does all
+# transcription server-side, so MultiNet (on-device fixed-phrase command
+# matching, ~2.1 MB) would spend most of the model partition on a capability
+# nothing in this firmware calls. This board previously shipped with
+# CONFIG_SR_MN_EN_MULTINET5_SINGLE_RECOGNITION_QUANT8=y from before the
+# cloud-as-brain architecture was decided -- replaced with NONE below to
+# match Santy Control and free the space.
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_WN_WN9_HIESP=y            # wake word: "Hi ESP", ~296K
+CONFIG_SR_VADN_VADNET1_MEDIUM=y     # neural VAD (AFE's vad_init), ~292K
+CONFIG_SR_NSN_WEBRTC=y              # classic NS, no flash model of its own
+CONFIG_SR_MN_EN_NONE=y              # no on-device command matching -- see above
+CONFIG_SR_MN_CN_NONE=y
+
+# -- Voice: what the cloud model may call directly -----------------------
+#
+# Only the quick, direct tools (screen, robot moves, MPX skills). Everything
+# else goes through ask_robot_agent to the onboard ESP-Claw agent, which
+# keeps xiaozhi's per-turn tool list short and the conversation snappy.
+# See the MP4_MCP_GROUPS help in main/Kconfig.projbuild.
+CONFIG_MP4_MCP_GROUPS="cap_display cap_robot cap_mpx_skill"

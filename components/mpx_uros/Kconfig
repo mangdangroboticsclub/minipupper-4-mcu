@@ -1,0 +1,41 @@
+menu "micro-ROS (ROS 2 on the ESP32-S3)"
+
+    config MP4_UROS_ENABLE
+        bool "Start the micro-ROS node"
+        default y
+        help
+            The robot is a ROS 2 node on Wi-Fi. It needs a micro-ROS agent on
+            a PC (README_UROS.md). The agent's address is set at run time with
+            `uros agent <ip>` on the serial console; until then the node
+            waits and costs nothing.
+
+    config MP4_UROS_AGENT_IP
+        string "Default agent IP (empty = set it with `uros agent <ip>`)"
+        default ""
+        depends on MP4_UROS_ENABLE
+
+    config MP4_UROS_AGENT_PORT
+        int "Default agent UDP port"
+        range 1 65535
+        default 8888
+        depends on MP4_UROS_ENABLE
+
+    config MP4_UROS_DOMAIN_ID
+        int "Default ROS_DOMAIN_ID"
+        range 0 232
+        default 0
+        depends on MP4_UROS_ENABLE
+
+    config MP4_UROS_IMU_HZ
+        int "Default imu/data_raw rate (Hz, 0 = off)"
+        range 0 200
+        default 100
+        depends on MP4_UROS_ENABLE
+
+    config MP4_UROS_JOINT_HZ
+        int "Default joint_states rate (Hz, 0 = off)"
+        range 0 100
+        default 50
+        depends on MP4_UROS_ENABLE
+
+endmenu

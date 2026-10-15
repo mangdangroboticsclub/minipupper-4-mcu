@@ -1,0 +1,88 @@
+# Peripherals for the MangDang MP4 ESP32 CORE board.
+#
+# Source: MP4ESP32_CORE_SCH_0827.pdf (Altium, 4 sheets, 2026-08-27).
+# The audio, I2C and LCD pins are identical to the HeySanta board in the
+# xiaozhi-esp32 tree, so the values below are the ones already proven on
+# this silicon rather than a first reading of the schematic.
+#
+# MCU: ESP32-S3-WROOM-1-N16R8 (16 MB QIO flash, 8 MB octal PSRAM).
+version: 1.0.0
+peripherals:
+  # Shared I2C bus: ES7210 audio ADC, BMI270 IMU, BMM150 magnetometer.
+  # Schematic nets IO1_I2C_SDA / IO2_I2C_SCL, 1 kOhm external pull-ups (R15/R16).
+  - name: i2c_master
+    type: i2c
+    role: master
+    config:
+      port: 0
+      pins:
+        sda: 1
+        scl: 2
+
+  # I2S0 runs full duplex: ES7210 in, MAX98357A out, sharing MCLK/BCLK/WS.
+  # The anchor/alias below is the esp_box_3 idiom for a duplex port.
+  # Schematic nets: IO38_I2S_MCK, IO14_I2S_BCK, IO13_I2S_WS,
+  #                 IO12_I2S_DI (ES7210 -> ESP), IO45_I2S_DO (ESP -> MAX98357A).
+  - name: i2s_audio_out
+    type: i2s
+    role: master
+    format: std-out
+    config: &i2s0_config
+      port: 0
+      sample_rate_hz: 24000           # HeySanta runs 24 kHz in both directions
+      mclk_multiple: 256
+      data_bit_width: 16
+      slot_bit_width: I2S_SLOT_BIT_WIDTH_AUTO
+      slot_mode: I2S_SLOT_MODE_STEREO
+      slot_mask: I2S_STD_SLOT_BOTH
+      ws_width: 16
+      pins:
+        mclk: 38
+        bclk: 14
+        ws: 13
+        dout: 45
+        din: 12
+
+  - name: i2s_audio_in
+    type: i2s
+    role: master
+    format: std-in
+    # i2s0 works in duplex mode, so reuse the i2s_audio_out configuration.
+    config: *i2s0_config
+
+  # ST7789 TFT on connector J4 (AFC34-S10FIA, 10 pins).
+  # Write-only 3-wire SPI: there is no MISO line on the connector.
+  # Schematic nets: IO40_LCD_MOSI, IO41_LCD_SCK.
+  #
+  # SPI3, not SPI2 -- the hosts are swapped from the first bring-up on
+  # purpose. On the ESP32-S3, GP-SPI2 has six chip-select lines and GP-SPI3
+  # has three. The servo bus needs four (CN3..CN6); the display needs one.
+  # With the display here on SPI2 the fourth driver board failed to attach:
+  #
+  #   E DRVBOARD: spi_bus_add_device RL (CN6, GPIO5) failed: ESP_ERR_NO_MEM
+  #
+  # (that is how the driver reports "no free CS slot"). Both hosts are routed
+  # through the GPIO matrix on these pins either way, so nothing about speed
+  # or DMA changes; only the CS count does. driver_board.c has the other half.
+  - name: spi_display
+    type: spi
+    role: master
+    config:
+      spi_bus_config:
+        spi_port: SPI3_HOST
+        data0_io_num: 40              # MOSI / SDA
+        sclk_io_num: 41               # SCK / SCL
+        max_transfer_sz: 153600       # 320 * 240 * 2, a full frame
+
+  # LCD backlight. Q2 is a SI2301 P-channel FET, so the PWM is inverted:
+  # a low level turns the backlight ON. HeySanta ships invert=true for the
+  # same circuit on the same pin.
+  - name: ledc_backlight
+    type: ledc
+    role: none
+    config:
+      gpio_num: 42
+      freq_hz: 5000
+      duty: 0
+      duty_resolution: LEDC_TIMER_10_BIT
+      output_invert: true

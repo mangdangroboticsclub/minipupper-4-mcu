@@ -1,0 +1,12 @@
+## esp_codec_dev is a PRIVATE dependency of esp_board_manager, so its headers
+## are not on our include path just because that component is in the build.
+## Declaring it here is what puts esp_codec_dev.h within reach.
+##
+## The `matches` rule mirrors esp_board_manager's own: the component exists
+## only when the selected board declares an audio_codec device. A board
+## without one (generic_esp32s3) still builds -- mpx_audio.c compiles a stub
+## under the same Kconfig symbol.
+dependencies:
+  espressif/esp_codec_dev:
+    matches:
+    - if: $CONFIG{ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT} == True

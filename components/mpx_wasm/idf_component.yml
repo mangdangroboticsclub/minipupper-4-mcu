@@ -1,0 +1,15 @@
+## IDF Component Manager Manifest File
+dependencies:
+  # The interpreter. Pinned to the same major the MPX-Dog firmware shipped --
+  # the host-function signature strings in wasm_host_functions.cc are matched
+  # against WAMR's own parser, so a major bump wants re-testing, not a rebuild.
+  espressif/wasm-micro-runtime:
+    version: "^1.3.2~1"
+
+  # registry.cc parses the "mpx" custom section as JSON.
+  espressif/cjson:
+    version: "^1.7.19"
+
+  # claw_paths, for the DATA root the skills directory hangs off.
+  claw_core:
+    path: ../../third-party/esp-claw/components/claw_modules/claw_core

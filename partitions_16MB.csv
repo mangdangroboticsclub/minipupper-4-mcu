@@ -1,0 +1,20 @@
+# mpv2-claw, 16 MB (ESP32-S3-WROOM-1-N16R8)
+#
+# nvs + phy_init sit exactly where mpv2 had them (table at 0x8000, nvs at
+# 0x9000), so moving a robot from mpv2 to mpv2-claw keeps its Wi-Fi, servo
+# calibration and every other NVS setting.
+#
+# One 7 MB factory app instead of mp4-claw's 2 x 5 MB OTA pair: ESP-Claw +
+# voice + mpv2's movement tables + the Pi link come to ~5.2 MB, which does not
+# fit a 5 MB slot, and nothing in this firmware updates itself over the air.
+#
+# system  (read-only FAT) - web UIs, skills, Lua modules shipped with the build
+# storage (FAT)           - agent sessions + memory, user skills, mpx_skills/
+# model   (spiffs)        - esp-sr wake word ("Hi ESP")
+# Name,    Type, SubType, Offset,    Size
+nvs,       data, nvs,     0x9000,    0x6000
+phy_init,  data, phy,     0xF000,    0x1000
+factory,   app,  factory, 0x10000,   0x700000
+model,     data, spiffs,  0x710000,  0x100000
+system,    data, fat,     0x810000,  0x290000
+storage,   data, fat,     0xAA0000,  0x560000

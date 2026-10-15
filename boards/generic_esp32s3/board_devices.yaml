@@ -1,0 +1,8 @@
+# No devices. See board_peripherals.yaml for why.
+#
+# Everything that would use one degrades on purpose rather than failing:
+# cap_display returns ESP_ERR_NOT_SUPPORTED with no panel, mpx_robot_init()
+# and mpx_wasm_init() are non-fatal in main.c, and the self-test reports SKIP
+# instead of FAIL.
+version: 1.0.0
+devices: []

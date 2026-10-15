@@ -1,0 +1,13 @@
+## IDF Component Manager Manifest File
+dependencies:
+  # The BMI270 on the shared I2C bus. Same driver ESP-Claw's lua_module_imu
+  # uses, so the two configure the chip identically -- but only one of them
+  # may own it at a time. See the ownership note in src/mpx_imu.cc.
+  espressif/bmi270_sensor:
+    version: "*"
+
+  # bmi270_sensor takes an i2c_bus_handle_t rather than the raw
+  # i2c_master_bus_handle_t the board manager hands out, so mpx_imu.cc builds
+  # one over the same port and pins.
+  espressif/i2c_bus:
+    version: "*"
