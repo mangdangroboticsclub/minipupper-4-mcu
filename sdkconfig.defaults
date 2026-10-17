@@ -1,0 +1,277 @@
+# Project sdkconfig defaults.
+# Seeded so a fresh `idf.py reconfigure` / `fullclean` keeps these values.
+
+# Settings that lived only in the committed sdkconfig until Phase 5, when
+# sdkconfig had to be regenerated (ESP-Claw's Kconfig, the partition table,
+# XIP) and they would otherwise have silently fallen back to their Kconfig
+# defaults: the product's AP name and cloud ingress, WebSocket support in
+# esp_http_server (the PWA chat and the Pi link ride on it), 240 MHz, and
+# the Wi-Fi/lwIP buffer trims from the Phase 4 internal-RAM work.
+CONFIG_APP_AP_SSID="MPX-Dog 01"
+CONFIG_APP_CHAT_SERVER_IP="35.220.215.160"
+CONFIG_HTTPD_WS_SUPPORT=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
+
+# The HTTP server (network/http_server.cc) sets max_open_sockets = 12, which
+# needs LWIP_MAX_SOCKETS >= 12 + 3 (internal) = 15. Default 10 caused
+# "max_open_sockets is too large (max allowed 7)" and the server failed to
+# start. 16 left a little headroom for the websocket chat + PWA serving;
+# Phase 5 (the on-device agent) adds the LLM's HTTP client and the agent's
+# own HTTP requests on top, so 20, as mpv2-claw.
+CONFIG_LWIP_MAX_SOCKETS=20
+
+# Socket recycling.  With frequent PWA polling (wifi/status, robot/status,
+# marketplace), the default TIME_WAIT of 2*MSL = 2*60 s = 120 s made closed
+# sockets linger for two minutes and exhaust the 16-socket pool ("Failed to
+# create socket", accept errno 23).  Shorten MSL to 10 s (TIME_WAIT ~20 s) and
+# enable SO_LINGER so the marketplace proxy can force an immediate close.
+CONFIG_LWIP_TCP_MSL=10000
+CONFIG_LWIP_SO_LINGER=y
+
+# External PSRAM. Board is ESP32-S3-WROOM-1-N16R8 = 8 MB OCTAL PSRAM (see
+# partitions.csv). It was disabled, so the WASM sandbox's 128 KB linear
+# memory fell back to internal DRAM and every skill failed with
+# "Failed to instantiate". Enabling octal PSRAM gives it 8 MB to work in.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# local-claw: internal RAM is the scarce resource once the screen, audio and
+# the wake word are up -- with small mallocs forced internal (it was 16384)
+# the robot booted with 2 KB of internal RAM left, and the Wi-Fi driver could
+# not get packet buffers ("wifi:m f null", phones dropped off the AP). Same
+# policy as mpv2-claw, which runs the same voice and display code: plain
+# malloc() may use PSRAM at any size, Wi-Fi/lwIP and mbedTLS buffers prefer
+# it, and 64 KB of internal RAM stays reserved for what must be internal
+# (DMA, task stacks, the Wi-Fi driver's static buffers).
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=0
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# local-claw, Phase 5: the on-device agent (ESP-Claw, third-party/esp-claw)
+# runs its tasks on PSRAM stacks -- claw_task_create() asks for
+# MALLOC_CAP_SPIRAM whenever FREERTOS_TASK_CREATE_ALLOW_EXT_MEM is on, with no
+# Kconfig to say otherwise -- and those tasks read and write files, which is
+# flash. Without XIP a flash access from a PSRAM-stacked task disables the
+# cache and IDF asserts (cache_utils.c: esp_task_stack_is_sane_cache_disabled).
+# With XIP the code and .rodata execute from PSRAM and the cache is never
+# switched off for a flash read, so any task may touch the filesystem. This
+# retires the "a PSRAM-stacked task must never touch flash" rule from the
+# earlier phases (.cursor/PORT_NOTES.md). The price: the app's ~2.6 MB of
+# code and ~1.9 MB of .rodata are copied into PSRAM at boot (about 4.5 MB of
+# the 8 MB), the same trade mpv2-claw makes. .bss and .noinit may live in
+# PSRAM too, which is where ESP-Claw's EXT_RAM_BSS_ATTR buffers want to be.
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+CONFIG_SPIRAM_ALLOW_NOINIT_SEG_EXTERNAL_MEMORY=y
+
+# Phase 5: app_main now also brings up the agent (JSON config, skill scan);
+# 3584 bytes was tight already. mpv2-claw's value. The read-only `system`
+# partition adds a VFS mount (the default of 8 is close to full with the
+# console, lwIP, eventfd and two LittleFS mounts).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+CONFIG_VFS_MAX_COUNT=12
+
+# Phase 5: ESP-Claw's own switches. The agent core, the web chat channel
+# (cap_im_local), files, memory, sessions, the scheduler, the skill manager,
+# subagents and cap_system (time sync, device info) stay at their defaults
+# (on). Off, and why:
+#   CLI          -- there is no esp_console in this firmware; the robot is
+#                   driven from the PWA and /v1, not a serial prompt.
+#   CAP_LUA      -- ESP-Claw's Lua is georgik/lua, this firmware's is
+#                   espressif/lua (main/lua): two Lua components cannot be
+#                   linked at once. The robot's own Lua stays; the agent does
+#                   not get a Lua tool. (Takes the lua_* modules with it.)
+#   IM_QQ/FEISHU/TG/WECHAT -- chat platforms the robot does not use; each is
+#                   a long-polling task and a chunk of .rodata.
+#   MCP_CLIENT/SERVER -- the robot's tools are registered natively
+#                   (main/agent/agent_caps.cc); the voice gateway's MCP goes
+#                   through voice_tools.cc, not ESP-Claw.
+#   LLM_INSPECT  -- image inspection; the robot has no camera of its own.
+#   WEB_SEARCH   -- needs a Brave/Tavily key there is no settings page for.
+#   ROUTER_MGR   -- the agent editing its own event routes is not something
+#                   the robot's users asked for; the rules file is seeded.
+# MEMORY_MODE_FULL as mpv2-claw: the extraction passes go to the same
+# gateway and are what makes "remember that I..." work across sessions.
+# Stage verbosity VERBOSE: the "Round N: tool(...)" notes become the step
+# lines in the PWA's activity panel. Subagents capped at 2 (each is another
+# agent core with a 16 KB stack).
+CONFIG_APP_CLAW_ENABLE_CLI=n
+CONFIG_APP_CLAW_CAP_LUA=n
+# The Lua drivers and modules are separate symbols that do NOT depend on
+# APP_CLAW_CAP_LUA, and app_lua_modules.c includes each enabled one's
+# header unconditionally -- while the components themselves (lua_modules/,
+# not vendored) only enter the build through manifest rules that also need
+# CAP_LUA. Every one must be off, or the build stops at
+# "lua_driver_adc.h: No such file or directory".
+CONFIG_APP_CLAW_LUA_DRIVER_ADC=n
+CONFIG_APP_CLAW_LUA_DRIVER_GPIO=n
+CONFIG_APP_CLAW_LUA_DRIVER_I2C=n
+CONFIG_APP_CLAW_LUA_DRIVER_MCPWM=n
+CONFIG_APP_CLAW_LUA_DRIVER_PCNT=n
+CONFIG_APP_CLAW_LUA_DRIVER_RMT=n
+CONFIG_APP_CLAW_LUA_DRIVER_TOUCH=n
+CONFIG_APP_CLAW_LUA_DRIVER_UART=n
+CONFIG_APP_CLAW_LUA_MODULE_AUDIO=n
+CONFIG_APP_CLAW_LUA_MODULE_BOARD_MANAGER=n
+CONFIG_APP_CLAW_LUA_MODULE_BUTTON=n
+CONFIG_APP_CLAW_LUA_MODULE_BLE=n
+CONFIG_APP_CLAW_LUA_MODULE_BLE_HID=n
+CONFIG_APP_CLAW_LUA_MODULE_CAMERA=n
+CONFIG_APP_CLAW_LUA_MODULE_CAPABILITY=n
+CONFIG_APP_CLAW_LUA_MODULE_DELAY=n
+CONFIG_APP_CLAW_LUA_MODULE_DISPLAY=n
+CONFIG_APP_CLAW_LUA_MODULE_ENVIRONMENTAL_SENSOR=n
+CONFIG_APP_CLAW_LUA_MODULE_EVENT_PUBLISHER=n
+CONFIG_APP_CLAW_LUA_MODULE_HTTP_SERVER=n
+CONFIG_APP_CLAW_LUA_MODULE_JSON=n
+CONFIG_APP_CLAW_LUA_MODULE_THREAD=n
+CONFIG_APP_CLAW_LUA_MODULE_FUEL_GAUGE=n
+CONFIG_APP_CLAW_LUA_MODULE_IMAGE=n
+CONFIG_APP_CLAW_LUA_MODULE_IMU=n
+CONFIG_APP_CLAW_LUA_MODULE_IR=n
+CONFIG_APP_CLAW_LUA_MODULE_KNOB=n
+CONFIG_APP_CLAW_LUA_MODULE_LCD=n
+CONFIG_APP_CLAW_LUA_MODULE_LCD_TOUCH=n
+CONFIG_APP_CLAW_LUA_MODULE_LEDC=n
+CONFIG_APP_CLAW_LUA_MODULE_LED_STRIP=n
+CONFIG_APP_CLAW_LUA_MODULE_LVGL=n
+CONFIG_APP_CLAW_LUA_MODULE_MAGNETOMETER=n
+CONFIG_APP_CLAW_LUA_MODULE_SCI=n
+CONFIG_APP_CLAW_LUA_MODULE_STORAGE=n
+CONFIG_APP_CLAW_LUA_MODULE_SYSTEM=n
+CONFIG_APP_CLAW_LUA_MODULE_VISION=n
+CONFIG_APP_CLAW_CAP_IM_QQ=n
+CONFIG_APP_CLAW_CAP_IM_FEISHU=n
+CONFIG_APP_CLAW_CAP_IM_TG=n
+CONFIG_APP_CLAW_CAP_IM_WECHAT=n
+CONFIG_APP_CLAW_CAP_MCP_CLIENT=n
+CONFIG_APP_CLAW_CAP_MCP_SERVER=n
+CONFIG_APP_CLAW_CAP_LLM_INSPECT=n
+CONFIG_APP_CLAW_CAP_WEB_SEARCH=n
+CONFIG_APP_CLAW_CAP_ROUTER_MGR=n
+CONFIG_APP_CLAW_MEMORY_MODE_FULL=y
+CONFIG_CLAW_CORE_STAGE_VERBOSITY_VERBOSE=y
+CONFIG_CLAW_AGENT_MGR_MAX_SUBAGENTS=2
+# ESP-Claw's HTTP connection reuse (http_reuse) is off, as on mpv2-claw:
+# the component must be in the build (claw_core REQUIRES it), the feature
+# is not wanted -- https://github.com/espressif/esp-claw/issues/101
+CONFIG_HTTP_REUSE_ENABLE=n
+
+# local-claw: the mpv2 movement players (robot/moves_mpe.inc) pace their 5 ms
+# frames with vTaskDelay(1) against esp_timer. At the IDF default of 100 Hz a
+# tick is 10 ms, so every table move would play at half speed and the jumps
+# would not leave the ground. mpv2 / mpv2-claw run at 1000 Hz; so does this.
+CONFIG_FREERTOS_HZ=1000
+
+# local-claw: 6 MB app + a 1 MB esp-sr model partition (see partitions.csv).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# local-claw: LVGL for the ST7789 face (main/display). Same choices as
+# mpv2-claw's build: RGB565, the C library allocator (so a 150 KB GIF frame
+# buffer lands in PSRAM through the normal malloc policy instead of LVGL's
+# fixed pool), the stdio file driver on drive letter 'S' (83) so the GIF
+# decoder streams "S:/fs/display/x.gif", and LVGL's bundled GIF decoder,
+# which cap_display_face.c drives directly. Widgets the face does not use
+# are left at LVGL's defaults; they cost flash only when referenced.
+CONFIG_LV_CONF_SKIP=y
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_DEF_REFR_PERIOD=33
+CONFIG_LV_USE_FS_STDIO=y
+CONFIG_LV_FS_STDIO_LETTER=83
+CONFIG_LV_FS_STDIO_PATH=""
+CONFIG_LV_FS_STDIO_CACHE_SIZE=4096
+CONFIG_LV_USE_GIF=y
+CONFIG_LV_USE_CANVAS=y
+CONFIG_LV_USE_LINE=y
+CONFIG_LV_USE_IMAGE=y
+CONFIG_LV_USE_LABEL=y
+CONFIG_LV_FONT_MONTSERRAT_14=y
+# Medium and large text for display_draw (main/skills/mpx_display_draw) and
+# Lua's display.text() sizes.
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+CONFIG_LV_BUILD_EXAMPLES=n
+CONFIG_LV_BUILD_DEMOS=n
+
+# local-claw: voice (main/voice). esp-sr's models: WakeNet 9 "Hi ESP", the
+# medium VADNet, WebRTC noise suppression (no model), no command recogniser;
+# packed into srmodels.bin and flashed to the `model` partition. Same set as
+# mpv2-claw's build; the AFE input layout they were measured with is in
+# mpx_voice_wake.c (WAKE_FORMAT_4CH).
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_AFE_INTERFACE_V1=y
+CONFIG_SR_WN_WN9_HIESP=y
+CONFIG_SR_VADN_VADNET1_MEDIUM=y
+CONFIG_SR_NSN_WEBRTC=y
+CONFIG_SR_MN_CN_NONE=y
+CONFIG_SR_MN_EN_NONE=y
+
+# local-claw: music (voice/cap_music.c). The player's own converters turn
+# whatever the station sends into 16 kHz mono 16-bit, the voice rate -- the
+# microphone shares the I2S clock and the wake word listens at 16 kHz, so
+# the speaker cannot run at anything else. cap_music.c refuses to compile
+# with a different RESAMPLE_DEST_RATE.
+CONFIG_ESP_AUDIO_SIMPLE_PLAYER_HTTP_EN=y
+CONFIG_ESP_AUDIO_SIMPLE_PLAYER_FILE_EN=y
+CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN=y
+CONFIG_AUDIO_SIMPLE_PLAYER_RESAMPLE_DEST_RATE=16000
+CONFIG_ESP_AUDIO_SIMPLE_PLAYER_CH_CVT_EN=y
+CONFIG_AUDIO_SIMPLE_PLAYER_CH_CVT_DEST=1
+CONFIG_ESP_AUDIO_SIMPLE_PLAYER_BIT_CVT_EN=y
+CONFIG_AUDIO_SIMPLE_PLAYER_BIT_CVT_DEST_16BIT=y
+# ---- Internal RAM: mpv2-claw's budget (Phase 6) ---------------------------
+#
+# With the agent, Wi-Fi, LVGL and esp-sr all in one image, internal RAM runs
+# out before voice starts: the I2S driver could not allocate its DMA buffers
+# when the wake word opened the microphone ("i2s_alloc_dma_desc: allocate DMA
+# buffer failed"), and esp_codec_dev then enabled the half-configured channel
+# and the robot rebooted in i2s_tx_channel_start. These are mpv2-claw's
+# settings for the same board and the same feature set (its
+# sdkconfig.defaults has the full reasoning for each).
+#
+# Wi-Fi buffers. With SPIRAM_TRY_ALLOCATE_WIFI_LWIP the static RX and TX
+# buffers are ~1.6 KB of internal DMA memory each, held forever: 3 + 8
+# instead of 10 + 16 is ~24 KB back. Traffic is an Opus stream and a few
+# PWA sockets, not bulk transfers.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=3
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_RX_BA_WIN=3
+# Wi-Fi code out of IRAM: on the S3, IRAM and DRAM share the same SRAM, so
+# every KB of IRAM is a KB the heap does not get.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+# Same idea: -Os (smaller IRAM footprint and image, faster than -Og for
+# esp-sr's inference) and FreeRTOS / ringbuffer code in flash (which runs
+# from PSRAM with SPIRAM_XIP_FROM_PSRAM).
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+# The system event task runs every Wi-Fi/IP handler; 2304 is sized for
+# IDF's own handlers only.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# rl branch: the RL walk on the ESP32-S3, nothing else (docs/RL.md).
+# sdkconfig is not in git, so these keep a fresh clone the same build.
+# CONFIG_APP_DISPLAY_ENABLE is not set
+# CONFIG_APP_AGENT_ENABLE is not set
+# CONFIG_APP_LUA_ENABLE is not set
+# CONFIG_APP_AUDIO_ENABLE is not set
+# CONFIG_APP_VOICE_ENABLE is not set
+# CONFIG_APP_PI_LINK_ENABLE is not set
+# CONFIG_APP_RL_LINK_ENABLE is not set
+# CONFIG_APP_IMU_LOG_ENABLE is not set
+# CONFIG_APP_UROS_ENABLE is not set
+CONFIG_APP_POLICY_ENABLE=y

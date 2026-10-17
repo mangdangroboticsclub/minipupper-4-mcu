@@ -1,0 +1,13 @@
+[Unit]
+Description=Let the robot's app shut down / restart this Pi (tools/pi/pi_power.py)
+After=network.target
+
+[Service]
+User=root
+EnvironmentFile=-/etc/default/pi-power
+ExecStart=/usr/bin/python3 /usr/local/bin/pi_power.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

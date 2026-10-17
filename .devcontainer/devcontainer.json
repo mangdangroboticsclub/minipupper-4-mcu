@@ -1,0 +1,56 @@
+{
+	"name": "ESP-IDF Dev Container (MPX-Dog)",
+	"build": {
+		"dockerfile": "Dockerfile",
+		"args": {
+			"IDF_TAG": "v5.5.4"
+		}
+	},
+	"workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+	"mounts": [
+		"source=mpx-dog-idf-build,target=${containerWorkspaceFolder}/build,type=volume",
+		"source=mpx-dog-ccache,target=/root/.ccache,type=volume",
+		"source=mpx-dog-pip-cache,target=/root/.cache/pip,type=volume",
+		"source=mpx-dog-espressif,target=/root/.espressif,type=volume",
+		"source=/dev,target=/dev,type=bind"
+	],
+	"containerEnv": {
+		"IDF_PATH": "/opt/esp/idf",
+		"IDF_TOOLS_PATH": "/root/.espressif",
+		"CCACHE_DIR": "/root/.ccache",
+		"LC_ALL": "C.UTF-8",
+		"LANG": "C.UTF-8"
+	},
+	"postCreateCommand": "bash .devcontainer/post-create.sh",
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"terminal.integrated.defaultProfile.linux": "bash",
+				"idf.gitPath": "/usr/bin/git",
+				"idf.espIdfPath": "/opt/esp/idf",
+				"files.associations": {
+					"*.svelte": "svelte"
+				},
+				"[svelte]": {
+					"editor.defaultFormatter": "svelte.svelte-vscode"
+				},
+				"tailwindCSS.includeLanguages": {
+					"svelte": "html"
+				}
+			},
+			"extensions": [
+				"espressif.esp-idf-extension",
+				"espressif.esp-idf-web",
+				"ms-vscode.cmake-tools",
+				"svelte.svelte-vscode",
+				"bradlc.vscode-tailwindcss",
+				"dbaeumer.vscode-eslint"
+			]
+		}
+	},
+	"runArgs": [
+		"--init",
+		"--privileged"
+	],
+	"remoteUser": "root"
+}

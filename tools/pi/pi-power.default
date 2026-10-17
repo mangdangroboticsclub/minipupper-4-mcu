@@ -1,0 +1,4 @@
+# /etc/default/pi-power -- settings for pi_power.py
+# Must match menuconfig -> App Config -> APP_PI_POWER_PORT / APP_PI_POWER_TOKEN.
+PI_POWER_PORT=8091
+PI_POWER_TOKEN=mpx-pi-power

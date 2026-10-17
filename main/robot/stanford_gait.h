@@ -1,0 +1,79 @@
+/* stanford_gait.h
+ *
+ * C port of the Stanford Pupper trot gait controller.
+ * Ported from mangdangroboticsclub/StanfordQuadruped (mini_pupper branch):
+ *   src/Gaits.py            - phase scheduler (overlap / swing phases)
+ *   src/StanceController.py - stance feet slide backward, z relaxes to ref
+ *   src/SwingLegController.py - Raibert touchdown target, triangular lift
+ *
+ * Full 3-axis command (forward, strafe, yaw), same as the reference
+ * minipupperesp firmware this file is taken from. Units: millimetres,
+ * output z is DOWNWARD-positive body height (matches sg_foot_t).
+ *
+ * Leg index order (Stanford convention, matches the IK helpers):
+ *   0 = Front Right, 1 = Front Left, 2 = Rear Right, 3 = Rear Left
+ */
+#ifndef STANFORD_GAIT_H
+#define STANFORD_GAIT_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    float x;   /* forward offset from hip, mm (+ = forward)          */
+    float y;   /* lateral offset from hip, mm (+ = robot's LEFT)     */
+    float z;   /* body height above foot, mm, downward-positive      */
+} sg_foot_t;
+
+/* leg origins in the body frame, mm (FR, FL, RR, RL) - Mini Pupper
+ * geometry: LEG_FB = 0.059 m, LEG_LR+ABDUCTION = 0.0235+0.026 m     */
+#define SG_ORIGIN_X  59.0f
+#define SG_ORIGIN_Y  49.5f
+
+/* Gait timing, ticks run at SG_DT seconds (call stanford_gait_step at
+ * this rate). Values are the NATIVE Mini Pupper 2 (Pro) hardware config,
+ * verified directly against the live repo:
+ *   mangdangroboticsclub/mini_pupper_2_bsp, branch mini_pupper_2pro_bsp,
+ *   Python_Module/MangDang/mini_pupper/Config.py
+ *   dt = 0.015 s, overlap_time = 0.09 s, swing_time = 0.1 s
+ *   -> overlap_ticks = int(0.09/0.015) = 6
+ *   -> swing_ticks   = int(0.10/0.015) = 6   (Python int() truncates)   */
+#define SG_DT            0.015f
+#define SG_OVERLAP_TICKS 6
+#define SG_SWING_TICKS   6
+#define SG_STANCE_TICKS  (2*SG_OVERLAP_TICKS + SG_SWING_TICKS)   /* 18 */
+#define SG_PHASE_LENGTH  (2*SG_OVERLAP_TICKS + 2*SG_SWING_TICKS) /* 24 */
+
+/* Same Config.py:
+ *   default_z_ref = -0.08 m -> 80 mm body height
+ *   z_clearance   =  0.03 m -> 30 mm swing lift
+ *   max_x_velocity = max_y_velocity = 0.20 m/s -> 200 mm/s full-stick     */
+#define SG_NATIVE_HEIGHT_MM     80.0f
+#define SG_NATIVE_CLEARANCE_MM  20.0f
+#define SG_NATIVE_VX_MM_S      200.0f
+
+/* Duration one foot spends on the ground per cycle, seconds (0.27 s). */
+float stanford_gait_stance_secs(void);
+
+/* Reset gait state: all feet to neutral stance at height_mm, tick 0.
+ * Call once when the mode is (re)activated. */
+void stanford_gait_reset(float height_mm);
+
+/* Advance the gait one tick (SG_DT seconds) and return the four foot
+ * targets. Full 3-axis command like the original Controller.py:
+ *   vx_mm_s      : forward body velocity, mm/s (+ = forward)
+ *   vy_mm_s      : lateral body velocity, mm/s (+ = left)
+ *   wz_rad_s     : yaw rate, rad/s (+ = turn left / CCW)
+ *   height_mm    : body height reference, mm (downward-positive)
+ *   clearance_mm : peak swing foot lift, mm
+ *   feet[4]      : output, order FR, FL, RR, RL                       */
+void stanford_gait_step(float vx_mm_s, float vy_mm_s, float wz_rad_s,
+                        float height_mm, float clearance_mm,
+                        sg_foot_t feet[4]);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* STANFORD_GAIT_H */
