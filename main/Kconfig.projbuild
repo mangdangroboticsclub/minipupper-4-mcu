@@ -1,0 +1,737 @@
+menu "MPX Dog App Configuration"
+
+# The phone app is pwa-claw/ (mpv2-claw's app, ported). The two older designs
+# (pwa/, pwa-redesign/) and the PWA_DESIGN choice were removed in Phase 6.
+
+config APP_LITTLEFS_PARTITION
+    string "LittleFS partition label"
+    default "storage"
+    help
+        Partition label for the LittleFS filesystem used to store
+        .wasm binaries and other persistent data.
+
+config APP_AP_SSID
+    string "Wi-Fi AP SSID"
+    default "MPX-Dog"
+    help
+        SSID broadcast by the robot's soft-AP.
+
+config APP_AP_PASSWORD
+    string "Wi-Fi AP password (empty = open)"
+    default ""
+    help
+        Leave empty for an open (no-password) access point.
+
+config APP_AP_CHANNEL
+    int "Wi-Fi AP channel"
+    range 1 13
+    default 6
+    help
+        2.4 GHz channel for the soft-AP.
+
+config APP_AP_MAX_CONN
+    int "Max Wi-Fi AP connections"
+    range 1 10
+    default 4
+    help
+        Maximum number of simultaneous station connections.
+
+## ── LEGACY: SCSCL serial-bus servos ─────────────────────────────────
+##
+## These three symbols configured the Feetech SCSCL bus on UART1 (TX=4, RX=5,
+## at the baud rate below). That whole transport is gone: the twelve servos are
+## now driven by four AT32F413 boards over SPI, and SPI has no baud rate to set
+## (see main/robot/board_config.h).
+##
+## The symbols are KEPT rather than deleted for one reason: a deleted Kconfig
+## symbol leaves its `CONFIG_...=y` line in an existing sdkconfig with nowhere
+## to go, which is noise on every build for anyone with an old config. Nothing
+## reads them any more, and nothing should. From a fresh sdkconfig this whole
+## block can go.
+
+choice APP_SERVO_MOTOR
+    prompt "Servo motor type (LEGACY - unused, the servos are on SPI now)"
+    default APP_SERVO_MOTOR_OLD
+    help
+        Was: select the servo motor model, which decided the UART baud rate.
+        No longer connected to anything.
+
+config APP_SERVO_MOTOR_OLD
+    bool "Old motor (0.5 Mbaud)"
+    help
+        Original servo motor communicating at 500 000 baud.
+
+config APP_SERVO_MOTOR_NEW
+    bool "New motor (1 Mbaud)"
+    help
+        New servo motor communicating at 1 000 000 baud.
+
+endchoice
+
+config APP_SERVO_BAUD_RATE
+    int
+    default 500000 if APP_SERVO_MOTOR_OLD
+    default 1000000 if APP_SERVO_MOTOR_NEW
+    help
+        Was: the SCSCL bus baud rate. Unused - see the note above.
+
+config APP_SERVO_HOLD_CURRENT_MA
+    int "Servo hold (powered-down) current limit (mA)"
+    range 0 1500
+    default 50
+    help
+        When the robot is powered down (the controller's Power button, or
+        POST /v1/robot/power {"action":"hold"}), the servos do NOT go fully
+        limp. They stay in position control with the current cap lowered to
+        this value. The legs keep their pose if this is enough to hold it;
+        otherwise they sag naturally as gravity wins against the low cap.
+
+        This is the per-servo MAX current in milliamps, not a forced draw: a
+        lightly loaded joint still only sources what it needs. 0 disables the
+        hold and powers the servos fully off (limp), exactly like the old
+        behaviour.
+
+config APP_STA_AUTO_CONNECT
+    bool "Auto-connect to saved STA network on boot"
+    default y
+    help
+        If enabled and saved Wi-Fi credentials exist in NVS,
+        the robot will automatically connect to the saved network
+        in STA mode in addition to running its own AP.
+
+config APP_CHAT_SERVER_IP
+    string "Cloud chat backend server IP or hostname"
+    default "echo"
+    help
+        IP address or hostname of the upstream cloud chat backend.
+        The robot's Core 0 will connect to this server via WebSocket
+        to relay chat messages.
+
+        Special value "echo" enables local echo mode — the robot
+        simply echoes back user input without any cloud connection.
+        This is useful for testing the chat UI pipeline.
+
+config APP_CHAT_SERVER_PORT
+    int "Cloud chat backend server port"
+    range 1 65535
+    default 8080
+    help
+        TCP port of the upstream cloud chat backend.
+
+config APP_CHAT_WS_PATH
+    string "Cloud chat WebSocket path"
+    default "/v1/chat/ingress"
+    help
+        WebSocket path on the upstream cloud backend.
+        The robot connects to ws://SERVER_IP:PORT/WS_PATH.
+
+# ── IMU logging ────────────────────────────────────────────────
+
+    config APP_IMU_LOG_ENABLE
+        bool "Enable periodic IMU data logging"
+        default y
+        help
+            When enabled, the IMU background task prints accelerometer
+            and gyroscope data to the log at a configurable interval.
+            Disable to eliminate IMU log spam in production.
+
+    config APP_IMU_LOG_INTERVAL
+        int "IMU log interval (reads between prints)"
+        range 1 10000
+        default 50
+        help
+            Number of IMU reads between each log line.  At a 20 Hz
+            poll rate, 50 iterations ≈ 2.5 s between prints.
+            Increase this value (e.g. 500 ≈ 25 s) to reduce log spam
+            without fully disabling the log.
+
+    choice APP_IMU_LOG_LEVEL
+        prompt "IMU log verbosity"
+        default APP_IMU_LOG_LEVEL_INFO
+        help
+            Controls which ESP log macro is used for periodic IMU data.
+            Use INFO for normal visibility, DEBUG/VERBOSE to reduce
+            noise (only shown when the corresponding global log level
+            is enabled).
+
+config APP_IMU_LOG_LEVEL_INFO
+    bool "INFO"
+    help
+        Use ESP_LOGI — always visible at default log level.
+
+config APP_IMU_LOG_LEVEL_DEBUG
+    bool "DEBUG"
+    help
+        Use ESP_LOGD — hidden unless CONFIG_LOG_DEFAULT_LEVEL >= DEBUG.
+
+config APP_IMU_LOG_LEVEL_VERBOSE
+    bool "VERBOSE"
+    help
+        Use ESP_LOGV — hidden unless CONFIG_LOG_DEFAULT_LEVEL >= VERBOSE.
+
+endchoice
+
+config APP_ROBOT_UUID
+    string "Unique robot identifier (UUID)"
+    default "MPX-DOG-01"
+    help
+        Unique identifier for this robot, used as the routing header
+        in upstream binary frames. This is sent as plain-text AAD
+        in the encrypted frame header.
+
+        In production, this should be a factory-provisioned UUID
+        and should match the key in NVS.
+
+config APP_CHAT_AES_KEY_HEX
+    string "AES-256-GCM key (hex, 64 hex chars)"
+    default "0000000000000000000000000000000000000000000000000000000000000001"
+    help
+        256-bit AES key in hexadecimal format (64 hex characters).
+        Used for encrypting the upstream binary frame payload.
+
+        WARNING: The default key is INSECURE and for development only.
+        In production, provision a unique key per device via NVS.
+
+# ── WASM skill encryption ─────────────────────────────────────────
+
+config APP_MPX_WASM_ENCRYPTION
+    bool "Enable MPXE WASM skill decryption"
+    default y
+    help
+        Enables the MPXE (MPX Encrypted) WASM blob decryption
+        pipeline in the firmware.  When enabled, wasm.run() will
+        detect "MPXE" magic bytes in WASM files and decrypt them
+        using the robot's AES-256 root key (APP_CHAT_AES_KEY_HEX).
+
+        Encrypted skills are hardware-bound: a skill encrypted
+        for one robot cannot be loaded on another.  Plain .wasm
+        files (developer mode) continue to load without encryption
+        regardless of this setting.
+
+        Disable this to save ~2 KB of flash if WASM encryption
+        is not needed.
+
+config APP_MPX_EFUSE_BLK
+    int "eFuse block for robot AES key (0 = use Kconfig)"
+    range 0 5
+    default 0
+    help
+        eFuse key block index where the robot's AES-256 root key
+        is stored.  Set to 0 (default) to read the key from the
+        APP_CHAT_AES_KEY_HEX Kconfig string.
+
+        In production, set this to 1-5 to read from a hardware
+        eFuse block that was provisioned at manufacturing time.
+        The key block must be configured as read-protected so it
+        cannot be read by application code via esp_efuse_read_*()
+        — mbedTLS will use it directly via the hardware crypto
+        engine's key register.
+
+        NOTE: eFuse key block support is not yet implemented.
+        Setting this to a non-zero value currently does nothing;
+        the key is always read from Kconfig.
+
+# ── Lua scripting ────────────────────────────────────────────────────
+
+config APP_LUA_ENABLE
+    bool "Enable Lua scripting VM"
+    default y
+    help
+        Embeds Lua 5.5 with robot bindings and modules.
+        The robot.gait(), robot.set_servo_angle(), etc. functions
+        become available in Lua scripts.
+
+if APP_LUA_ENABLE
+
+config APP_LUA_HEAP_SIZE
+    int "Lua VM heap size (KB)"
+    range 16 256
+    default 64
+    help
+        Heap allocation for the Lua interpreter. Larger values allow
+        more complex scripts and larger data structures.
+
+config APP_LUA_TASK_STACK_SIZE
+    int "Lua async task stack size (bytes)"
+    default 4096
+    help
+        Stack size for async Lua script tasks (future use).
+
+endif  # APP_LUA_ENABLE
+
+# ── System monitor: CPU, RAM and task load ───────────────────────────
+
+config APP_SYSMON_ENABLE
+    bool "System monitor (CPU, RAM and task load)"
+    default y
+    select FREERTOS_GENERATE_RUN_TIME_STATS
+    help
+        A low-priority task (main/util/sys_monitor.cc) samples per-core
+        CPU load, internal RAM, PSRAM and the busiest tasks. The latest
+        sample is served at GET /v1/system/stats (the PWA's monitor
+        widget) and a summary is printed to the serial log.
+
+        Turns on FreeRTOS run-time stats, which costs one timer read per
+        context switch.
+
+if APP_SYSMON_ENABLE
+
+config APP_SYSMON_SAMPLE_MS
+    int "Sample period (ms)"
+    range 500 60000
+    default 2000
+    help
+        How often the task table and heaps are sampled. The PWA widget's
+        CPU figures cover the last period.
+
+config APP_SYSMON_LOG_INTERVAL_S
+    int "Serial log interval (s, 0 = never)"
+    range 0 3600
+    default 30
+    help
+        How often a summary goes to the serial log. CPU in that line is
+        averaged over the whole interval. A task with under 512 bytes of
+        stack headroom is reported as a warning on the same schedule.
+
+endif  # APP_SYSMON_ENABLE
+
+# ── Audio: ES7210 microphones + MAX98357A speaker on I2S0 ───────────
+
+config APP_AUDIO_ENABLE
+    bool "Microphone and speaker (ES7210 + MAX98357A on I2S0)"
+    default y
+    help
+        Bring up the board's audio path (main/audio/mpx_audio.c): the
+        speaker for voice replies and the Pi's music, the microphones for
+        the wake word and voice. Off: every audio call answers
+        ESP_ERR_NOT_SUPPORTED and the voice features are unavailable.
+
+# ── Raspberry Pi (ROS 2) link on J-PI ────────────────────────────────
+# mpv2's protocol (main/pi/pi_protocol.h), ported from mpv2-claw.
+
+config APP_PI_LINK_ENABLE
+    bool "Raspberry Pi (ROS) link on the J-PI header"
+    default y
+    help
+        Start the UART1 link to a Raspberry Pi running the ROS 2 bridge
+        (ros2jazzympv2/mini_pupper_esp_bridge). With nothing on J-PI the
+        robot behaves exactly as before. A Pi that holds HOST_PRESENT
+        (IO3) high and heartbeats with WANT_CONTROL takes the robot into
+        slave mode: only the Pi moves it until it lets go or times out.
+
+if APP_PI_LINK_ENABLE
+
+config APP_PI_LINK_UART_BAUD
+    int "Pi link UART baud rate"
+    default 921600
+    help
+        Must match the bridge's `baud` parameter. 921600 carries the 50 Hz
+        STATE stream, the Pi's music and its camera picture.
+
+config APP_PI_LINK_TIMEOUT_MS
+    int "Heartbeat timeout (ms)"
+    range 100 5000
+    default 300
+    help
+        Without a heartbeat for this long the robot leaves slave mode,
+        stops and stands.
+
+config APP_PI_LINK_STATE_HZ
+    int "Default STATE telemetry rate (Hz)"
+    range 5 100
+    default 50
+    help
+        How often the robot streams servo angles, IMU and velocity to the
+        Pi when the heartbeat does not ask for a rate.
+
+config APP_PI_LINK_REQUIRE_HOST_PIN
+    bool "Require HOST_PRESENT (IO3) high for slave mode"
+    default y
+    help
+        Slave mode needs both a fresh WANT_CONTROL heartbeat and the
+        yellow HOST_PRESENT wire high. Turn off only for bench tests with
+        a bare UART and no IO3 wire.
+
+config APP_PI_POWER_PORT
+    int "Pi power service port (tools/pi/pi_power.py)"
+    range 1 65535
+    default 8091
+    help
+        The app's "Shut down Pi" / "Restart Pi" buttons ask the robot,
+        and the robot asks the Pi's pi_power service at
+        http://<Pi IP>:<this port>. The Pi's IP comes from HOST_INFO
+        (pi_announce or the bridge), so both must be on the same network.
+        Must match PI_POWER_PORT in /etc/default/pi-power on the Pi.
+
+config APP_PI_POWER_TOKEN
+    string "Pi power service token"
+    default "mpx-pi-power"
+    help
+        Shared secret sent as X-MPX-Token. Must match PI_POWER_TOKEN in
+        /etc/default/pi-power on the Pi. Change it on both sides so other
+        devices on the network can't switch the Pi off.
+
+config APP_RL_LINK_ENABLE
+    bool "RL host link (mp4-link protocol) on the Pi UART"
+    default y
+    help
+        mp4-link's mp3-link protocol on the same UART as the ROS link:
+        a policy on the Pi sends all twelve joint targets (SET_ALL) and
+        gets positions, currents, temperatures and the IMU back (STATE)
+        every tick, with mp4-link's watchdog and current/temperature
+        guard. Its first frame parks the gait; with no frame for
+        APP_RL_RELEASE_MS the robot stands up again on its own. Host
+        side: python -m mp3link (ros2jazzympv2 rl_link/), port
+        /dev/ttyAMA0 at APP_PI_LINK_UART_BAUD. Protocol notes in
+        main/pi/RL_LINK.md.
+
+if APP_RL_LINK_ENABLE
+
+config APP_RL_TICK_HZ
+    int "RL link tick rate (Hz)"
+    range 50 400
+    default 200
+    help
+        One frame to each servo board and one STATE to the Pi per tick.
+        A 106-byte STATE every 5 ms is about 23% of 921600 baud.
+
+config APP_RL_WATCHDOG_MS
+    int "RL link watchdog (ms)"
+    range 20 2000
+    default 100
+    help
+        Armed and no SET_ALL for this long: every servo IDLE, WATCHDOG
+        latched (as mp4-link).
+
+config APP_RL_RELEASE_MS
+    int "RL session end (ms without a frame)"
+    range 500 60000
+    default 2000
+    help
+        No RL frame of any kind for this long ends the session: the app,
+        voice and skills get the robot back and the legs glide into the
+        stand.
+
+config APP_RL_GUARD_CUR_MA
+    int "RL guard: current limit (mA)"
+    range 100 5000
+    default 500
+    help
+        A driven servo above this current for APP_RL_GUARD_CUR_MS
+        disarms everything and latches FAULT_CUR.
+
+config APP_RL_GUARD_CUR_MS
+    int "RL guard: current dwell (ms)"
+    range 10 10000
+    default 500
+
+config APP_RL_GUARD_TEMP_DC
+    int "RL guard: housing temperature limit (0.1 degC)"
+    range 300 1200
+    default 600
+    help
+        600 = 60.0 degC. The housing lags the winding, so this is a
+        backstop, not a thermal model.
+
+config APP_RL_GUARD_TEMP_MS
+    int "RL guard: temperature dwell (ms)"
+    range 10 60000
+    default 1000
+
+endif  # APP_RL_LINK_ENABLE
+
+endif  # APP_PI_LINK_ENABLE
+
+# ── RL walk on the ESP32-S3 itself (main/rl/) ────────────────────────
+# The policy runs on the robot: no Raspberry Pi. Ported from mpv2-uros.
+
+config APP_POLICY_ENABLE
+    bool "RL walk policy on the ESP32-S3 (the app's RL Walk page)"
+    default y
+    help
+        A policy trained in omniRL (exported with tools/policy/
+        export_mpxp.py) runs on core 1 at 50 Hz and drives the twelve
+        servos through the same raw path as the Pi's RL link: the gait is
+        parked for the run and glides back into the stand afterwards. The
+        app's RL Walk page starts and steers it (/v1/policy). The built-in
+        policy is main/rl/policies/default.mpxp.
+
+if APP_POLICY_ENABLE
+
+config APP_POLICY_ROBOT
+    string "This robot (sku1 or sku2)"
+    default "sku1"
+    help
+        Compared with the robot named in the policy file. A policy trained
+        for the other robot (another body, other servos) can do anything on
+        this one, so the app must ask with "force" to run it.
+
+config APP_POLICY_INTERNAL_RESERVE_KB
+    int "Keep the network in internal RAM if this much (KB) stays free"
+    range 0 1024
+    default 96
+    help
+        The network's weights (about 130 KB) are read in full at every
+        50 Hz step: from internal RAM well under a millisecond, from PSRAM
+        several. They go to internal RAM when at least this much internal
+        RAM is still free afterwards (Wi-Fi, TLS and the tasks need it);
+        otherwise to PSRAM. 0: always PSRAM.
+
+config APP_POLICY_TEMP_GUARD
+    bool "Stop the RL walk on hot servos"
+    default n
+    help
+        On: a run does not start while a servo is at the policy's start
+        temperature (45 degC) or more, ramps down at its stop temperature
+        (55 degC), and goes limp after a second over 60 degC. Off (this
+        branch's default): no temperature check at all; the hottest servo is
+        still shown on the page and logged. Watch it: the servos can be
+        damaged by heat.
+
+config APP_POLICY_WEIGHT_BITS
+    int "Network weights on the robot: 32 (floats), 16 or 8 bits"
+    range 8 32
+    default 16
+    help
+        The policy file holds float weights; the robot can run them as they
+        are (32), or rounded to 16-bit or 8-bit integers with one scale per
+        row: half or a quarter of the bytes to read at every step, so the
+        network runs faster, from PSRAM above all. The self-test compares
+        the result with training's own answers and falls back to 32 if the
+        rounding is too large (16-bit: 0.01 deg on the bam_t5ub06 walk;
+        8-bit: 0.4 deg mean, 2.3 deg at worst). Other values mean 32. The
+        app's RL walk page switches it until the next boot.
+
+endif  # APP_POLICY_ENABLE
+
+# ── micro-ROS: the robot as a ROS 2 node on Wi-Fi (main/ros/) ─────────
+# Needs a micro-ROS agent (ROS 2 Jazzy) on a PC; no Raspberry Pi. Ported
+# from mpv2-uros. The client libraries are components/micro_ros (prebuilt).
+
+config APP_UROS_ENABLE
+    bool "micro-ROS node on Wi-Fi (ROS 2 Jazzy, via a micro-ROS agent)"
+    default y
+    help
+        The robot publishes imu/data_raw, joint_states, odom/raw (and scan
+        with the LD06) to a micro-ROS agent on a PC (UDP), walks on cmd_vel
+        and answers uros/ping (docs/ROS.md). The agent's address is set in
+        the app (Settings -> ROS 2, or the RL walk page's ROS 2 card;
+        /v1/uros); until it is, the node waits and costs nothing.
+
+if APP_UROS_ENABLE
+
+config APP_UROS_AGENT_IP
+    string "Default agent IP (empty: set it in the app)"
+    default ""
+
+config APP_UROS_AGENT_PORT
+    int "Default agent UDP port"
+    range 1 65535
+    default 8888
+
+config APP_UROS_DOMAIN_ID
+    int "Default ROS_DOMAIN_ID"
+    range 0 232
+    default 0
+
+config APP_UROS_IMU_HZ
+    int "Default imu/data_raw rate (Hz, 0 = off)"
+    range 0 200
+    default 100
+
+config APP_UROS_JOINT_HZ
+    int "Default joint_states rate (Hz, 0 = off)"
+    range 0 100
+    default 50
+
+config APP_UROS_LIDAR_LD06
+    bool "LD06 lidar on J-PI, published as scan (sensor_msgs/LaserScan)"
+    depends on !APP_PI_LINK_ENABLE
+    default n
+    help
+        An LDROBOT LD06 on the J-PI header: its Tx on pin 3 (IO8), 5 V on
+        pin 6, GND on pin 1, PWM not connected. Every turn (about 10 Hz)
+        goes out as `scan`, 360 one-degree beams, frame lidar_link, counter-
+        clockwise as ldlidar_stl_ros2 publishes it, so the URDF in
+        tools/uros/pc/mini_pupper_description fits. The Pi link uses the same port and must be off.
+
+endif  # APP_UROS_ENABLE
+
+# ── Display: ST7789 on SPI3, the face and the Display page ─────────
+# mpv2-claw's cap_display (main/display/), ported.
+
+config APP_DISPLAY_ENABLE
+    bool "Screen: the robot's face and GIF animations (ST7789 on SPI3)"
+    default y
+    help
+        Bring up the 320x240 panel with LVGL and draw the robot's face on
+        it; the app's Display page (/v1/display) plays GIFs from
+        <fs>/display. Off: the /v1/display routes answer 404 and the app
+        hides the Display row, as on a board without a screen.
+
+if APP_DISPLAY_ENABLE
+
+config APP_DISPLAY_FLIP180_DEFAULT
+    bool "Turn the screen picture 180 degrees by default"
+    default y
+    help
+        display_hw programs the ST7789 the way the panel is wired; on the
+        assembled robot that reads upside down. With this on, the picture
+        is turned 180 degrees at every boot. The app's Display page
+        changes it at run time (saved in NVS).
+
+config APP_DISPLAY_BUFFER_LINES
+    int "LVGL draw buffer height, in scan lines"
+    range 4 240
+    default 8
+    help
+        How many scan lines LVGL renders before handing them to the panel.
+        Two buffers of this height live in internal DMA RAM for good
+        (320 x lines x 2 bytes each): 8 lines is 2 x 5 KB. Raise it if the
+        panel feels slow and internal RAM is to spare.
+
+endif  # APP_DISPLAY_ENABLE
+
+# ── Voice: wake word, the MangDang voice gateway, music ─────────────
+# mpv2-claw's mpx_voice_link, mpx_voice_wake and cap_music (main/voice/),
+# ported, with a native MCP bridge (voice_tools.cc) in place of mpx_mcp_ws.
+
+config APP_VOICE_ENABLE
+    bool "Voice: wake word, MangDang voice gateway, music"
+    default y
+    depends on APP_AUDIO_ENABLE
+    help
+        Say "Hi ESP" and talk to the robot: esp-sr's wake word on the
+        microphones, speech to and from the MangDang voice gateway over a
+        WebSocket (Opus), the robot's tools offered to the server's model
+        (robot_move, display_show_emotion, music_play, ...), and internet
+        radio on the speaker. The owner can still turn voice off at run
+        time (Settings > AI & Voice, POST /v1/ai {"mode":"off"}).
+
+        Off: none of it is compiled, esp-sr's models are still built but
+        unused, /v1/ai offers only "off" and /v1/voice does not exist.
+
+        The first `idf.py flash` after turning this on must be a full
+        flash: the wake-word models live in the `model` partition.
+
+if APP_VOICE_ENABLE
+
+config APP_VOICE_OTA_URL
+    string "Voice gateway provisioning URL"
+    default "http://35.220.215.160:8000/xiaozhi/ota/"
+    help
+        The MangDang voice gateway's OTA endpoint. The robot POSTs its
+        identity here on the first wake word and gets back the WebSocket
+        URL and token to talk to (saved in NVS). The same host serves the
+        marketplace proxy and the chat ingress (APP_CHAT_SERVER_IP).
+
+config APP_VOICE_AUTO_LISTEN
+    bool "Listen for the wake word from boot (hands-free)"
+    default y
+    help
+        Start the hands-free loop at boot: listen for "Hi ESP", beep,
+        stream what is said, play the reply, keep listening for a
+        follow-up until the server ends the session. Off: nothing listens
+        until POST /v1/voice {"hands_free":true}.
+
+config APP_VOICE_AUTO_MAX_SECONDS
+    int "Longest a turn listens with nothing heard (seconds)"
+    range 3 60
+    default 12
+    help
+        After the wake word the microphone streams until the server's VAD
+        hears the end of what was said, or this long with nothing usable,
+        whichever comes first.
+
+endif  # APP_VOICE_ENABLE
+
+# ── The on-device agent: ESP-Claw (main/agent/) ─────────────────────
+# mpv2-claw's agent, on this firmware. The PWA's chat picks per conversation
+# whether a message goes here ("local") or to the OpenClaw cloud ("cloud").
+
+config APP_AGENT_ENABLE
+    bool "On-device agent (ESP-Claw) behind the chat's Local brain"
+    default y
+    help
+        Run ESP-Claw's agent on the robot: the LLM (MangDang's gateway, or
+        the owner's own account from Settings > AI & Voice), the robot's
+        tools (robot_move, display_show_emotion, mpx_run_skill, music_play
+        ...), memory across sessions, sessions, the scheduler and the
+        skills in the `system` partition. The chat page's brain toggle
+        offers "Local" only when this is on.
+
+        Off: the agent is not started, /v1/ai reports it unavailable, every
+        conversation goes to the cloud as before. ESP-Claw's components are
+        still linked (main/idf_component.yml pulls them unconditionally, so
+        the first configure pass does not have to guess at Kconfig).
+
+if APP_AGENT_ENABLE
+
+config APP_AGENT_GATEWAY_LLM_URL
+    string "MangDang gateway LLM endpoint (OpenAI-compatible)"
+    default "http://35.220.215.160:8000/v1/llm"
+    help
+        Where the agent sends its model requests in the "mangdang" AI mode:
+        the gateway's OpenAI-compatible endpoint, authenticated with the
+        robot token (UUID + HMAC of APP_CHAT_AES_KEY_HEX). Same host as the
+        voice gateway and the chat ingress. mpv2-claw: MP4_GATEWAY_LLM_URL.
+
+config APP_AGENT_DATA_DIR
+    string "Agent data directory on the storage LittleFS"
+    default "/fs/agent"
+    help
+        ESP-Claw's writable root (sessions, memory, installed skills,
+        router rules, schedules, inbox). Kept out of <fs>/skills, which is
+        where this firmware's WebAssembly robot skills live.
+
+config APP_AGENT_EVENT_ROUTER_STACK
+    int "Event router task stack (bytes)"
+    range 8192 32768
+    default 16384
+    help
+        ESP-Claw creates the event router task with an 8 KB stack and offers
+        no option to change it. The router runs every rule action in its
+        own context -- including run_agent, which formats JSON and walks
+        the session store -- and 8 KB has overflowed on mpv2-claw. The
+        stack size is raised by wrapping claw_event_router_init at link
+        time (main/agent/claw_overrides.c), which leaves third-party/
+        esp-claw untouched.
+
+endif  # APP_AGENT_ENABLE
+
+# ESP-Claw's manifests (third-party/esp-claw/components/common/app_claw/
+# idf_component.yml) gate system_ui and a few Lua modules on symbols that
+# espressif/esp_board_manager generates from a board's YAML. This firmware
+# describes its hardware in C (main/robot/board_config.h), not through the
+# board manager, so those symbols would not exist -- and the component
+# manager stops the configure with "Missing required kconfig option after
+# retry" the moment a rule names an undefined one, whatever the rule's other
+# conditions say. They are defined here, false: this firmware drives its
+# own screen and codec, and has no camera. They need a prompt -- kconfgen
+# leaves promptless symbols out of sdkconfig.json, which is all the
+# component manager reads -- so they appear in menuconfig; leave them off.
+menu "ESP-Claw board-manager stand-ins (leave off)"
+
+config ESP_BOARD_DEV_DISPLAY_LCD_SUPPORT
+    bool "Board manager display_lcd device (stand-in, not used here)"
+    default n
+
+config ESP_BOARD_DEV_AUDIO_CODEC_SUPPORT
+    bool "Board manager audio codec device (stand-in, not used here)"
+    default n
+
+config ESP_BOARD_DEV_CAMERA_SUPPORT
+    bool "Board manager camera device (stand-in, not used here)"
+    default n
+
+config ESP_BOARD_DEV_LCD_TOUCH_SUPPORT
+    bool "Board manager lcd_touch device (stand-in, not used here)"
+    default n
+
+config ESP_BOARD_DEV_LCD_TOUCH_SUB_I2C_SUPPORT
+    bool "Board manager lcd_touch over I2C (stand-in, not used here)"
+    default n
+
+endmenu
+
+endmenu

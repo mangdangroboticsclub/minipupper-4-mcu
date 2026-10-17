@@ -1,0 +1,11 @@
+# micro-ROS keeps all of its state in static buffers (about 60 KB: the XRCE
+# session's stream buffers, the rmw entity pools). None of it is touched from
+# an ISR or by DMA, so it goes to PSRAM and leaves the internal RAM to Wi-Fi,
+# the display and the audio pipeline.
+[mapping:micro_ros_extram]
+archive: libmicroros.a
+entries:
+    if SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        * (extram_bss)
+    else:
+        * (default)
