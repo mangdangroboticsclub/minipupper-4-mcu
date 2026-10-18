@@ -751,12 +751,13 @@
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
 
-  <!-- LD06 lidar (driver: mini_pupper_driver/lidar_ld06.launch.py, frame
-       lidar_link), in the Mini Pupper 2 position: on the rear of the back
-       plate, 12.7 mm behind the rear hip axis and 68.5 mm above the hip
-       plane, rotated +90 deg about z (the LD06's zero angle points to the
-       robot's left in that holder). Taken from mini_pupper_2's URDF
-       (base_board + pcb_lidar) and re-based on this model's rear hips.
+  <!-- The lidar (an LDROBOT STL-19P, the D500 kit; the LD06 protocol, frame
+       lidar_link) centred on top of the body, its zero angle pointing to the
+       robot's RIGHT: yaw -90 deg, measured on the robot (a box in front came
+       out at +92 deg in the lidar's angles, one on the left at +179 deg: not
+       mirrored). Height as the Mini Pupper 2 holder's, 68.5 mm above the hip
+       plane (only RViz uses it: the scan is 2D). Was: the Mini Pupper 2
+       position, rear of the back plate (x -0.0612), yaw +90.
        CHECK: with the robot standing, put a box ~30 cm in FRONT of it - in
        RViz the /scan points must appear in front (+x, red axis). If they
        appear behind or to the side, fix the yaw here (+/-1.5708 or 3.1416). -->
@@ -770,7 +771,7 @@
   <joint name="lidar_joint" type="fixed">
     <parent link="base_link"/>
     <child link="lidar_link"/>
-    <origin xyz="-0.0612 0.0005 0.0685" rpy="0 0 1.5708"/>
+    <origin xyz="0 0 0.0685" rpy="0 0 -1.5708"/>
   </joint>
 
   <!-- Optional camera (sensors.camera in mini_pupper_mp4.yaml). -->

@@ -19,7 +19,7 @@ The LD06 sits on the robot's back and sees its own legs a few cm away; Nav2
 marks them as obstacles all around the robot ("stuck in a wall") and SLAM puts
 them in the map. The outline is a box in base_link (the URDF's footprint,
 -0.11..0.12 x -0.07..0.07 m, plus a margin for the legs) and the LD06's pose is
-the URDF's lidar_joint (x -0.0612, y 0.0005, yaw +90 deg).
+the URDF's lidar_joint (centred on the body, yaw -90 deg: measured).
 
 and it scales Nav2's commands the other way:
 
@@ -48,7 +48,7 @@ from sensor_msgs.msg import Imu, JointState, LaserScan
 # The robot's outline in base_link (m) and the LD06's pose in it (the URDF).
 BODY_X = (-0.15, 0.16)
 BODY_Y = (-0.11, 0.11)
-LIDAR_X, LIDAR_Y, LIDAR_YAW = -0.0612, 0.0005, math.pi / 2
+LIDAR_X, LIDAR_Y, LIDAR_YAW = 0.0, 0.0, -math.pi / 2
 
 BIAS_SAMPLES = 200        # 2 s at 100 Hz
 GYRO_VAR = 0.02 ** 2      # (rad/s)^2
