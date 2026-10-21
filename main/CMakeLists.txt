@@ -7,6 +7,7 @@ set(sources
     "wasm/registry.cc"
     "sdk/wasm_host_functions.cc"
     "network/wifi_ap.cc"
+    "network/captive.cc"
     "network/wifi_sta.cc"
     "network/http_server.cc"
     "network/www_assets.cc"
