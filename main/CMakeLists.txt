@@ -7,6 +7,7 @@ set(sources
     "wasm/registry.cc"
     "sdk/wasm_host_functions.cc"
     "network/wifi_ap.cc"
+    "network/captive.cc"
     "network/wifi_sta.cc"
     "network/http_server.cc"
     "network/www_assets.cc"
@@ -117,6 +118,18 @@ if(CONFIG_APP_POLICY_ENABLE)
         list(APPEND policy_files "rl/policies/sku1.mpxp")
         set(policy_have_sku1 1)
     endif()
+    # SKU1's rough-ground walk (omniRL docs/SKU1.md section 7, sku1_terrain_s1: the t2s1 run's model_11000)
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/rl/policies/sku1_terrain.mpxp")
+        list(APPEND policy_files "rl/policies/sku1_terrain.mpxp")
+        set(policy_have_sku1_terrain 1)
+    endif()
+    # SKU1 terrain, second run (the SKU2 recipe again, real mpx-sim; 20261020_215921 ..._sku1_368_t2s1): model_11000, model_14999
+    foreach(p sku1_terr11k sku1_terr15k)
+        if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/rl/policies/${p}.mpxp")
+            list(APPEND policy_files "rl/policies/${p}.mpxp")
+            set(policy_have_${p} 1)
+        endif()
+    endforeach()
 endif()
 list(APPEND sources "network/http_policy.cc")
 
@@ -236,6 +249,15 @@ if(policy_have_terrain)
 endif()
 if(policy_have_sku1)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE MPX_POLICY_HAVE_SKU1=1)
+endif()
+if(policy_have_sku1_terrain)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MPX_POLICY_HAVE_SKU1_TERRAIN=1)
+endif()
+if(policy_have_sku1_terr11k)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MPX_POLICY_HAVE_SKU1_TERR11K=1)
+endif()
+if(policy_have_sku1_terr15k)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MPX_POLICY_HAVE_SKU1_TERR15K=1)
 endif()
 # Re-run CMake when rl/policies/getup.mpxp appears or goes, so the build picks it up.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/rl/policies")

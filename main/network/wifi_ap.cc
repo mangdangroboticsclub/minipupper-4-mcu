@@ -1,4 +1,5 @@
 #include "network/wifi_ap.h"
+#include "network/captive.h"
 
 #include <cstring>
 
@@ -243,6 +244,12 @@ bool init_wifi_ap()
 
     // Start Wi-Fi
     ESP_ERROR_CHECK(esp_wifi_start());
+    // No modem sleep: with the default WIFI_PS_MIN_MODEM the radio naps between the home router's DTIM
+    // beacons, and a phone on this AP (192.168.2.1) feels every nap as lag on the RL page.
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);
+    // Phones ask the AP for names and for a known page within seconds of joining, and leave a
+    // network that does not answer (captive.h).
+    captive_dns_start();
 
     ESP_LOGI(TAG, "Wi-Fi AP started — SSID: \"%s\", IP: %s, auth=%s",
              s_active_ssid.c_str(), AP_IP_ADDR,

@@ -332,7 +332,7 @@
   const deg = (v) => (v < 0.01 ? v.toFixed(3) : v.toFixed(2));
 
   // ── The built-in walk policies (main/rl/policies/) ──
-  const POLICY_LABEL = { walk: "Walk · SKU2", terrain: "Terrain · SKU2", sku1: "Walk · SKU1" };
+  const POLICY_LABEL = { walk: "Walk · SKU2", terrain: "Terrain · SKU2", sku1: "Walk · SKU1", sku1_terrain: "Terrain · SKU1", sku1_terr11k: "Terrain 2 · SKU1 · 11k", sku1_terr15k: "Terrain 2 · SKU1 · 15k" };
   async function selectPolicy(name) {
     if (busy || st?.builtin === name) return;
     busy = true;

@@ -178,8 +178,8 @@ esp_err_t mpx_policy_set_weight_bits(int bits, char *why, int why_len);
 
 /**
  * The walk policies built into the firmware (main/rl/policies/: "walk" is
- * default.mpxp; "terrain" terrain.mpxp and "sku1" sku1.mpxp when they are
- * there). Select one (idle only; until the next boot, which starts with the
+ * default.mpxp; "terrain" terrain.mpxp, "sku1" sku1.mpxp and "sku1_terrain"
+ * sku1_terrain.mpxp when they are there). Select one (idle only; until the next boot, which starts with the
  * first one trained for APP_POLICY_ROBOT); it is self-tested first and the
  * current one stays on a failure.
  */

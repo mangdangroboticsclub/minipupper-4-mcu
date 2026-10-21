@@ -126,6 +126,7 @@ void offline_task(void *arg)
             }
         }
         e = esp_wifi_start();
+        (void)esp_wifi_set_ps(WIFI_PS_NONE);     // as wifi_ap.cc: no lag on the AP
         ESP_LOGW(TAG, "Wi-Fi back on after %.1f s (%s)", (esp_timer_get_time() - t0) / 1e6, esp_err_to_name(e));
         reconnect_sta();
     }

@@ -388,7 +388,7 @@ static void voice_ws_event(void *arg, esp_event_base_t base,
             ESP_LOGW(TAG, "socket closed");
             s_state = MPX_VOICE_IDLE;
             s_session_id[0] = '\0';
-            (void)esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+            (void)esp_wifi_set_ps(WIFI_PS_NONE);      /* was MIN_MODEM: it made the AP (192.168.2.1) laggy */
             break;
 
         case WEBSOCKET_EVENT_ERROR:
@@ -525,7 +525,7 @@ void mpx_voice_disconnect(void)
     s_client = NULL;
     s_state = MPX_VOICE_IDLE;
     s_session_id[0] = '\0';
-    (void)esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);      /* was MIN_MODEM: it made the AP (192.168.2.1) laggy */
     ESP_LOGI(TAG, "disconnected");
 }
 

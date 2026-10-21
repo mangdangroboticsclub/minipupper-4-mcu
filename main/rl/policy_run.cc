@@ -76,6 +76,18 @@ extern const uint8_t terrain_mpxp_end[] asm("_binary_terrain_mpxp_end");
 extern const uint8_t sku1_mpxp_start[] asm("_binary_sku1_mpxp_start");
 extern const uint8_t sku1_mpxp_end[] asm("_binary_sku1_mpxp_end");
 #endif
+#ifdef MPX_POLICY_HAVE_SKU1_TERRAIN
+extern const uint8_t sku1_terrain_mpxp_start[] asm("_binary_sku1_terrain_mpxp_start");
+extern const uint8_t sku1_terrain_mpxp_end[] asm("_binary_sku1_terrain_mpxp_end");
+#endif
+#ifdef MPX_POLICY_HAVE_SKU1_TERR11K
+extern const uint8_t sku1_terr11k_mpxp_start[] asm("_binary_sku1_terr11k_mpxp_start");
+extern const uint8_t sku1_terr11k_mpxp_end[] asm("_binary_sku1_terr11k_mpxp_end");
+#endif
+#ifdef MPX_POLICY_HAVE_SKU1_TERR15K
+extern const uint8_t sku1_terr15k_mpxp_start[] asm("_binary_sku1_terr15k_mpxp_start");
+extern const uint8_t sku1_terr15k_mpxp_end[] asm("_binary_sku1_terr15k_mpxp_end");
+#endif
 }
 
 namespace {
@@ -1307,6 +1319,15 @@ const Builtin BUILTINS[] = {
 #endif
 #ifdef MPX_POLICY_HAVE_SKU1
     { "sku1", sku1_mpxp_start, sku1_mpxp_end },
+#endif
+#ifdef MPX_POLICY_HAVE_SKU1_TERRAIN
+    { "sku1_terrain", sku1_terrain_mpxp_start, sku1_terrain_mpxp_end },
+#endif
+#ifdef MPX_POLICY_HAVE_SKU1_TERR11K
+    { "sku1_terr11k", sku1_terr11k_mpxp_start, sku1_terr11k_mpxp_end },
+#endif
+#ifdef MPX_POLICY_HAVE_SKU1_TERR15K
+    { "sku1_terr15k", sku1_terr15k_mpxp_start, sku1_terr15k_mpxp_end },
 #endif
 };
 constexpr int N_BUILTINS = static_cast<int>(sizeof(BUILTINS) / sizeof(BUILTINS[0]));

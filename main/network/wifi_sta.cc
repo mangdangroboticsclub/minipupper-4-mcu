@@ -283,6 +283,7 @@ bool wifi_sta_connect(const char *ssid, const char *password)
     // Restart Wi-Fi (AP + STA), then connect
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+    (void)esp_wifi_set_ps(WIFI_PS_NONE);      // as wifi_ap.cc: no lag on the AP
     esp_err_t ret = esp_wifi_connect();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_connect failed: %s", esp_err_to_name(ret));
