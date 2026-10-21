@@ -6,6 +6,7 @@
 # Directory metadata
 .directory
 .vscode/
+.cursor/
 
 # Temporary files
 *~
@@ -64,7 +65,7 @@ venv/
 env/
 
 # Language Servers
-.clangd/
+.clangd
 .ccls-cache/
 compile_commands.json
 
