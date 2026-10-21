@@ -19,7 +19,13 @@ Keep the robot still for the first 2 s (gyro bias). Starts:
   Nav2                   mp4_room.yaml (config/): map_server + AMCL + planner,
                          controller, smoother, collision monitor, behaviours
   slam_toolbox           only with slam:=true (then it provides map -> odom)
-  rviz2                  navigation.rviz (config/) (rviz:=false to leave out)
+  rviz2                  navigation.rviz (config/) (rviz:=false to leave out;
+                         look:=film for film.rviz: clean, for screen recording)
+
+A small room or careful moves: margin:=0.12 (the clearance kept from walls, m; the
+default 0.25 / 0.30 keeps the path in the middle of the room) and speed:=0.7 (every
+speed limit times 0.7), e.g.
+    ros2 launch $UROS/pc/uros_nav.launch.py map:=/mnt/c/esp/maps/room_5.yaml look:=film
 
 In RViz: "2D Pose Estimate" where the robot really is (AMCL), then "Nav2 Goal".
 """
@@ -68,6 +74,34 @@ def scan_filtered(node):
             scan_filtered(v)
 
 
+def tune(p, margin: str, speed: str):
+    """margin:=M: the clearance Nav2 keeps from walls, metres (the costmaps' inflation radius; 0.25 local and
+    0.30 global in mp4_room.yaml): lower for a small room, at least 0.10 (the robot is 23 x 14 cm). speed:=F: every
+    speed and acceleration limit times F (0.5 = half: careful moves)."""
+    if margin:
+        m = max(0.10, float(margin))
+        for cm in ('local_costmap', 'global_costmap'):
+            layer = p.setdefault(cm, {}).setdefault(cm, {}).setdefault('ros__parameters', {}) \
+                .setdefault('inflation_layer', {})
+            layer['inflation_radius'] = m
+            layer['cost_scaling_factor'] = 4.0 if m >= 0.25 else 10.0     # the cost falls off faster in a tight space
+    if speed:
+        f = min(1.0, max(0.1, float(speed)))
+        fp = p.setdefault('controller_server', {}).setdefault('ros__parameters', {}).setdefault('FollowPath', {})
+        for k in ('min_vel_x', 'max_vel_x', 'min_vel_y', 'max_vel_y', 'max_vel_theta', 'max_speed_xy', 'acc_lim_x',
+                  'acc_lim_y', 'acc_lim_theta', 'decel_lim_x', 'decel_lim_y', 'decel_lim_theta'):
+            if k in fp:
+                fp[k] = round(fp[k] * f, 4)
+        vs = p.setdefault('velocity_smoother', {}).setdefault('ros__parameters', {})
+        for k in ('max_velocity', 'min_velocity', 'max_accel', 'max_decel'):
+            if k in vs:
+                vs[k] = [round(v * f, 4) for v in vs[k]]
+        bs = p.setdefault('behavior_server', {}).setdefault('ros__parameters', {})
+        if 'max_rotational_vel' in bs:
+            bs['max_rotational_vel'] = round(bs['max_rotational_vel'] * f, 4)
+            bs['min_rotational_vel'] = min(bs.get('min_rotational_vel', 0.3), bs['max_rotational_vel'])
+
+
 def nav2_params(context):
     """Nav2's settings with the map filled in. ros2jazzympv2's mp4_room.yaml has
     map_server.yaml_filename: "" and, with this Nav2, that empty value wins over
@@ -84,6 +118,7 @@ def nav2_params(context):
             raise RuntimeError('no map at %s (map:=...yaml from map_saver_cli)' % map_yaml)
         p.setdefault('map_server', {}).setdefault('ros__parameters', {})['yaml_filename'] = map_yaml
     scan_filtered(p)
+    tune(p, LaunchConfiguration('margin').perform(context), LaunchConfiguration('speed').perform(context))
     out = os.path.join(tempfile.gettempdir(), 'uros_nav2_params.yaml')
     with open(out, 'w') as f:
         yaml.safe_dump(p, f, sort_keys=False)
@@ -124,6 +159,13 @@ def nav2(context):
                           'autostart': 'True'}.items())]
 
 
+def rviz_node(context, default_cfg):
+    """rviz2 with its usual settings, or config/film.rviz with look:=film."""
+    film = LaunchConfiguration('look').perform(context) == 'film'
+    cfg = os.path.join(CFG, 'film.rviz') if film else default_cfg
+    return [Node(package='rviz2', executable='rviz2', output='log', arguments=['-d', cfg])]
+
+
 def generate_launch_description():
     slam = LaunchConfiguration('slam')
     rviz = LaunchConfiguration('rviz')
@@ -145,7 +187,13 @@ def generate_launch_description():
             'slam_params', default_value=os.path.join(CFG, 'slam_toolbox_room.yaml')),
         DeclareLaunchArgument('linear_scale', default_value='0.624',
                               description='real speed / commanded speed of the gait'),
+        DeclareLaunchArgument('margin', default_value='',
+                              description='clearance from walls, m (default 0.25/0.30; small room: 0.12)'),
+        DeclareLaunchArgument('speed', default_value='',
+                              description='speed limits times this (0.5 = half speed)'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        DeclareLaunchArgument('look', default_value='', choices=['', 'film'],
+                              description='film: the clean RViz for screen recording (config/film.rviz)'),
 
         ExecuteProcess(cmd=['python3', os.path.join(HERE, 'uros_relay.py'),
                             '--linear-scale', scale], output='screen'),
@@ -161,7 +209,6 @@ def generate_launch_description():
         # No map yet: slam_toolbox (on /scan_filtered) for map -> odom.
         OpaqueFunction(function=slam_toolbox, condition=IfCondition(slam)),
 
-        Node(package='rviz2', executable='rviz2', output='log',
-             arguments=['-d', os.path.join(CFG, 'navigation.rviz')],
-             condition=IfCondition(rviz)),
+        OpaqueFunction(function=lambda c: rviz_node(c, os.path.join(CFG, 'navigation.rviz')),
+                       condition=IfCondition(rviz)),
     ])

@@ -1,4 +1,5 @@
 #include "network/http_server.h"
+#include "network/captive.h"
 #include "network/chat_ws.h"
 #include "network/http_display.h"
 #include "network/http_policy.h"
@@ -2588,50 +2589,31 @@ static esp_err_t api_marketplace_proxy(httpd_req_t *req)
  */
 static void socket_reaper_task(void *)
 {
+    // Only httpd's own client sessions, and only through httpd. The version before this one
+    // close()d raw fds - port-80 sockets httpd still had in its session table, and any socket whose
+    // getsockname() failed, whoever owned it. httpd then select()ed on a closed fd ("error in
+    // select (9)", "Closing invalid socket -1"), and once lwIP reused the number for a new
+    // connection, httpd closed or answered the wrong socket: the app "could not reach the robot"
+    // after a run (21 Oct). httpd_sess_trigger_close() queues the close on httpd's own task.
+    static int fds[CONFIG_LWIP_MAX_SOCKETS];
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(4000));
         if (!s_server) continue;
 
-        int reaped = 0, zombies = 0;
-        for (int fd = LWIP_SOCKET_OFFSET;
-             fd < LWIP_SOCKET_OFFSET + CONFIG_LWIP_MAX_SOCKETS; ++fd) {
-            int type = 0; socklen_t tl = sizeof(type);
-            if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tl) != 0) continue;
-
-            struct sockaddr_in local {}; socklen_t ll = sizeof(local);
-            bool has_local = (getsockname(fd, (struct sockaddr *)&local, &ll) == 0);
-
-            // ── Zombie: an open socket whose TCP PCB is gone (getsockname
-            // fails → no address).  These are aborted/RST connections that
-            // leaked.  A freshly created-but-unconnected socket still reports
-            // 0.0.0.0:0 (success), so it is NOT mistaken for a zombie.
-            if (!has_local) {
-                close(fd);            // single close — reclaim the fd
-                zombies++;
-                continue;
-            }
-
-            if (ntohs(local.sin_port) != 80) continue;   // only the web server
-
-            // Listener has no connected peer — never reap it.
-            struct sockaddr_in peer {}; socklen_t pl = sizeof(peer);
-            if (getpeername(fd, (struct sockaddr *)&peer, &pl) != 0) continue;
-
-            // Peek one byte, non-blocking.  0 = peer closed (EOF); a hard
-            // error other than "would block" also means the link is dead.
-            // A live/idle WS client returns EWOULDBLOCK and is left alone.
+        size_t n = sizeof(fds) / sizeof(fds[0]);
+        if (httpd_get_client_list(s_server, &n, fds) != ESP_OK) continue;
+        int reaped = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const int fd = fds[i];
+            // Peek one byte, non-blocking: 0 = the peer closed (EOF); a hard error other than
+            // "would block" = the link is dead. A live idle client returns EWOULDBLOCK.
             char probe;
-            int r = recv(fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
-            bool dead = (r == 0) ||
-                        (r < 0 && errno != EWOULDBLOCK && errno != EAGAIN);
-            if (dead) {
-                close(fd);            // single close — peer already gone
-                reaped++;
-            }
+            const int r = recv(fd, &probe, 1, MSG_PEEK | MSG_DONTWAIT);
+            const bool dead = (r == 0) || (r < 0 && errno != EWOULDBLOCK && errno != EAGAIN);
+            if (dead && httpd_sess_trigger_close(s_server, fd) == ESP_OK) reaped++;
         }
-        if (reaped || zombies) {
-            ESP_LOGW(TAG, "socket_reaper: reclaimed %d dead + %d zombie socket(s)",
-                     reaped, zombies);
+        if (reaped) {
+            ESP_LOGW(TAG, "socket_reaper: closed %d dead web connection(s)", reaped);
         }
     }
 }
@@ -2844,6 +2826,21 @@ bool start_http_server()
         h.method = HTTP_DELETE;
         register_uri(s_server, &h, "DELETE");
         ESP_LOGI(TAG, "  API: GET|POST|PATCH|DELETE /v1/marketplace/* (proxied to gateway)");
+    }
+
+    // The phones' "is there internet?" checks (captive.h). LAST: with wildcard matching the first
+    // registered match wins, so this only sees what nothing above answers (and 404s the rest).
+    {
+        httpd_uri_t h = {
+            .uri       = "/*",
+            .method    = HTTP_GET,
+            .handler   = network::captive_http_handler,
+            .user_ctx  = nullptr,
+            .is_websocket = false,
+            .handle_ws_control_frames = false,
+            .supported_subprotocol = nullptr,
+        };
+        register_uri(s_server, &h, "GET");
     }
 
     ESP_LOGI(TAG, "HTTP server running on port 80 (Core 0, Priority 6)");

@@ -99,7 +99,7 @@ static void wifi_awake(bool on)
             (void)esp_wifi_set_ps(WIFI_PS_NONE);
         }
     } else if (cur == WIFI_PS_NONE && !(mpx_voice_state && mpx_voice_state() != 0)) {
-        (void)esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+        (void)esp_wifi_set_ps(WIFI_PS_NONE);      /* was MIN_MODEM: it made the AP (192.168.2.1) laggy */
     }
 }
 
