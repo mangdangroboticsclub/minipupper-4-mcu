@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.5"
+  # BMI270 driver; it carries the Bosch configuration blob the part needs.
+  espressif/bmi270: "^1.0"

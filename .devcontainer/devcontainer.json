@@ -1,0 +1,39 @@
+{
+	"name": "ESP-IDF Dev Container (mp4link)",
+	"build": {
+		"dockerfile": "Dockerfile",
+		"args": {
+			"IDF_TAG": "v5.5.4"
+		}
+	},
+	"workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+	"mounts": [
+		"source=mp4link-idf-build,target=${containerWorkspaceFolder}/build,type=volume",
+		"source=mp4link-ccache,target=/root/.ccache,type=volume",
+		"source=/dev,target=/dev,type=bind"
+	],
+	"containerEnv": {
+		"IDF_PATH": "/opt/esp/idf",
+		"CCACHE_DIR": "/root/.ccache",
+		"LC_ALL": "C.UTF-8",
+		"LANG": "C.UTF-8"
+	},
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"terminal.integrated.defaultProfile.linux": "bash",
+				"idf.gitPath": "/usr/bin/git",
+				"idf.espIdfPath": "/opt/esp/idf"
+			},
+			"extensions": [
+				"espressif.esp-idf-extension",
+				"ms-vscode.cmake-tools"
+			]
+		}
+	},
+	"runArgs": [
+		"--init",
+		"--privileged"
+	],
+	"remoteUser": "root"
+}

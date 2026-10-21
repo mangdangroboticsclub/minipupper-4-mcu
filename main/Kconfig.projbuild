@@ -1,0 +1,70 @@
+menu "Pi link"
+
+    config APP_PI_LINK_UART_BAUD
+        int "Pi link UART baud rate"
+        default 921600
+        range 9600 5000000
+        help
+            UART1 on the J-PI connector (pins in board_config.h). Must match
+            the host's baud rate; 921600 is the robot's default.
+
+    config APP_RL_TICK_HZ
+        int "Servo exchange and STATE rate (Hz)"
+        default 200
+        range 50 200
+        help
+            One frame to each of the four servo boards per tick, and one STATE
+            frame to the host.
+
+    config APP_RL_WATCHDOG_MS
+        int "Link watchdog (ms)"
+        default 100
+        range 20 1000
+        help
+            Armed and no SET_ALL for this long: every servo IDLE.
+
+    config APP_RL_GUARD_CUR_MA
+        int "Guard: current limit (mA)"
+        default 1000
+        range 100 5000
+        help
+            A driven servo above this current for APP_RL_GUARD_CUR_MS disarms
+            every servo. The default acts near stall only, and the temperature
+            guard is the main motor protection; a lower limit protects the
+            gear trains more but trips under heavy load.
+
+    config APP_RL_GUARD_CUR_MS
+        int "Guard: time above the current limit (ms)"
+        default 500
+        range 10 10000
+
+    config APP_RL_GUARD_TEMP_DC
+        int "Guard: housing temperature limit (0.1 degC)"
+        default 600
+        range 300 1000
+        help
+            A driven servo's housing above this for APP_RL_GUARD_TEMP_MS
+            disarms every servo.
+
+    config APP_RL_GUARD_TEMP_MS
+        int "Guard: time above the temperature limit (ms)"
+        default 1000
+        range 10 10000
+
+    config APP_RL_USB_LINK
+        bool "Also accept the protocol on UART0 (USB)"
+        default n
+        depends on ESP_CONSOLE_NONE
+        help
+            UART0 (the CH340K USB port) speaks the same protocol as the Pi
+            link, for bench work from a PC. Needs the console turned off
+            (Component config -> ESP System Settings -> Channel for console
+            output -> No console output).
+
+    config APP_RL_USB_BAUD
+        int "USB link baud rate"
+        default 921600
+        range 9600 3000000
+        depends on APP_RL_USB_LINK
+
+endmenu

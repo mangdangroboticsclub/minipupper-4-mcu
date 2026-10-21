@@ -1,0 +1,78 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Directory metadata
+.directory
+.vscode/
+
+# Temporary files
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Log files
+*.log
+
+# Build artifacts and directories
+**/build/
+build/
+*.o
+*.a
+*.out
+# host-side utilities compiled on Windows
+*.exe
+dependencies.lock
+
+# ESP-IDF build outputs
+*.bin
+*.elf
+*.map
+# generated in the build directory
+flasher_args.json
+sdkconfig.old
+sdkconfig
+
+# ESP-IDF dependencies
+# older versions or manual component management
+/components/.idf/
+**/components/.idf/
+# the ESP-IDF component manager
+managed_components/
+# ESP-IDF tools installed in the project
+.espressif/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+
+# Python
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+.pytest_cache/
+*.egg-info/
+dist/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Language servers
+.clangd/
+compile_commands.json
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# misc
+*.pem
