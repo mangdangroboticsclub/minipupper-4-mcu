@@ -20,6 +20,10 @@ page, so write scripts that make sense either way.
 - `require("name")` looks for `name.lua` in the script's own folder first.
 - Not available: ESP-Claw's Lua modules (`arg_schema`, `delay`, `lvgl`,
   `storage`, ...). Do not `require` them.
+- There is no shell, so `os.execute(...)` cannot work: on this firmware it
+  raises instead of silently doing nothing (it used to return `nil` without
+  complaining, which made `os.execute("sleep 0.05")` look like a wait that
+  never happened). To wait, use `robot.delay_ms(ms)`.
 
 ## Arguments
 
@@ -74,6 +78,11 @@ left. Paint, then `display.show(hold_ms)`; the face comes back after the hold
 (`0` = until something else takes the screen). The picture outlives the
 script, so paint, show and return.
 
+`display.show()` and `tools.call("display_draw", {seconds = ...})` do **not
+wait**: they put the picture up and hand the hold to a timer, so it stays
+there while the script carries on (or ends). Inside a loop that means "draw
+the next frame immediately" -- see [Animating the screen](#animating-the-screen).
+
 - `display.clear([color])`
 - `display.rect(x, y, w, h, color [, {radius = r, outline = px}])`
 - `display.circle(cx, cy, r, color [, {outline = px}])`
@@ -87,6 +96,62 @@ script, so paint, show and return.
 Colours: `0xRRGGBB`, `display.rgb(r, g, b)`, `"#rrggbb"` or a name (`"red"`).
 `display_draw` through `tools` is usually simpler (ovals, polygons, text
 centred on a point); use `display.*` for computed or animated pictures.
+
+`display.text(x, y, ...)` puts the **top-left** of the text box at `x, y`;
+`align` then centres (or right-aligns) the string inside `w` pixels of it.
+
+## Animating the screen
+
+An animation is a loop that draws one frame and then **waits**:
+`robot.delay_ms(frame_ms)` is the wait that gives the rest of the robot its
+turn -- Wi-Fi, the chat socket, the audio tasks. A loop with no real wait in
+it (`while true do end`, or a wait that silently does not exist such as
+`os.execute("sleep ...")`) simply keeps the CPU busy: the picture stutters,
+the app's poll is answered late, and it is what tripped the task watchdog
+before the VM learned to yield to the scheduler.
+
+```lua
+-- Bouncing logo. args.duration = seconds on screen, args.frame_ms = pace.
+local w, h = display.width(), display.height()
+local logo_w, logo_h = 60, 40
+local duration = math.max(1, math.min(tonumber(args.duration) or 15, 50))
+local frame_ms = math.max(30, math.min(tonumber(args.frame_ms) or 60, 1000))
+
+-- Count frames instead of reading the clock: each frame costs exactly
+-- frame_ms, and os.time() can jump when the robot syncs its time.
+local frames = math.max(1, math.floor(duration * 1000 / frame_ms))
+
+local x, y = math.random(0, w - logo_w), math.random(0, h - logo_h)
+local vx, vy = 3, 2
+local colours = { "red", "green", "blue", "yellow", "cyan", "magenta" }
+
+for i = 1, frames do
+  x, y = x + vx, y + vy
+  if x <= 0 or x + logo_w >= w then vx = -vx end
+  if y <= 0 or y + logo_h >= h then vy = -vy end
+  x = math.max(0, math.min(x, w - logo_w))
+  y = math.max(0, math.min(y, h - logo_h))
+
+  display.clear(0x000000)
+  display.rect(x, y, logo_w, logo_h, colours[i % #colours + 1], { radius = 6 })
+  display.text(x, y + 12, "DVD", 0xFFFFFF, { size = 14, align = "center", w = logo_w })
+  display.show(0)              -- put this frame up
+  robot.delay_ms(frame_ms)     -- and let the robot breathe until the next one
+end
+
+display.face()
+print("bounced for " .. duration .. " s")
+```
+
+- 40-100 ms per frame (10-25 fps) is a good place to start; raise `frame_ms`
+  if the picture lags behind the drawing.
+- `frames * frame_ms` is time the script spends, and the whole script has a
+  budget (60 s from the app's **Run**, 30 s default for `lua_run_script`), so a
+  30 s animation leaves 30 s for everything else it has to do.
+- `display.show(0)` means "keep this frame until the next one"; call
+  `display.face()` when the animation is over.
+- `tools.call("display_draw", ...)` per frame works, but it re-sends the whole
+  picture as JSON every frame; `display.*` is for loops.
 
 ## fs -- files
 

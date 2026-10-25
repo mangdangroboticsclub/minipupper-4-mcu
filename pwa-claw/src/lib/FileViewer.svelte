@@ -154,12 +154,34 @@
   async function runLua(n) {
     busy = n;
     try {
+      // Ask the robot to run the script on its own task. Inline, a 30 s
+      // animation holds the robot's web server for 30 s: this page's Wi-Fi
+      // poll and chat socket time out and the robot spends the rest of the
+      // run reaping dead sessions. Started rather than run, the robot
+      // answers at once and /v1/lua/status says when it finished and what
+      // it printed.
       const r = await fetch("/v1/lua/run", { method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: pathOf(n) }) });
+        body: JSON.stringify({ path: pathOf(n), async: true }) });
       const d = await r.json();
-      if (d.ok) sheet = { title: "Ran " + n, body: d.output || "(no output)" };
-      else say(n + ": " + (d.error || "failed"), "err");
+      if (!r.ok || !d.ok) {
+        say(n + ": " + (d.error || "didn't start"), "err");
+        busy = null;
+        return;
+      }
+
+      // A script may run for 60 s (see robot_lua.md); stop polling a little
+      // after that rather than loop forever if the robot goes away.
+      const deadline = Date.now() + 70000;
+      while (Date.now() < deadline) {
+        await new Promise((res) => setTimeout(res, 500));
+        let s = null;
+        try { s = await (await fetch("/v1/lua/status")).json(); } catch { continue; }
+        if (!s || s.running) continue;
+        if (s.ok) sheet = { title: "Ran " + n, body: s.output || "(no output)" };
+        else say(n + ": " + (s.output || "failed"), "err");
+        break;
+      }
     } catch { say("Couldn't reach the robot", "err"); }
     busy = null;
   }

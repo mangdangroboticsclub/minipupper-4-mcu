@@ -944,6 +944,19 @@ static float json_get_float(const char *body, const char *key, float def)
     return (end == p) ? def : val;
 }
 
+/* ── Helper: parse a JSON boolean value ────────────────────── */
+static bool json_get_bool(const char *body, const char *key, bool def)
+{
+    std::string needle = "\"" + std::string(key) + "\":";
+    const char *p = std::strstr(body, needle.c_str());
+    if (!p) return def;
+    p += needle.size();
+    while (*p == ' ' || *p == '\t') ++p;
+    if (std::strncmp(p, "true", 4) == 0) return true;
+    if (std::strncmp(p, "false", 5) == 0) return false;
+    return def;
+}
+
 /* ── Gait name ↔ GaitCmd ──────────────────────────────────────
  *
  * Both directions are one call into robot.cc now. They used to be a 46-branch
@@ -2150,9 +2163,87 @@ static esp_err_t api_lua_enqueue(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── Async Lua execution ─────────────────────────────────────────────
+ *
+ * A saved script may legitimately run for its whole budget -- an animation,
+ * a walk, a dance. Run inline in the HTTP handler it blocks the web server
+ * for that long: the app's Wi-Fi poll and its chat socket time out, and the
+ * sessions come back as zombie sockets. This is the lesson the WASM path
+ * already learned (see start_skill_async above), applied to Lua:
+ *
+ *   POST /v1/lua/run  {"path":"...","async":true}   -> {"ok":true,"started":true}
+ *   GET  /v1/lua/status                             -> {"running":...,"label":...,
+ *                                                       "ok":...,"output":"..."}
+ *
+ * The synchronous form is kept for callers that want the output in the
+ * reply (older app builds, curl). The Lua VM yields from its count hook, so
+ * even a display loop on this task leaves the idle task -- and the LVGL
+ * flusher -- their slots; without that, this task would starve the watchdog
+ * exactly as the inline handler did.
+ *
+ * Same task recipe as skill_run_task: plain xTaskCreate (internal stack,
+ * transient) at priority 4, below httpd's 6, deleting itself when done. */
+static constexpr uint32_t kLuaFileTimeoutMs   = 60000;   /* a saved script's minute */
+static constexpr uint32_t kLuaInlineTimeoutMs = 5000;    /* an ad-hoc snippet */
+
+static volatile bool s_lua_running = false;
+static char s_lua_label[128]   = "";     /* the path being run, or "(inline)" */
+static char s_lua_output[1024] = "";     /* the last run's output, or its error */
+static bool s_lua_ok = true;             /* the last run finished clean */
+
+struct LuaRunArgs { std::string path; std::string script; };
+
+static void lua_run_task(void *arg)
+{
+    LuaRunArgs *a = static_cast<LuaRunArgs *>(arg);
+
+    char out[1024];
+    out[0] = '\0';
+    const esp_err_t err = a->path.empty()
+        ? lua_run_string(a->script.c_str(), out, sizeof(out), kLuaInlineTimeoutMs)
+        : lua_run_file(a->path.c_str(), out, sizeof(out), kLuaFileTimeoutMs);
+
+    /* Publish the result, then clear the flag. A status reader that sees
+     * running == true may still catch the buffer mid-copy; the flag is
+     * cleared last so the final state is the one it reads. */
+    std::snprintf(s_lua_output, sizeof(s_lua_output), "%s", out);
+    s_lua_ok = (err == ESP_OK);
+    ESP_LOGI(TAG, "Lua run %s [%us]: %s",
+             a->path.empty() ? "(inline)" : a->path.c_str(),
+             (unsigned)((a->path.empty() ? kLuaInlineTimeoutMs : kLuaFileTimeoutMs) / 1000),
+             err == ESP_OK ? "ok" : esp_err_to_name(err));
+    s_lua_running = false;
+
+    delete a;
+    vTaskDelete(nullptr);
+}
+
+/* Launch a run on its own task. Returns an HTTP status string on failure
+ * ("409 Conflict" or "500 ..."), nullptr when it started. */
+static const char *start_lua_async(const std::string &path, const std::string &script)
+{
+    if (s_lua_running) return "409 Conflict";
+
+    auto *args = new LuaRunArgs{ path, script };
+
+    s_lua_output[0] = '\0';
+    s_lua_ok = true;
+    std::snprintf(s_lua_label, sizeof(s_lua_label), "%s",
+                  path.empty() ? "(inline)" : path.c_str());
+    s_lua_running = true;
+
+    if (xTaskCreate(lua_run_task, "lua_run", 8192, args, 4, nullptr) != pdPASS) {
+        s_lua_running = false;
+        delete args;
+        return "500 Internal Server Error";
+    }
+    return nullptr;
+}
+
 /* POST /v1/lua/run — run a Lua script
- *   Body: {"script":"..."}  or  {"path":"/lua/foo.lua"}
+ *   Body: {"script":"..."}  or  {"path":"/lua/foo.lua"}  (["async":true])
  *   Response: {"ok":true,"output":"..."}  or  {"ok":false,"error":"..."}
+ *   async:   {"ok":true,"started":true} at once, then poll /v1/lua/status
  */
 static esp_err_t api_lua_run(httpd_req_t *req)
 {
@@ -2165,11 +2256,26 @@ static esp_err_t api_lua_run(httpd_req_t *req)
 
     std::string script = json_get_str(buf, "script");
     std::string path   = json_get_str(buf, "path");
+    const bool async   = json_get_bool(buf, "async", false);
     free(buf);
 
     if (script.empty() && path.empty()) {
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_send(req, "need 'script' or 'path' field", -1);
+        return ESP_OK;
+    }
+
+    if (async) {
+        const char *fail = start_lua_async(path, script);
+        httpd_resp_set_type(req, "application/json");
+        if (fail) {
+            httpd_resp_set_status(req, fail);
+            httpd_resp_send(req, fail[0] == '4'
+                                 ? R"({"ok":false,"error":"a Lua script is already running"})"
+                                 : R"({"ok":false,"error":"failed to start the run task"})", -1);
+            return ESP_OK;
+        }
+        httpd_resp_send(req, R"({"ok":true,"started":true})", -1);
         return ESP_OK;
     }
 
@@ -2183,12 +2289,12 @@ static esp_err_t api_lua_run(httpd_req_t *req)
     output[0] = '\0';
 
     // Saved files are routines (walk, dance) and get the chat worker's
-    // minute; inline snippets keep 5 s. Both are now enforced.
+    // minute; inline snippets keep 5 s. Both are enforced.
     esp_err_t err;
     if (!path.empty()) {
-        err = lua_run_file(path.c_str(), output, 2048, 60000);
+        err = lua_run_file(path.c_str(), output, 2048, kLuaFileTimeoutMs);
     } else {
-        err = lua_run_string(script.c_str(), output, 2048, 5000);
+        err = lua_run_string(script.c_str(), output, 2048, kLuaInlineTimeoutMs);
     }
 
     std::string escaped = json_escape(output);
@@ -2200,6 +2306,25 @@ static esp_err_t api_lua_run(httpd_req_t *req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp.c_str(), resp.size());
+    return ESP_OK;
+}
+
+/* GET /v1/lua/status — {"running":bool,"label":"...","ok":bool,"output":"..."}
+ *
+ * The asynchronous counterpart of /v1/lua/run: while "running" is true the
+ * run is still going; "ok" and "output" describe the last run that finished
+ * (output holds the error text when ok is false). */
+static esp_err_t api_lua_status(httpd_req_t *req)
+{
+    std::string json = std::string("{\"running\":") + (s_lua_running ? "true" : "false");
+    if (s_lua_label[0]) {
+        json += ",\"label\":\"" + json_escape(s_lua_label) + "\"";
+    }
+    json += std::string(",\"ok\":") + (s_lua_ok ? "true" : "false");
+    json += ",\"output\":\"" + json_escape(s_lua_output) + "\"}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json.c_str(), json.size());
     return ESP_OK;
 }
 
@@ -2788,6 +2913,7 @@ bool start_http_server()
 
     // ── Register Lua API endpoints ──
     register_api(s_server, "POST", "/v1/lua/run",              HTTP_POST, api_lua_run);
+    register_api(s_server, "GET",  "/v1/lua/status",           HTTP_GET,  api_lua_status);
     register_api(s_server, "GET",  "/v1/lua/list",             HTTP_GET,  api_lua_list);
     register_api(s_server, "POST", "/v1/lua/save",             HTTP_POST, api_lua_save);
     register_api(s_server, "GET",  "/v1/lua/read",             HTTP_GET,  api_lua_read);
