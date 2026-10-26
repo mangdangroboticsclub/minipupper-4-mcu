@@ -1,5 +1,6 @@
 #include "network/marketplace_proxy.h"
 #include "network/wifi_sta.h"
+#include "agent/agent_config.h"
 
 #include <cstdio>
 #include <cstring>
@@ -198,6 +199,12 @@ std::string gateway_request(const char *method,
     request += "Host: " + std::string(GATEWAY_HOST) + ":" + port_str + "\r\n";
     request += "Connection: close\r\n";
     request += "Accept: application/json\r\n";
+    // The gateway lets a robot toggle/remove only its own skills, proven by
+    // this token; without it those PATCH/DELETE calls get 401.
+    static const std::string robot_token = agent_config::robot_token();
+    if (!robot_token.empty()) {
+        request += "Authorization: Bearer " + robot_token + "\r\n";
+    }
     if (has_body) {
         request += "Content-Type: application/json\r\n";
         request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
