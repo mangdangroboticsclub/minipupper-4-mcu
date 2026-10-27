@@ -17,6 +17,7 @@ namespace network {
 struct StaConfig {
     std::string ssid;
     std::string password;
+    std::string identity;   ///< WPA2/WPA3-Enterprise (eduroam, HKU, ...) login; empty = a normal password network
 };
 
 /**
@@ -36,10 +37,14 @@ enum class StaState : uint8_t {
  * Calling this while already connected will disconnect and reconnect.
  *
  * @param ssid     The network SSID (max 31 chars).
- * @param password The network password (max 63 chars, empty for open).
+ * @param password The network password (max 63 chars, empty for open); for an enterprise
+ *                 network, the account's password (max 127 chars).
+ * @param identity Enterprise networks only (eduroam, a university or company network:
+ *                 WPA2/WPA3-Enterprise, PEAP or TTLS with MSCHAPv2): the login, e.g.
+ *                 "name@hku.hk". Empty (the default) = a normal password network.
  * @return true if the connection attempt was started.
  */
-bool wifi_sta_connect(const char *ssid, const char *password);
+bool wifi_sta_connect(const char *ssid, const char *password, const char *identity = "");
 
 /**
  * @brief Disconnect from the current Wi-Fi network.
@@ -71,6 +76,11 @@ std::string wifi_sta_get_ip();
 std::string wifi_sta_get_ssid();
 
 /**
+ * @brief Why the last join failed ("auth", "not_found", "reason 15", ...), empty when it did not.
+ */
+std::string wifi_sta_get_error();
+
+/**
  * @brief One network heard by a scan (GET /v1/wifi/scan).
  */
 struct ScanResult {
@@ -78,6 +88,7 @@ struct ScanResult {
     int         rssi;
     int         bars;     ///< 1..3 from RSSI, same thresholds as mpv2-claw
     bool        secure;   ///< anything but WIFI_AUTH_OPEN
+    bool        enterprise;   ///< WPA2/WPA3-Enterprise: needs a login (identity) and a password
 };
 
 /**

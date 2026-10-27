@@ -837,6 +837,16 @@ bool init()
         if (nvs_get_i32(s_nvs, "stride", &v) == ESP_OK)   s_cfg.stride    = static_cast<int>(v);
         if (nvs_get_i32(s_nvs, "tilt", &v) == ESP_OK)     s_cfg.tilt      = static_cast<int>(v);
         if (nvs_get_i32(s_nvs, "sgspeed", &v) == ESP_OK)  s_cfg.sg_speed  = static_cast<int>(v);
+        // The walk speed used to default to 50 mm/s, half of minipupperesp's 100: full stick walked at half
+        // speed with half-length steps. The app has no speed slider, so any config save stored that 50.
+        // Once per robot: a stored 50 (the old default) becomes 100 like minipupperesp; any other value stays.
+        if (nvs_get_i32(s_nvs, "sgspd2", &v) != ESP_OK) {
+            if (s_cfg.sg_speed == 50) {
+                s_cfg.sg_speed = 100;
+                nvs_put_i32("sgspeed", s_cfg.sg_speed);
+            }
+            nvs_put_i32("sgspd2", 1);
+        }
         if (nvs_get_i32(s_nvs, "ljspeed", &v) == ESP_OK && v >= 25 && v <= 200) s_lj_speed = static_cast<int>(v);
 
         /* Seed the calibration from kFactoryOffset the first time this firmware
@@ -2224,6 +2234,13 @@ void gait_task()
             ESP_LOGI(TAG, "Gait: %s", name);
         }
 
+        // A move that ended away from the stand (a climb, on the box) is parked: any next command
+        // glides back to the stand first (moves_mpe.inc tj_unpark), idle keeps holding it.
+        if (s_tj_parked && cmd != GaitCmd::None) {
+            tj_unpark();
+            if (s_gait_cmd != cmd) continue;
+        }
+
         // ── Idle (no command) ────────────────────────────────────
         if (cmd == GaitCmd::None) {
             // A skill that claimed the feet or the joints owns the goal buffer,
@@ -2235,10 +2252,14 @@ void gait_task()
             // underneath it every tick. Only one skill runs at a time, so the
             // claim protected the skill from itself and from nobody.
             if (!::skill_owns_pose()) {
-                front_right_ik(0, 0, static_cast<float>(s_cfg.height));
-                rear_right_ik(0, 0, static_cast<float>(s_cfg.height));
-                front_left_ik(0, 0, static_cast<float>(s_cfg.height));
-                rear_left_ik(0, 0, static_cast<float>(s_cfg.height));
+                if (s_tj_parked) {
+                    tj_hold_park();              // still standing on the box: keep the climb's last pose
+                } else {
+                    front_right_ik(0, 0, static_cast<float>(s_cfg.height));
+                    rear_right_ik(0, 0, static_cast<float>(s_cfg.height));
+                    front_left_ik(0, 0, static_cast<float>(s_cfg.height));
+                    rear_left_ik(0, 0, static_cast<float>(s_cfg.height));
+                }
             }
             // When a WASM skill is running, skip the flush so the
             // skill's own servo commands (sent via robot_flush from
@@ -3371,7 +3392,7 @@ void gait_task()
             }
             if (v >= GAIT_TJ_BASE && v < GAIT_TJ_BASE + TJ_NTABLES) {
                 tj_play(v - GAIT_TJ_BASE, cmd);
-                if (still(cmd)) ramp_to_stand(300);
+                if (still(cmd) && !s_tj_parked) ramp_to_stand(300);
                 finish(cmd);
                 continue;
             }

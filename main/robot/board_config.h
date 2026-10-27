@@ -104,6 +104,9 @@
  * the calibration page and watch which joint answers. Servo 1 is the FRONT
  * RIGHT abduction. Then check 2..12. Only then set this number.
  */
+/* Board 2 (SERVO_BOARD 2 in driver_board.h, the default) swaps the front-right and
+ * rear-right legs on top of this map: with map 1, FR is on CN3 and RR on CN4.
+ * Board 1 (the black board) is map 1 exactly as written below. */
 #define SERVO_CS_MAP 1
 
 #if SERVO_CS_MAP == 1

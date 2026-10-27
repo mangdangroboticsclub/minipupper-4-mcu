@@ -5,6 +5,8 @@
    * Used on the Connect page (first-time setup) and in the Home Wi-Fi sheet.
    * GET /v1/wifi/scan lists networks; POST /v1/wifi/connect starts a join and
    * /v1/wifi/status is polled until the robot is on (or gives up).
+   * University / company networks (eduroam, HKU, ...: "enterprise" in the scan) ask for a
+   * username as well as a password, the same login the phone uses on them.
    *
    * @prop network   app-wide network state (staState, staSsid, staIp, ...)
    * @prop onJoined  (ssid, ip) => void — called once the robot is connected
@@ -15,6 +17,9 @@
   let scanning = $state(false);
   let scanError = $state("");
   let picked = $state(null);       // ssid whose password row is open
+  let pickedEnt = $state(false);   // ...and it is an enterprise network (needs a username)
+  let identity = $state("");
+  let idInput = $state(null);
   let password = $state("");
   let showPw = $state(false);
   let joining = $state(null);      // ssid being joined
@@ -53,12 +58,13 @@
     if (!n.secure) { join(n.ssid, ""); return; }
     if (picked === n.ssid) { picked = null; return; }
     picked = n.ssid;
+    pickedEnt = !!n.enterprise;
     password = "";
     showPw = false;
-    queueMicrotask(() => pwInput?.focus());
+    queueMicrotask(() => (pickedEnt ? idInput : pwInput)?.focus());
   }
 
-  async function join(ssid, pw) {
+  async function join(ssid, pw, ident = "") {
     joining = ssid;
     joinError = "";
     picked = null;
@@ -66,7 +72,7 @@
       const res = await fetch("/v1/wifi/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ssid, password: pw }),
+        body: JSON.stringify(ident ? { ssid, password: pw, identity: ident } : { ssid, password: pw }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) throw new Error(data.error || `HTTP ${res.status}`);
@@ -88,8 +94,10 @@
         if (s.sta?.error && Date.now() - started > 4000) {
           joining = null;
           joinError = /auth|password|4way|handshake/i.test(s.sta.error)
-            ? `Wrong password for ${ssid}.`
-            : `Couldn't join ${ssid} (${s.sta.error}).`;
+            ? (ident ? `Wrong username or password for ${ssid}.` : `Wrong password for ${ssid}.`)
+            : s.sta.error === "not_found"
+              ? `The robot can't hear ${ssid} any more.`
+              : `Couldn't join ${ssid} (${s.sta.error}).`;
           return;
         }
       } catch { /* the phone may hop networks for a moment — keep asking */ }
@@ -105,6 +113,15 @@
 
   function submit(e, ssid) {
     e.preventDefault();
+    if (pickedEnt) {
+      const id = identity.trim();
+      if (!id || !password) {
+        joinError = "This network needs your username and password.";
+        return;
+      }
+      join(ssid, password, id);
+      return;
+    }
     if (password.length > 0 && password.length < 8) {
       joinError = "Wi‑Fi passwords are at least 8 characters.";
       return;
@@ -149,12 +166,28 @@
               <span class="state">Joining…</span><span class="spinner" aria-hidden="true"></span>
             {:else if isCur}
               <span class="state ok">Connected</span>
-            {:else if n.secure}
+            {:else if n.enterprise}
+              <span class="tag">Login</span>
               <svg class="lock" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-label="Needs a password"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
             {/if}
           </button>
           {#if picked === n.ssid}
-            <form class="pw" onsubmit={(e) => submit(e, n.ssid)}>
+            <form class="pw" class:ent={pickedEnt} onsubmit={(e) => submit(e, n.ssid)}>
+              {#if pickedEnt}
+                <p class="hint">University / work Wi‑Fi: use the same username and password as on your phone (eduroam: <b>name@hku.hk</b>).</p>
+                <label class="sr" for="wifi-id-{n.ssid}">Username for {n.ssid}</label>
+                <input
+                  id="wifi-id-{n.ssid}"
+                  class="id"
+                  bind:this={idInput}
+                  bind:value={identity}
+                  type="text"
+                  placeholder="Username, e.g. name@hku.hk"
+                  autocomplete="username"
+                  autocapitalize="off"
+                  spellcheck="false"
+                />
+              {/if}
               <label class="sr" for="wifi-pw-{n.ssid}">Password for {n.ssid}</label>
               <div class="pw-box">
                 <input
@@ -223,6 +256,14 @@
   .state.ok { color: #1E7B34; }
 
   .pw { display: flex; gap: 8px; padding: 0 10px 10px; }
+  .pw.ent { flex-wrap: wrap; }
+  .pw.ent .hint { flex-basis: 100%; font-size: 13px; line-height: 1.35; color: var(--sub); margin: 0 2px; }
+  .pw.ent .id {
+    flex-basis: 100%; height: 46px; border-radius: 12px; border: 1.5px solid #D9D4C7;
+    background: #fff; padding: 0 12px; font-size: 16px; color: var(--ink);
+  }
+  .pw.ent .id:focus-visible { outline: none; border-color: var(--ink); }
+  .tag { font-size: 11px; font-weight: 700; color: var(--sub); background: #E6E2D8; border-radius: 6px; padding: 2px 6px; flex-shrink: 0; }
   .pw-box { flex: 1; min-width: 0; position: relative; }
   .pw-box input {
     width: 100%; height: 46px; border-radius: 12px; border: 1.5px solid #D9D4C7;

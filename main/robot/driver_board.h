@@ -20,7 +20,8 @@
  *
  *   SPI2_HOST  MOSI=6  MISO=17  CLK=16
  *   CS: CN3=15  CN4=7  CN5=4  CN6=5
- *   Leg <-> connector:  FR=CN4  FL=CN5  RR=CN3  RL=CN6
+ *   Leg <-> connector:  FR=CN4  FL=CN5  RR=CN3  RL=CN6   (SERVO_BOARD 1)
+ *                       FR=CN3  FL=CN5  RR=CN4  RL=CN6   (SERVO_BOARD 2, default)
  *   No power enable -- the servo rail is tied to Vbat+ unconditionally.
  *
  * Servo ID -> leg mapping (unchanged from the gait code):
@@ -41,10 +42,10 @@ extern "C" {
 
 /* ------------------------------------------------------------------------
  * SERVO BOARD VARIANT SELECT
- *   1 = normal  (black board - this robot, as wired now)
- *   2 = swapped (the other build: in each leg the HIP and CALF servos are
- *                plugged the other way round -> physical channels swapped
- *                1<->3, 4<->6, 7<->9, 10<->12; thighs 2,5,8,11 unchanged)
+ *   1 = normal  (black board: FR=CN4 FL=CN5 RR=CN3 RL=CN6)
+ *   2 = board 2, the DEFAULT: the two right legs on each other's connectors,
+ *                FR on CN3 and RR on CN4 (FL on CN5 and RL on CN6, as on board
+ *                1). Whole three-servo groups swap: 1<->7, 2<->8, 3<->9.
  *   3 = purple board  (same design as board 1, but the 1-2-3 group sits where
  *                4-5-6 is and 7-8-9 where 10-11-12 is. The leg groups swap
  *                straight across with NO within-leg reversal. Net remap,
@@ -59,16 +60,18 @@ extern "C" {
  * SERVO_BOARD and re-flash to switch builds.
  * ---------------------------------------------------------------------- */
 #ifndef SERVO_BOARD
-#define SERVO_BOARD 1
+#define SERVO_BOARD 2   /* board 2 (default); the black board: 1 */
 #endif
 
 static inline int db_phys(int logical){
 #if SERVO_BOARD == 2
+    /* board 2 (the default): FR on CN3, RR on CN4; FL (CN5) and RL (CN6) as on
+     * board 1. The front-right group lands on the rear-right's board and the
+     * other way round, channel for channel. */
     switch(logical){
-        case 1:  return 3;   case 3:  return 1;
-        case 4:  return 6;   case 6:  return 4;
-        case 7:  return 9;   case 9:  return 7;
-        case 10: return 12;  case 12: return 10;
+        case 1:  return 7;   case 7:  return 1;
+        case 2:  return 8;   case 8:  return 2;
+        case 3:  return 9;   case 9:  return 3;
         default: return logical;
     }
 #elif SERVO_BOARD == 3

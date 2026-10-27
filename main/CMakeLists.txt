@@ -167,6 +167,7 @@ idf_component_register(
         esp_timer
         esp_http_server
         esp_wifi
+        wpa_supplicant      # esp_eap_client.h: WPA2-Enterprise (eduroam) logins
         esp_netif
         lwip
         esp_event

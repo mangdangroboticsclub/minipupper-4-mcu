@@ -252,6 +252,48 @@ void lj_play(const lj_jump_t *j, GaitCmd cmd)
 // by the clock, so a late flush does not stretch the move.
 constexpr float TJ_GUARD_DEG = 45.0f;   // tip-over guard: stop past this much pitch / roll
 
+// PARK (minipupperesp tj_park): a table that does not end on the stand - the climbs end standing ON the box,
+// legs set for it - holds its last row instead of ramping to the flat-floor stand. The idle loop keeps that
+// pose (gait_task), and the next command first glides back to the stand (tj_unpark) and then runs.
+bool  s_tj_parked = false;
+float s_tj_park_deg[13] = {};            // servo deg, 0 = the stand, calibration NOT included
+constexpr int TJ_UNPARK_MS = 1200;
+
+void tj_hold_park()
+{
+    for (int ch = 1; ch <= 12; ++ch) set_servo_angle(ch, s_tj_park_deg[ch] + s_offset[ch]);
+}
+
+// Glide from the parked pose to the stand (smoother-step), so the next move starts where it expects to.
+void tj_unpark()
+{
+    if (!s_tj_parked) return;
+    s_tj_parked = false;
+    float to[13];
+    {
+        uint16_t save[13];
+        std::memcpy(save, s_goal_pos, sizeof(save));
+        legs_all(0.0f, static_cast<float>(s_cfg.height));      // the IK stand, read back in degrees
+        const float tpd = servo_ticks_per_deg();
+        for (int ch = 1; ch <= 12; ++ch)
+            to[ch] = (static_cast<float>(s_goal_pos[ch]) - 511.0f) / tpd - s_offset[ch];
+        std::memcpy(s_goal_pos, save, sizeof(save));
+    }
+    ESP_LOGI(TAG, "unpark: gliding from the parked pose to the stand in %d ms", TJ_UNPARK_MS);
+    set_all_servo_speed(0);
+    const uint32_t t0 = millis();
+    for (;;) {
+        uint32_t el = millis() - t0;
+        if (el > static_cast<uint32_t>(TJ_UNPARK_MS)) el = TJ_UNPARK_MS;
+        const float u = static_cast<float>(el) / static_cast<float>(TJ_UNPARK_MS);
+        const float w = u * u * u * (u * (u * 6.0f - 15.0f) + 10.0f);
+        for (int ch = 1; ch <= 12; ++ch)
+            set_servo_angle(ch, s_tj_park_deg[ch] + w * (to[ch] - s_tj_park_deg[ch]) + s_offset[ch]);
+        flush();
+        if (el >= static_cast<uint32_t>(TJ_UNPARK_MS)) break;
+    }
+}
+
 void tj_play(int k, GaitCmd cmd)
 {
     if (k < 0 || k >= TJ_NTABLES) return;
@@ -265,6 +307,36 @@ void tj_play(int k, GaitCmd cmd)
     // tune_preset: 0.. = TUNE_PRESETS, <= -1 = leave the gains alone
     const bool pushed = (T->tune_preset >= 0) && gains_push(T->tune_preset);
     set_all_servo_speed(0);
+
+    // SOFT START (minipupperesp): row 0 is the stand (0 deg). If the robot is elsewhere - another stand
+    // height, the end of a walk or of another move - glide there first (0.5 / 0.9 s, smoother-step)
+    // instead of jumping to row 0 in one 5 ms step.
+    {
+        const float tpd = servo_ticks_per_deg();
+        float from[13], maxd = 0.0f;
+        for (int ch = 1; ch <= 12; ++ch) {
+            from[ch] = (static_cast<float>(s_goal_pos[ch]) - 511.0f) / tpd - s_offset[ch];
+            const float d = std::fabs(from[ch] - static_cast<float>(T->deg10[0][ch - 1]) / 10.0f);
+            if (d > maxd) maxd = d;
+        }
+        if (maxd > 1.0f) {
+            const int ms = maxd > 15.0f ? 900 : 500;
+            ESP_LOGI(TAG, "trajopt: soft start, %.1f deg from row 0, %d ms", maxd, ms);
+            const uint32_t s0 = millis();
+            for (;;) {
+                uint32_t el = millis() - s0;
+                if (el > static_cast<uint32_t>(ms)) el = ms;
+                const float u = static_cast<float>(el) / static_cast<float>(ms);
+                const float w = u * u * u * (u * (u * 6.0f - 15.0f) + 10.0f);
+                for (int ch = 1; ch <= 12; ++ch) {
+                    const float b = static_cast<float>(T->deg10[0][ch - 1]) / 10.0f;
+                    set_servo_angle(ch, from[ch] + w * (b - from[ch]) + s_offset[ch]);
+                }
+                flush();
+                if (el >= static_cast<uint32_t>(ms) || !still(cmd)) break;
+            }
+        }
+    }
 
     // TIP-OVER GUARD (minipupperesp: "after the gallop reared up and flipped
     // over backwards on the real robot"). The jumps only - the Character moves
@@ -326,6 +398,22 @@ void tj_play(int k, GaitCmd cmd)
     vTaskDelay(pdMS_TO_TICKS(200));
     if (pushed) gains_pop();
     if (cmd == GaitCmd::CharShow) play_mark("charshow");
+
+    // Ends away from the stand (a climb, on top of the box): park there - see s_tj_parked.
+    if (!aborted && sent > 0 && cmd != GaitCmd::CharShow) {
+        float m = 0.0f;
+        for (int ch = 1; ch <= 12; ++ch) {
+            const float d = std::fabs(static_cast<float>(T->deg10[T->frames - 1][ch - 1]) / 10.0f);
+            if (d > m) m = d;
+        }
+        if (m > 3.0f) {
+            for (int ch = 1; ch <= 12; ++ch)
+                s_tj_park_deg[ch] = static_cast<float>(T->deg10[T->frames - 1][ch - 1]) / 10.0f;
+            s_tj_parked = true;
+            ESP_LOGI(TAG, "trajopt '%s' ends away from the stand (%.0f deg): holding that pose - "
+                          "the next command glides back to the stand first", T->name, m);
+        }
+    }
 }
 
 // The Character section's show: every dog move in its .show order.
@@ -549,6 +637,41 @@ static const uint16_t BF_T9_MOVE [12] = { 1000,  350,  350,  135,   96,   16,   
 static const uint16_t BF_T9_DELAY[12] = {  500,    0,    0,    0,    0,    0,    0,    0,    0,    0,  300,    0 };
 static const uint8_t  BF_T9_BLEND[12] = {  100,  100,  100,  100,  100,  100,  100,  100,  100,  100,  100,  100 };
 
+// Backflip K7 (minipupperesp BF_T30, "Backflip K7: K5 + soft catch"): K5's flip, then the paws reach for the
+// floor with straighter legs (66 mm) and the legs give and sink into the crouch (48 mm) over ~80 ms.
+static const uint16_t BF_T10_REF[13] =
+    {    0,  425,  514,  658,  495,  507,  367,  504,  590,  455,  499,  512,  603 };
+static const int16_t BF_T10_DELTA[8][13] = {
+    {   0,    0, -101, -244,    0,  101,  244,    0, -152,  -38,    0,  152,   38},
+    {   0,    0, -177,   60,    0,  177,  -60,    0, -141,  -71,    0,  141,   71},
+    {   0,    0, -201,  -11,    0,  201,   11,    0, -241,   43,    0,  241,  -43},
+    {   0,    0, -387, -469,    0,  387,  469,    0,  142,  402,    0, -142, -402},
+    {   0,    0, -260, -528,    0,  260,  528,    0,  -48, -177,    0,   48,  177},
+    {   0,    0,   12,   -9,    0,  -12,    9,    0,   12,   -9,    0,  -12,    9},
+    {   0,    0,   58,  -40,    0,  -58,   40,    0,   58,  -40,    0,  -58,   40},
+    {   0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0},
+};
+static const uint16_t BF_T10_MOVE [9] = { 1000,  600,   20,   23,   57,   53,   29,   82,  600 };
+static const uint16_t BF_T10_DELAY[9] = {  500,  300,   31,   28,   87,   52,   15,  181,  300 };
+static const uint8_t  BF_T10_BLEND[9] = {  100,  100,  100,  100,  100,  100,  100,  100,  100 };
+// Backflip K7H (minipupperesp BF_T35, "Backflip K7H: K7 + hip damper"): K7 until the tuck, then the catch and
+// the sink with the legs splaying sideways (hips ~24 deg). Sim: 10/10, ~18% softer hit than K7.
+static const uint16_t BF_T11_REF[13] =
+    {    0,  425,  514,  658,  495,  507,  367,  504,  590,  455,  499,  512,  603 };
+static const int16_t BF_T11_DELTA[8][13] = {
+    {   0,    0, -101, -244,    0,  101,  244,    0, -152,  -38,    0,  152,   38},
+    {   0,    0, -177,   60,    0,  177,  -60,    0, -141,  -71,    0,  141,   71},
+    {   0,    0, -201,  -11,    0,  201,   11,    0, -241,   43,    0,  241,  -43},
+    {   0,    0, -387, -469,    0,  387,  469,    0,  142,  402,    0, -142, -402},
+    {   0,    0, -260, -528,    0,  260,  528,    0,  -48, -177,    0,   48,  177},
+    {   0,   -9,    0,    0,    9,    0,    0,    9,    0,    0,   -9,    0,    0},
+    {   0,  -83,   75,  -49,   83,  -75,   49,   83,   75,  -49,  -83,  -75,   49},
+    {   0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0},
+};
+static const uint16_t BF_T11_MOVE [9] = { 1000,  600,   20,   23,   57,   42,   30,   43,  600 };
+static const uint16_t BF_T11_DELAY[9] = {  500,  300,   31,   28,   87,   51,   35,  123,  300 };
+static const uint8_t  BF_T11_BLEND[9] = {  100,  100,  100,  100,  100,  100,  100,  100,  100 };
+
 struct BfPreset {
     const char     *name;       // wire name
     const char     *note;
@@ -558,26 +681,35 @@ struct BfPreset {
     const uint16_t *move_ms;    // [n]
     const uint16_t *delay_ms;   // [n]
     const uint8_t  *blend;      // [n], percent
+    int             shift_after; // frame after which shift_ms is added (minipupperesp's fixed landing timing)
+    int             shift_ms;    //   0 / 0 = none
 };
 const BfPreset BF_PRESETS[] = {
     { "backflip1",          "Backflip success (trial 1): 360 deg, lands on its feet", 11,
-      BF_T1_REF, &BF_T1_DELTA[0][0], BF_T1_MOVE, BF_T1_DELAY, BF_T1_BLEND },
+      BF_T1_REF, &BF_T1_DELTA[0][0], BF_T1_MOVE, BF_T1_DELAY, BF_T1_BLEND, 0, 0 },
     { "backflip_stable",    "Backflip stable: symmetric L/R, 8 frames, rear tuck", 8,
-      BF_T2_REF, &BF_T2_DELTA[0][0], BF_T2_MOVE, BF_T2_DELAY, BF_T2_BLEND },
+      BF_T2_REF, &BF_T2_DELTA[0][0], BF_T2_MOVE, BF_T2_DELAY, BF_T2_BLEND, 0, 0 },
     { "backflip_clean",     "Backflip clean: symmetric L/R, 7 frames, 3.8 s", 7,
-      BF_T4_REF, &BF_T4_DELTA[0][0], BF_T4_MOVE, BF_T4_DELAY, BF_T4_BLEND },
+      BF_T4_REF, &BF_T4_DELTA[0][0], BF_T4_MOVE, BF_T4_DELAY, BF_T4_BLEND, 0, 0 },
     { "backflip_stable_v0", "Backflip stable (pre-mirror): the asymmetric original, fallback", 8,
-      BF_T2_REF, &BF_T3_DELTA[0][0], BF_T3_MOVE, BF_T3_DELAY, BF_T3_BLEND },
+      BF_T2_REF, &BF_T3_DELTA[0][0], BF_T3_MOVE, BF_T3_DELAY, BF_T3_BLEND, 0, 0 },
     { "backflip_clean_opt", "Backflip clean OPT: sim lands at 264 deg (was 250)", 7,
-      BF_T5_REF, &BF_T5_DELTA[0][0], BF_T5_MOVE, BF_T5_DELAY, BF_T5_BLEND },
+      BF_T5_REF, &BF_T5_DELTA[0][0], BF_T5_MOVE, BF_T5_DELAY, BF_T5_BLEND, 0, 0 },
     { "backflip_stable_opt","Backflip stable OPT: sim lands at 282 deg (was 265)", 8,
-      BF_T6_REF, &BF_T6_DELTA[0][0], BF_T6_MOVE, BF_T6_DELAY, BF_T6_BLEND },
+      BF_T6_REF, &BF_T6_DELTA[0][0], BF_T6_MOVE, BF_T6_DELAY, BF_T6_BLEND, 0, 0 },
     { "longjump_1hop",      "Long Jump 1-hop (Lite 3): sim one hop 16-20 cm, hips fixed", 20,
-      BF_T7_REF, &BF_T7_DELTA[0][0], BF_T7_MOVE, BF_T7_DELAY, BF_T7_BLEND },
+      BF_T7_REF, &BF_T7_DELTA[0][0], BF_T7_MOVE, BF_T7_DELAY, BF_T7_BLEND, 0, 0 },
     { "longjump_teach",     "Long Jump teach OPT: 7 taught frames, re-timed, 5-12 cm", 7,
-      BF_T8_REF, &BF_T8_DELTA[0][0], BF_T8_MOVE, BF_T8_DELAY, BF_T8_BLEND },
+      BF_T8_REF, &BF_T8_DELTA[0][0], BF_T8_MOVE, BF_T8_DELAY, BF_T8_BLEND, 0, 0 },
     { "farjump_table",      "Far Jump (teach table): sim one hop 18-23 cm, hips fixed", 12,
-      BF_T9_REF, &BF_T9_DELTA[0][0], BF_T9_MOVE, BF_T9_DELAY, BF_T9_BLEND },
+      BF_T9_REF, &BF_T9_DELTA[0][0], BF_T9_MOVE, BF_T9_DELAY, BF_T9_BLEND, 0, 0 },
+    // minipupperesp K7 / K7H, played the way it plays them by default: on Strong (gains_push(0)),
+    // and with its fixed landing timing - the catch frame starts later by +6 ms (K7) / +14 ms (K7H),
+    // added after frame 5 (bf_lt_def: the sink is frame 7, the shift goes after frame 7 - 2).
+    { "backflip_k7",        "Backflip K7: K5 + soft catch (minipupperesp), Strong", 9,
+      BF_T10_REF, &BF_T10_DELTA[0][0], BF_T10_MOVE, BF_T10_DELAY, BF_T10_BLEND, 5, 6 },
+    { "backflip_k7h",       "Backflip K7H: K7 + hip damper (minipupperesp), Strong", 9,
+      BF_T11_REF, &BF_T11_DELTA[0][0], BF_T11_MOVE, BF_T11_DELAY, BF_T11_BLEND, 5, 14 },
 };
 constexpr int BF_NPRESETS = sizeof(BF_PRESETS) / sizeof(BF_PRESETS[0]);
 constexpr int BF_MAX_FRAMES = 32;
@@ -607,6 +739,7 @@ void bf_play(int k, GaitCmd cmd)
         const int blend = p.blend[f] > 0 ? p.blend[f] : 100;
         const int delay = p.delay_ms[f];   // 0 is a real value here (presets spell every one out)
         int v = move_ms(f) * blend / 100 + delay;
+        if (f == p.shift_after) v += p.shift_ms;   // K7 / K7H landing timing (minipupperesp bf_lt_shift)
         return v < 1 ? 1 : v;
     };
     (void)BF_DEF_DELAY; (void)BF_REF_DELAY;

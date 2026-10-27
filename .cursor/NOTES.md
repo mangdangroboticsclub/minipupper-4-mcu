@@ -219,7 +219,8 @@ it (e.g. to 300). Assuming the wrong range scales every commanded angle.
 
 **Logical vs physical channels.** `db_phys()` remaps logical servo ids to
 physical channels for alternative board builds (`SERVO_BOARD` 1 = identity,
-2 = hip/knee swapped per leg, 3 = "purple board" cross-leg swap). It is applied
+the black board; 2 = board 2, the default: FR on CN3 and RR on CN4, groups
+1-3 <-> 7-9; 3 = "purple board" cross-leg swap). It is applied
 only at the SPI boundary so gait, calibration and feedback all agree.
 
 **Two raw position frames** (`robot.h`): the gait frame (0..1023, 511 centre,

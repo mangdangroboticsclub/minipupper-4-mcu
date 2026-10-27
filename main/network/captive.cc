@@ -1,6 +1,7 @@
 #include "network/captive.h"
 
 #include <cstring>
+#include <strings.h>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -19,6 +20,28 @@ constexpr int DNS_MAX = 512;
 constexpr uint32_t DNS_TTL_S = 60;
 bool s_started = false;
 
+/* Only the phones' and laptops' "is there internet?" checks get the robot's address. Every other name gets a
+ * fast "no such name": when every name was the robot, every app on the phone (and every other browser tab)
+ * sent its traffic to the robot's small web server, which has 5 connections for the app. */
+const char *const CHECK_HOSTS[] = {
+    "connectivitycheck.gstatic.com", "www.gstatic.com", "connectivitycheck.android.com",
+    "clients1.google.com", "clients3.google.com", "www.google.com", "play.googleapis.com",
+    "captive.apple.com", "www.apple.com", "www.appleiphonecell.com", "www.itools.info", "www.ibook.info",
+    "www.airport.us", "www.thinkdifferent.us",
+    "www.msftconnecttest.com", "ipv6.msftconnecttest.com", "www.msftncsi.com", "dns.msftncsi.com",
+    "detectportal.firefox.com", "nmcheck.gnome.org", "connectivity-check.ubuntu.com",
+    "connect.rom.miui.com", "connectivitycheck.platform.hicloud.com", "connectivitycheck.cbg-app.huawei.com",
+    "wifi.vivo.com.cn", "conn1.oppomobile.com", "conn2.oppomobile.com", "www.qualcomm.cn",
+    "connectivitycheck.samsung.com", "captiveportal.samsung.com",
+};
+
+bool is_check_host(const char *name)
+{
+    for (const char *h : CHECK_HOSTS)
+        if (strcasecmp(name, h) == 0) return true;
+    return false;
+}
+
 /* One reply for one query, in place in `buf` (DNS_MAX bytes); returns its length, 0 to stay silent. */
 int dns_answer(uint8_t *buf, int len, uint32_t ip_be)
 {
@@ -29,29 +52,41 @@ int dns_answer(uint8_t *buf, int len, uint32_t ip_be)
     const uint16_t qd = (uint16_t)(buf[4] << 8 | buf[5]);
     if (qd < 1) return 0;
 
-    // the first question: its name, type and class
+    // the first question: its name (kept, dotted, for the check-host test), type and class
+    char name[128];
+    int nl = 0;
     int p = 12;
     while (p < len && buf[p] != 0) {
         if ((buf[p] & 0xC0) != 0) return 0;             // no compression in a question
-        p += buf[p] + 1;
+        const int l = buf[p];
+        if (p + 1 + l > len) return 0;
+        if (nl + l + 1 < (int)sizeof(name)) {
+            if (nl) name[nl++] = '.';
+            std::memcpy(name + nl, buf + p + 1, l);
+            nl += l;
+        }
+        p += l + 1;
     }
+    name[nl] = '\0';
     p += 1;                                             // the root label
     if (p + 4 > len) return 0;
     const uint16_t qtype  = (uint16_t)(buf[p] << 8 | buf[p + 1]);
     const uint16_t qclass = (uint16_t)(buf[p + 2] << 8 | buf[p + 3]);
     p += 4;                                             // end of the first question
 
-    const bool a = (qtype == 1 || qtype == 255) && (qclass & 0x7FFF) == 1;
+    const bool known = is_check_host(name);
+    const bool a = known && (qtype == 1 || qtype == 255) && (qclass & 0x7FFF) == 1;
     if (a && p + 16 > DNS_MAX) return 0;
 
-    // header: same id; QR, AA, RD as asked, RA; NOERROR; one question, one answer or none
+    // header: same id; QR, AA, RD as asked, RA; NOERROR (a check host) or NXDOMAIN (anything else);
+    // one question, one answer or none
     buf[2] = (uint8_t)(0x84 | (flags >> 8 & 0x01));
-    buf[3] = 0x80;
+    buf[3] = known ? 0x80 : 0x83;
     buf[4] = 0; buf[5] = 1;
     buf[6] = 0; buf[7] = a ? 1 : 0;
     buf[8] = 0; buf[9] = 0;
     buf[10] = 0; buf[11] = 0;                           // EDNS and the rest dropped
-    if (!a) return p;                                   // AAAA, HTTPS, ...: "no such record", fall back to A
+    if (!a) return p;                                   // not a check host: NXDOMAIN; AAAA, HTTPS, ...: no record
 
     uint8_t *o = buf + p;
     *o++ = 0xC0; *o++ = 0x0C;                           // the name: the question's
@@ -81,7 +116,7 @@ void dns_task(void *)
                     close(s);
                     s = -1;
                 } else {
-                    ESP_LOGI(TAG, "DNS on %s:53: every name is the robot (phones stay on its Wi-Fi)", AP_IP_ADDR);
+                    ESP_LOGI(TAG, "DNS on %s:53: the internet checks are the robot, other names do not exist", AP_IP_ADDR);
                 }
             }
             if (s < 0) { vTaskDelay(pdMS_TO_TICKS(2000)); continue; }

@@ -9,6 +9,7 @@
 #include "esp_netif.h"
 #include "esp_netif_ip_addr.h"
 #include "esp_wifi.h"
+#include "esp_eap_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "nvs.h"
@@ -23,6 +24,7 @@ namespace {
 constexpr const char *NVS_NS = "wifi_sta";
 constexpr const char *NVS_KEY_SSID = "ssid";
 constexpr const char *NVS_KEY_PASS = "password";
+constexpr const char *NVS_KEY_IDENT = "identity";    // enterprise login; absent = a password network
 
 /* ── Event bits ─────────────────────────────────────────────── */
 EventGroupHandle_t s_evt_group = nullptr;
@@ -36,6 +38,11 @@ bool s_initialized = false;
 StaState s_state = StaState::Disconnected;
 std::string s_current_ssid;
 std::string s_current_ip;
+std::string s_last_error;            // why the last join failed (GET /v1/wifi/status "error")
+bool s_enterprise = false;           // WPA2-Enterprise is switched on in the driver
+bool s_want = false;                 // a network was asked for (not disconnected / forgotten)
+int  s_retries = 0;                  // reconnects since the last IP
+constexpr int MAX_RETRIES = 5;
 
 void wifi_event_handler(void *arg, esp_event_base_t base,
                         int32_t id, void *data)
@@ -52,16 +59,28 @@ void wifi_event_handler(void *arg, esp_event_base_t base,
         s_state = StaState::Disconnected;
         s_current_ip.clear();
 
-        if (event->reason == WIFI_REASON_AUTH_EXPIRE ||
-            event->reason == WIFI_REASON_AUTH_FAIL ||
-            event->reason == WIFI_REASON_HANDSHAKE_TIMEOUT ||
-            event->reason == WIFI_REASON_NO_AP_FOUND) {
-            // Credential or availability issue — mark failed
+        const int r = event->reason;
+        const bool auth = r == WIFI_REASON_AUTH_EXPIRE || r == WIFI_REASON_AUTH_FAIL ||
+                          r == WIFI_REASON_HANDSHAKE_TIMEOUT || r == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+                          r == WIFI_REASON_802_1X_AUTH_FAILED || r == WIFI_REASON_MIC_FAILURE;
+        if (auth || r == WIFI_REASON_NO_AP_FOUND || (s_want && s_retries >= MAX_RETRIES)) {
+            // Credential or availability issue (or it kept dropping) — mark failed, stop trying
             s_state = StaState::Failed;
+            s_last_error = auth ? "auth" : r == WIFI_REASON_NO_AP_FOUND ? "not_found"
+                                         : "reason " + std::to_string(r);
             if (s_evt_group) xEventGroupSetBits(s_evt_group, BIT_FAILED);
         } else {
-            // Transient — auto-reconnect will be attempted by IDF
+            // Transient (beacon timeout, the AP roamed us off, ...): the driver does NOT reconnect by
+            // itself, so ask again - a university network drops and roams clients far more than a home
+            // router. Not after wifi_sta_disconnect() / _forget(), and at most MAX_RETRIES times.
             if (s_evt_group) xEventGroupSetBits(s_evt_group, BIT_DISCONNECTED);
+            // ASSOC_LEAVE is this robot leaving on purpose (wifi_sta_connect() stops the driver first).
+            if (s_want && r != WIFI_REASON_ASSOC_LEAVE) {
+                ++s_retries;
+                s_state = StaState::Connecting;
+                ESP_LOGI(TAG, "STA reconnecting (%d/%d)", s_retries, MAX_RETRIES);
+                esp_wifi_connect();
+            }
         }
     }
 }
@@ -75,6 +94,8 @@ void ip_event_handler(void *arg, esp_event_base_t base,
         esp_ip4addr_ntoa(&event->ip_info.ip, ip_str, sizeof(ip_str));
         s_current_ip = ip_str;
         s_state = StaState::Connected;
+        s_retries = 0;
+        s_last_error.clear();
 
         ESP_LOGI(TAG, "STA got IP: %s", s_current_ip.c_str());
         if (s_evt_group) xEventGroupSetBits(s_evt_group, BIT_CONNECTED);
@@ -86,7 +107,7 @@ void ip_event_handler(void *arg, esp_event_base_t base,
 }
 
 /* ── NVS persistence ────────────────────────────────────────── */
-static bool save_credentials(const char *ssid, const char *password)
+static bool save_credentials(const char *ssid, const char *password, const char *identity)
 {
     nvs_handle_t nvs;
     if (nvs_open(NVS_NS, NVS_READWRITE, &nvs) != ESP_OK) {
@@ -109,6 +130,18 @@ static bool save_credentials(const char *ssid, const char *password)
         return false;
     }
 
+    if (identity && identity[0]) {
+        ret = nvs_set_str(nvs, NVS_KEY_IDENT, identity);
+    } else {
+        ret = nvs_erase_key(nvs, NVS_KEY_IDENT);
+        if (ret == ESP_ERR_NVS_NOT_FOUND) ret = ESP_OK;
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "NVS write identity failed: %s", esp_err_to_name(ret));
+        nvs_close(nvs);
+        return false;
+    }
+
     ret = nvs_commit(nvs);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "NVS commit failed: %s", esp_err_to_name(ret));
@@ -121,14 +154,14 @@ static bool save_credentials(const char *ssid, const char *password)
     return true;
 }
 
-static bool load_credentials(std::string &ssid, std::string &password)
+static bool load_credentials(std::string &ssid, std::string &password, std::string &identity)
 {
     nvs_handle_t nvs;
     if (nvs_open(NVS_NS, NVS_READONLY, &nvs) != ESP_OK) {
         return false;
     }
 
-    char buf[64];
+    char buf[128];                    // an enterprise password can be longer than a WPA2-PSK one
     size_t len;
 
     len = sizeof(buf);
@@ -146,6 +179,13 @@ static bool load_credentials(std::string &ssid, std::string &password)
         password.clear();
     }
 
+    len = sizeof(buf);
+    if (nvs_get_str(nvs, NVS_KEY_IDENT, buf, &len) == ESP_OK) {
+        identity = buf;
+    } else {
+        identity.clear();
+    }
+
     nvs_close(nvs);
     return true;
 }
@@ -157,6 +197,7 @@ static void erase_credentials()
 
     nvs_erase_key(nvs, NVS_KEY_SSID);
     nvs_erase_key(nvs, NVS_KEY_PASS);
+    nvs_erase_key(nvs, NVS_KEY_IDENT);
     nvs_commit(nvs);
     nvs_close(nvs);
 
@@ -199,11 +240,11 @@ bool init_wifi_sta()
     s_initialized = true;
 
     // Try to load saved credentials and auto-connect
-    std::string saved_ssid, saved_password;
-    if (load_credentials(saved_ssid, saved_password) && !saved_ssid.empty()) {
-        ESP_LOGI(TAG, "Found saved STA credentials for '%s' — auto-connecting",
-                 saved_ssid.c_str());
-        wifi_sta_connect(saved_ssid.c_str(), saved_password.c_str());
+    std::string saved_ssid, saved_password, saved_identity;
+    if (load_credentials(saved_ssid, saved_password, saved_identity) && !saved_ssid.empty()) {
+        ESP_LOGI(TAG, "Found saved STA credentials for '%s'%s — auto-connecting",
+                 saved_ssid.c_str(), saved_identity.empty() ? "" : " (enterprise login)");
+        wifi_sta_connect(saved_ssid.c_str(), saved_password.c_str(), saved_identity.c_str());
     } else {
         ESP_LOGI(TAG, "No saved STA credentials — staying in AP-only mode");
     }
@@ -232,8 +273,11 @@ void deinit_wifi_sta()
     ESP_LOGI(TAG, "Wi-Fi STA deinitialised");
 }
 
-bool wifi_sta_connect(const char *ssid, const char *password)
+bool wifi_sta_connect(const char *ssid, const char *password, const char *identity)
 {
+    if (!password) password = "";
+    if (!identity) identity = "";
+    const bool enterprise = identity[0] != '\0';
     if (!s_initialized) {
         ESP_LOGE(TAG, "STA not initialised");
         return false;
@@ -249,8 +293,12 @@ bool wifi_sta_connect(const char *ssid, const char *password)
         ESP_LOGE(TAG, "SSID too long (%zu chars, max 31)", std::strlen(ssid));
         return false;
     }
-    if (std::strlen(password) > 63) {
-        ESP_LOGE(TAG, "Password too long (%zu chars, max 63)", std::strlen(password));
+    if (std::strlen(password) > (enterprise ? 127u : 63u)) {
+        ESP_LOGE(TAG, "Password too long (%zu chars, max %d)", std::strlen(password), enterprise ? 127 : 63);
+        return false;
+    }
+    if (std::strlen(identity) > 127) {
+        ESP_LOGE(TAG, "Login too long (%zu chars, max 127)", std::strlen(identity));
         return false;
     }
 
@@ -264,7 +312,7 @@ bool wifi_sta_connect(const char *ssid, const char *password)
     wifi_config_t sta_config = {};
     std::strncpy(reinterpret_cast<char *>(sta_config.sta.ssid),
                  ssid, sizeof(sta_config.sta.ssid) - 1);
-    if (std::strlen(password) > 0) {
+    if (!enterprise && std::strlen(password) > 0) {   // enterprise: the password goes to the EAP client
         std::strncpy(reinterpret_cast<char *>(sta_config.sta.password),
                      password, sizeof(sta_config.sta.password) - 1);
     }
@@ -276,12 +324,39 @@ bool wifi_sta_connect(const char *ssid, const char *password)
 
     s_current_ssid = ssid;
     s_state = StaState::Connecting;
+    s_last_error.clear();
+    s_want = true;
+    s_retries = 0;
 
     // Persist to NVS
-    save_credentials(ssid, password);
+    save_credentials(ssid, password, identity);
 
     // Restart Wi-Fi (AP + STA), then connect
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+
+    // WPA2/WPA3-Enterprise (eduroam, HKU, ...): 802.1X with PEAP or TTLS, MSCHAPv2 inside - what
+    // eduroam and nearly every university uses; the server picks PEAP or TTLS, the client does both.
+    // The login goes out as both the outer identity and the inner username (eduroam routes on the
+    // "@hku.hk" part). The RADIUS server's certificate is not checked: the robot has no clock or CA
+    // list for it, the same choice a phone offers as "Do not validate".
+    if (enterprise) {
+        const auto *id = reinterpret_cast<const unsigned char *>(identity);
+        const auto *pw = reinterpret_cast<const unsigned char *>(password);
+        esp_eap_client_set_identity(id, (int)std::strlen(identity));
+        esp_eap_client_set_username(id, (int)std::strlen(identity));
+        esp_eap_client_set_password(pw, (int)std::strlen(password));
+        esp_eap_client_set_ttls_phase2_method(ESP_EAP_TTLS_PHASE2_MSCHAPV2);
+        esp_err_t e = esp_wifi_sta_enterprise_enable();
+        if (e != ESP_OK) ESP_LOGE(TAG, "WPA2-Enterprise enable failed: %s", esp_err_to_name(e));
+        s_enterprise = (e == ESP_OK);
+    } else if (s_enterprise) {
+        esp_wifi_sta_enterprise_disable();
+        esp_eap_client_clear_identity();
+        esp_eap_client_clear_username();
+        esp_eap_client_clear_password();
+        s_enterprise = false;
+    }
+
     ESP_ERROR_CHECK(esp_wifi_start());
     (void)esp_wifi_set_ps(WIFI_PS_NONE);      // as wifi_ap.cc: no lag on the AP
     esp_err_t ret = esp_wifi_connect();
@@ -291,12 +366,13 @@ bool wifi_sta_connect(const char *ssid, const char *password)
         return false;
     }
 
-    ESP_LOGI(TAG, "Connecting to STA network '%s'", ssid);
+    ESP_LOGI(TAG, "Connecting to STA network '%s'%s", ssid, enterprise ? " (enterprise login)" : "");
     return true;
 }
 
 void wifi_sta_disconnect()
 {
+    s_want = false;                   // before esp_wifi_disconnect(): its event must not reconnect
     if (s_state != StaState::Disconnected) {
         esp_wifi_disconnect();
         s_state = StaState::Disconnected;
@@ -327,10 +403,15 @@ std::string wifi_sta_get_ssid()
     return s_current_ssid;
 }
 
+std::string wifi_sta_get_error()
+{
+    return s_state == StaState::Failed ? s_last_error : std::string();
+}
+
 /* ── Scan (ported from mpv2-claw http_server_mpx_wifi_api.c) ── */
 
 namespace {
-constexpr uint16_t SCAN_MAX = 24;
+constexpr uint16_t SCAN_MAX = 40;    // a campus hears many access points of the same few names
 
 int scan_bars(int rssi)
 {
@@ -382,8 +463,11 @@ esp_err_t wifi_sta_scan(std::vector<ScanResult> &out)
             if (r.ssid == ssid) { seen = true; break; }
         }
         if (seen) continue;
+        const wifi_auth_mode_t m = recs[i].authmode;
+        const bool ent = m == WIFI_AUTH_WPA2_ENTERPRISE || m == WIFI_AUTH_WPA3_ENTERPRISE ||
+                         m == WIFI_AUTH_WPA2_WPA3_ENTERPRISE || m == WIFI_AUTH_WPA3_ENT_192;
         out.push_back(ScanResult{ ssid, recs[i].rssi, scan_bars(recs[i].rssi),
-                                  recs[i].authmode != WIFI_AUTH_OPEN });
+                                  m != WIFI_AUTH_OPEN, ent });
     }
     return ESP_OK;
 }

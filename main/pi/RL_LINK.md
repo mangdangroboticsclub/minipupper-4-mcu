@@ -84,7 +84,7 @@ steps aside on its own when `mp3link` opens the port.
 | `RAW_REPLY` | bench diagnostic | status 5 (not kept) |
 | `GET_LIVE` | ids 0..13 | ids 0..13 (13, supply current, needs AT32 fw 0.0.9) |
 | Stalled tick | task watchdog reboots after 500 ms | no reboot; the boards hold their last frame (the firmware's task watchdog setup belongs to the whole app) |
-| Servo board variant | none | `SERVO_BOARD` remap applies: ids are logical, as in the rest of the firmware |
+| Servo board variant | `SERVO_BOARD` 1 or 2 (2, the default: FR on CN3, RR on CN4) | `SERVO_BOARD` remap applies: ids are logical, as in the rest of the firmware |
 
 ## Checking it
 

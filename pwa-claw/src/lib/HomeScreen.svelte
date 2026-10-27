@@ -88,6 +88,9 @@
     { id: "longjump", label: "Long Jump", emoji: "🦘", color: "#D97A29", category: "gait" },
     { id: "farjump", label: "Far Jump", emoji: "🚀", color: "#D97A29", category: "gait" },
     { id: "backflip", label: "Backflip", emoji: "🤸", color: "#D14949", category: "gait" },
+    { id: "backflip_k7", label: "Backflip K7", emoji: "🤸", color: "#D14949", category: "gait" },
+    { id: "backflip_k7h", label: "Backflip K7H", emoji: "🤸", color: "#D14949", category: "gait" },
+    { id: "climb7_flow_proud", label: "Climb 7 cm", emoji: "🧗", color: "#D97A29", category: "gait" },
   ];
   const DEFAULT_PINNED = ["paw", "situp", "pushup", "stretch", "bow", "shake", "moonwalk"];
 

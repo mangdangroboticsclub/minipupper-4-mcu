@@ -79,9 +79,10 @@ then it looks like the robot fighting itself.
 4. Repeat for 2..12. In order, the expected answers are:
    FR abd, FR hip, FR knee, FL abd, FL hip, FL knee, RR abd, RR hip, RR knee,
    RL abd, RL hip, RL knee.
-5. If they are not in that order, change `SERVO_CS_MAP` (or `SERVO_BOARD` for a
-   within-leg hip/calf swap) in `main/robot/board_config.h` and reflash. Both
-   are documented in full there. **Change the map, not the wiring.**
+5. If they are not in that order, change `SERVO_CS_MAP` in
+   `main/robot/board_config.h` or `SERVO_BOARD` in `main/robot/driver_board.h`
+   (2, the default: board 2, FR on CN3 and RR on CN4; 1: the black board, FR on
+   CN4 and RR on CN3) and reflash. Both are documented in full there. **Change the map, not the wiring.**
 
 The calibration page in the PWA is the same test with a slider and is easier to
 drive one-handed — but note that its leg labels were wrong until this change

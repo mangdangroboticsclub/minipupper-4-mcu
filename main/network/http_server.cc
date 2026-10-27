@@ -21,6 +21,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -1917,13 +1918,16 @@ static esp_err_t api_wifi_status(httpd_req_t *req)
     char pi_ip[16] = "";
     (void)pi_link::ip(pi_ip, sizeof(pi_ip));
 
-    char resp[512];
+    // "error": why the last join failed ("auth" = wrong password / login, "not_found", ...), the
+    // app's WifiPicker turns it into a message; empty while connecting or connected.
+    const std::string sta_err = wifi_sta_get_error();
+    char resp[600];
     std::snprintf(resp, sizeof(resp),
         R"({"ap":{"ssid":"%s","ip":"%s"})"
-        R"(,"sta":{"state":"%s","ssid":"%s","ip":"%s"})"
+        R"(,"sta":{"state":"%s","ssid":"%s","ip":"%s","error":"%s"})"
         R"(,"pi":{"ip":"%s"}})",
         wifi_ap_get_ssid(), AP_IP_ADDR,
-        sta_state_str, sta_ssid.c_str(), sta_ip.c_str(), pi_ip);
+        sta_state_str, sta_ssid.c_str(), sta_ip.c_str(), sta_err.c_str(), pi_ip);
 
     ESP_LOGI(TAG, "GET  /v1/wifi/status  ap_ssid=%s sta=%s ssid=%s ip=%s",
              wifi_ap_get_ssid(), sta_state_str, sta_ssid.c_str(), sta_ip.c_str());
@@ -1946,7 +1950,7 @@ static esp_err_t api_system_stats(httpd_req_t *req)
 
 /* GET /v1/wifi/scan — networks the robot can hear, strongest first.
  *
- * {"ok":true,"networks":[{"ssid","rssi","bars":1..3,"secure":bool},...]}
+ * {"ok":true,"networks":[{"ssid","rssi","bars":1..3,"secure":bool,"enterprise":bool},...]}
  * or {"ok":false,"error":"busy"} while the STA is mid-join (the app retries).
  * Blocks this request for about a second; see wifi_sta_scan(). */
 static esp_err_t api_wifi_scan(httpd_req_t *req)
@@ -1966,7 +1970,8 @@ static esp_err_t api_wifi_scan(httpd_req_t *req)
         json += "{\"ssid\":\"" + json_escape(nets[i].ssid)
               + "\",\"rssi\":" + std::to_string(nets[i].rssi)
               + ",\"bars\":" + std::to_string(nets[i].bars)
-              + ",\"secure\":" + (nets[i].secure ? "true" : "false") + "}";
+              + ",\"secure\":" + (nets[i].secure ? "true" : "false")
+              + ",\"enterprise\":" + (nets[i].enterprise ? "true" : "false") + "}";
     }
     json += "]}";
     httpd_resp_send(req, json.c_str(), json.size());
@@ -2023,10 +2028,12 @@ static esp_err_t api_wifi_ap_config(httpd_req_t *req)
     return ESP_OK; // never reached
 }
 
-/* POST /v1/wifi/connect — connect to a Wi-Fi network (STA mode) */
+/* POST /v1/wifi/connect — connect to a Wi-Fi network (STA mode)
+ *   {"ssid","password"}                 a home / phone hotspot network
+ *   {"ssid","password","identity"}      WPA2/WPA3-Enterprise: eduroam, a university or company network */
 static esp_err_t api_wifi_connect(httpd_req_t *req)
 {
-    char buf[256] = {};
+    char buf[512] = {};
     int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (len <= 0) {
         httpd_resp_set_status(req, "400 Bad Request");
@@ -2037,6 +2044,7 @@ static esp_err_t api_wifi_connect(httpd_req_t *req)
 
     std::string ssid = json_get_str(buf, "ssid");
     std::string password = json_get_str(buf, "password");
+    std::string identity = json_get_str(buf, "identity");
 
     if (ssid.empty()) {
         httpd_resp_set_status(req, "400 Bad Request");
@@ -2044,9 +2052,10 @@ static esp_err_t api_wifi_connect(httpd_req_t *req)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "POST /v1/wifi/connect  ssid=%s", ssid.c_str());
+    ESP_LOGI(TAG, "POST /v1/wifi/connect  ssid=%s%s", ssid.c_str(),
+             identity.empty() ? "" : "  (enterprise login)");
 
-    if (!wifi_sta_connect(ssid.c_str(), password.c_str())) {
+    if (!wifi_sta_connect(ssid.c_str(), password.c_str(), identity.c_str())) {
         httpd_resp_set_status(req, "500 Server Error");
         httpd_resp_send(req, "connect failed", -1);
         return ESP_OK;
@@ -2585,6 +2594,38 @@ static esp_err_t api_marketplace_proxy(httpd_req_t *req)
  * session.  Using httpd_sess_trigger_close (not a raw close) keeps it safe —
  * httpd owns the actual close and ignores fds that aren't its sessions.
  */
+#ifndef LWIP_SOCKET_OFFSET
+#define LWIP_SOCKET_OFFSET 0
+#endif
+
+/* Every open lwIP socket: its local and remote end, and whether httpd owns it. When the pool runs out,
+ * httpd cannot accept() ("error in accept (23)", ENFILE) and the app shows "Can't reach the robot";
+ * this says who is holding them. Returns the number open. */
+static int socket_census(const int *httpd_fds, size_t n_httpd, bool print)
+{
+    int count = 0;
+    if (print) ESP_LOGW(TAG, "==== socket census: who holds the %d lwIP sockets ====", CONFIG_LWIP_MAX_SOCKETS);
+    for (int fd = LWIP_SOCKET_OFFSET; fd < LWIP_SOCKET_OFFSET + CONFIG_LWIP_MAX_SOCKETS; ++fd) {
+        int type = 0;
+        socklen_t tl = sizeof(type);
+        if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tl) != 0) continue;     // not open
+        ++count;
+        if (!print) continue;
+        struct sockaddr_in l {}, r {};
+        socklen_t ll = sizeof(l), rl = sizeof(r);
+        char lb[16] = "-", rb[16] = "-";
+        int lp = -1, rp = -1;
+        if (getsockname(fd, (struct sockaddr *)&l, &ll) == 0) { inet_ntoa_r(l.sin_addr, lb, sizeof(lb)); lp = ntohs(l.sin_port); }
+        if (getpeername(fd, (struct sockaddr *)&r, &rl) == 0) { inet_ntoa_r(r.sin_addr, rb, sizeof(rb)); rp = ntohs(r.sin_port); }
+        bool web = false;
+        for (size_t i = 0; i < n_httpd; ++i) web |= (httpd_fds[i] == fd);
+        ESP_LOGW(TAG, "  fd %2d %s  %s:%d <- %s:%d%s", fd, type == SOCK_DGRAM ? "udp" : "tcp",
+                 lb, lp, rb, rp, web ? "  (web session)" : "");
+    }
+    if (print) ESP_LOGW(TAG, "==== %d / %d sockets open ====", count, CONFIG_LWIP_MAX_SOCKETS);
+    return count;
+}
+
 static void socket_reaper_task(void *)
 {
     // Only httpd's own client sessions, and only through httpd. The version before this one
@@ -2612,6 +2653,59 @@ static void socket_reaper_task(void *)
         }
         if (reaped) {
             ESP_LOGW(TAG, "socket_reaper: closed %d dead web connection(s)", reaped);
+        }
+
+        // Orphans: a web (port 80) TCP socket httpd no longer has in its session table, or one whose
+        // connection is gone entirely (no local address), that nobody will ever close. The census of
+        // 14 Oct found the pool full of these; the 21 Oct version of this task stopped closing them
+        // (it had also closed sockets httpd still used), so they piled up until accept() failed with
+        // ENFILE ("error in accept (23)") and the app could not reach the robot (23 Oct).
+        // Safe by construction: never a socket httpd lists, never the listening socket (and not at all
+        // when lwIP cannot say whether it listens), and only once seen orphaned in consecutive scans
+        // 4 s apart - 2 for a port-80 socket (a connection httpd has just accepted is filed within
+        // milliseconds), 3 for one with no address at all (another task's dead link: it closes its own
+        // well within 8 s).
+        static uint8_t orphan_seen[CONFIG_LWIP_MAX_SOCKETS];
+        int orphans = 0;
+        for (int fd = LWIP_SOCKET_OFFSET; fd < LWIP_SOCKET_OFFSET + CONFIG_LWIP_MAX_SOCKETS; ++fd) {
+            const int k = fd - LWIP_SOCKET_OFFSET;
+            int need = 0;                                   // scans needed; 0 = not an orphan
+            int type = 0;
+            socklen_t tl = sizeof(type);
+            if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tl) == 0 && type == SOCK_STREAM) {
+                bool web = false;
+                for (size_t i = 0; i < n; ++i) web |= (fds[i] == fd);
+                struct sockaddr_in l {};
+                socklen_t ll = sizeof(l);
+                if (!web) {
+                    if (getsockname(fd, (struct sockaddr *)&l, &ll) != 0) {
+                        need = 3;
+                    } else if (ntohs(l.sin_port) == 80) {
+                        int listening = 1;
+                        socklen_t al = sizeof(listening);
+                        if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &listening, &al) == 0 && !listening)
+                            need = 2;
+                    }
+                }
+            }
+            if (!need) { orphan_seen[k] = 0; continue; }
+            if (++orphan_seen[k] >= need) {
+                close(fd);
+                orphan_seen[k] = 0;
+                ++orphans;
+            }
+        }
+        if (orphans) {
+            ESP_LOGW(TAG, "socket_reaper: closed %d orphaned socket(s) nobody owned", orphans);
+        }
+
+        // Nearly out of sockets: print who holds them (at most every 30 s).
+        static uint32_t last_census_ms = 0;
+        const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (socket_census(fds, n, false) >= CONFIG_LWIP_MAX_SOCKETS - 3 &&
+            (last_census_ms == 0 || now_ms - last_census_ms > 30000)) {
+            last_census_ms = now_ms;
+            socket_census(fds, n, true);
         }
     }
 }

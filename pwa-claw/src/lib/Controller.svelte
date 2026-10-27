@@ -244,9 +244,31 @@
     .catch(() => {});
   const isContinuous = (g) => !continuousGaits || continuousGaits.has(g);
 
+  // The shoulder Turn buttons turn the way minipupperesp's turn pad does: a yaw command on the
+  // joystick stream (the Stanford walk), so the robot turns WHILE it walks with the Move stick held,
+  // and turns on the spot without it. (They used to start the old turnL / turnR move, which stopped
+  // the walk.) Held = full turn rate; t > 0 = turn left.
+  const TURN_YAW = { "turn-l": 1, "turn-r": -1 };
+  function turnPress(id) {
+    joyT = TURN_YAW[id];
+    joyStartTimer();
+  }
+  function turnRelease() {
+    joyT = turning() ? (pressed.has("turn-l") ? 1 : -1) : 0;
+    if (joyT === 0 && joyF === 0 && joyS === 0) {
+      sendGait("none");   // nothing held any more: stop, like letting go of the Move stick
+      joyStopIfIdle();
+    }
+  }
+
   function press(id) {
     if (!powered || pressed.has(id)) return;
     pressed = new Set(pressed).add(id);
+    if (id in TURN_YAW) {
+      turnPress(id);
+      if (navigator.vibrate) { try { navigator.vibrate(8); } catch {} }
+      return;
+    }
     const gait = gaitFor(id);
     if (gait) {
       sendGait(gait);
@@ -258,6 +280,7 @@
   function release(id) {
     if (!pressed.has(id)) return;
     const next = new Set(pressed); next.delete(id); pressed = next;
+    if (id in TURN_YAW) { turnRelease(); return; }
     const gait = gaitFor(id);
     if (gait && isContinuous(gait)) sendGait("none");
     if (SLOTS.some((s) => s.id === id)) setTimeout(() => { if (!SLOTS.some((s) => pressed.has(s.id))) lastLabel = ""; }, 900);

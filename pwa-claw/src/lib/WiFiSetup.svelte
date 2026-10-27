@@ -21,6 +21,7 @@
   let showManual = $state(false);
   let inputSsid = $state("");
   let inputPassword = $state("");
+  let inputIdentity = $state("");   // university / work (enterprise) networks only
   let connecting = $state(false);
   let reconnecting = $state(false);
   let connectError = $state("");
@@ -86,7 +87,9 @@
       const res = await fetch("/v1/wifi/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ssid, password: inputPassword }),
+        body: JSON.stringify(inputIdentity.trim()
+          ? { ssid, password: inputPassword, identity: inputIdentity.trim() }
+          : { ssid, password: inputPassword }),
       });
       requestSent = true;
       if (res.ok) {
@@ -235,6 +238,10 @@
               <label class="field">
                 <span class="field-k">Network name</span>
                 <input type="text" bind:value={inputSsid} placeholder="SSID" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span class="field-k">Username (university / work Wi‑Fi only)</span>
+                <input type="text" bind:value={inputIdentity} placeholder="e.g. name@hku.hk — empty for home Wi‑Fi" autocomplete="off" autocapitalize="off" spellcheck="false" />
               </label>
               <label class="field">
                 <span class="field-k">Password</span>

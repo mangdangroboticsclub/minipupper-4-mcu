@@ -427,11 +427,12 @@ config APP_RL_GUARD_CUR_MS
 
 config APP_RL_GUARD_TEMP_DC
     int "RL guard: housing temperature limit (0.1 degC)"
-    range 300 1200
+    range 300 1500
     default 600
     help
         600 = 60.0 degC. The housing lags the winding, so this is a
-        backstop, not a thermal model.
+        backstop, not a thermal model. 1500 = off (readings above 150 degC
+        are not temperatures and never count).
 
 config APP_RL_GUARD_TEMP_MS
     int "RL guard: temperature dwell (ms)"

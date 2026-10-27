@@ -222,7 +222,7 @@ struct Config {
     int up_height = 10;  // Foot lift height (mm)
     int stride   = 10;   // Stride length (mm)
     int tilt     = 10;   // Body tilt angle (degrees)
-    int sg_speed = 50;   // Stanford walk / diagonal speed (mm/s, max 200)
+    int sg_speed = 100;  // Stanford walk / diagonal speed (mm/s, max 200): minipupperesp's sgspeed
 };
 
 // ── Servo bus configuration ──────────────────────────────────
