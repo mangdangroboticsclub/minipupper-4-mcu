@@ -7,12 +7,93 @@ cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(MPX-Dog)
 
-add_custom_target(mpx_build_pwa ALL
-    COMMAND npm run build
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/pwa-claw"
-    VERBATIM
-)
-add_dependencies(__idf_main mpx_build_pwa)
+# ── Phone app (pwa-claw): `npm run build` inside the IDF build ───────────────
+#
+# The phone app is a Vite/Svelte bundle whose output, pwa-claw/www/, is
+# embedded into the firmware by main/CMakeLists.txt (EMBED_FILES). Without a
+# build step here, `idf.py build` ships whatever www/ happened to contain.
+#
+# Two different moments matter, and handling only the second is what makes
+# this look broken:
+#
+#   configure time  EMBED_FILES is resolved into one ninja edge per file by
+#                   IDF's target_add_binary_data(), which takes the path as a
+#                   MAIN_DEPENDENCY without checking that it exists. A tree
+#                   with no www/ -- fresh clone (www/ is gitignored), a wiped
+#                   build volume, `git clean -xdf` -- therefore dies at build
+#                   time with "missing and no known rule to make it", before
+#                   npm could ever create the files. So bootstrap the bundle
+#                   here, at configure time, when it is absent.
+#
+#   build time      mpx_build_pwa runs npm on every build, and __idf_main
+#                   depends on it -- that is what orders it before the *.gz.S
+#                   embed objects and relinks libmain with the fresh assets.
+#
+# -DMPX_BUILD_PWA=OFF builds against the www/ that is already on disk (no
+# node/npm needed, e.g. CI that only checks the C side).
+option(MPX_BUILD_PWA
+    "Build the phone app (pwa-claw) with npm as part of the firmware build" ON)
+
+set(MPX_PWA_DIR "${CMAKE_SOURCE_DIR}/pwa-claw")
+set(MPX_PWA_INDEX "${MPX_PWA_DIR}/www/index.html")
+
+# npm is npm.cmd on Windows, next to node.exe.
+find_program(MPX_NPM_EXECUTABLE NAMES npm npm.cmd npm.exe)
+
+if(MPX_BUILD_PWA AND NOT MPX_NPM_EXECUTABLE)
+    if(EXISTS "${MPX_PWA_INDEX}")
+        message(WARNING
+            "pwa-claw: npm not found -- the firmware will embed the existing "
+            "${MPX_PWA_DIR}/www unchanged. Install Node.js to rebuild it.")
+    else()
+        message(FATAL_ERROR
+            "pwa-claw: www/ is not built and npm was not found.\n"
+            "Install Node.js (https://nodejs.org), or build the app by hand "
+            "(cd pwa-claw && npm ci && npm run build) and configure with "
+            "-DMPX_BUILD_PWA=OFF.")
+    endif()
+    set(MPX_BUILD_PWA OFF)
+endif()
+
+if(MPX_BUILD_PWA AND NOT EXISTS "${MPX_PWA_INDEX}")
+    message(STATUS "pwa-claw: www/ is missing, building it now (it is needed at configure time)")
+    if(NOT EXISTS "${MPX_PWA_DIR}/node_modules")
+        message(STATUS "pwa-claw: node_modules/ is missing, running 'npm ci'")
+        execute_process(
+            COMMAND "${MPX_NPM_EXECUTABLE}" ci
+            WORKING_DIRECTORY "${MPX_PWA_DIR}"
+            RESULT_VARIABLE mpx_npm_result)
+        if(NOT mpx_npm_result EQUAL 0)
+            message(FATAL_ERROR "pwa-claw: 'npm ci' failed (${mpx_npm_result})")
+        endif()
+    endif()
+    execute_process(
+        COMMAND "${MPX_NPM_EXECUTABLE}" run build
+        WORKING_DIRECTORY "${MPX_PWA_DIR}"
+        RESULT_VARIABLE mpx_npm_result)
+    if(NOT mpx_npm_result EQUAL 0)
+        message(FATAL_ERROR "pwa-claw: 'npm run build' failed (${mpx_npm_result})")
+    endif()
+endif()
+
+if(NOT EXISTS "${MPX_PWA_INDEX}")
+    message(FATAL_ERROR
+        "pwa-claw: ${MPX_PWA_INDEX} is missing and MPX_BUILD_PWA=OFF, so the "
+        "firmware has no web UI to embed.\n"
+        "Build it with: cd pwa-claw && npm ci && npm run build")
+endif()
+
+if(MPX_BUILD_PWA)
+    add_custom_target(mpx_build_pwa ALL
+        COMMAND "${MPX_NPM_EXECUTABLE}" run build
+        WORKING_DIRECTORY "${MPX_PWA_DIR}"
+        COMMENT "Building phone app (pwa-claw): npm run build"
+        USES_TERMINAL
+        VERBATIM
+    )
+    # __idf_main embeds pwa-claw/www, so the app must be rebuilt before it.
+    add_dependencies(__idf_main mpx_build_pwa)
+endif()
 
 # ── esp-sr on Windows (local-claw) ───────────────────────────────────────────
 #

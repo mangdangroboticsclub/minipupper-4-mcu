@@ -1,6 +1,5 @@
 #include "network/marketplace_proxy.h"
 #include "network/wifi_sta.h"
-#include "agent/agent_config.h"
 
 #include <cstdio>
 #include <cstring>
@@ -141,9 +140,21 @@ std::string gateway_request(const char *method,
     }
 
     // ── Set timeouts ──────────────────────────────────────────
-    struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+    // One flat 10 s budget was too small.  The gateway answers the very same
+    // GET in 0.03 s when warm, but 10-153 s after an idle period (measured:
+    // GET /v1/skills took 153 s cold, twice in a row hit ~10 s exactly).  With
+    // a 10 s read timeout those legitimate answers were torn down mid-flight,
+    // every POST /deploy ended as "Empty response from gateway" and the PWA
+    // showed the skill download as failed while the gateway was still working.
+    // So: a generous read budget, and a longer one for deploy, which is the
+    // call that actually does the work.
+    const bool is_deploy = (std::strstr(path, "/deploy") != nullptr);
+    const int read_sec = is_deploy ? CONFIG_APP_MARKETPLACE_DEPLOY_TIMEOUT_S
+                                   : CONFIG_APP_MARKETPLACE_READ_TIMEOUT_S;
+    struct timeval tv = { .tv_sec = read_sec, .tv_usec = 0 };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    struct timeval stv = { .tv_sec = 30, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
 
     // ── Force immediate close (no TIME_WAIT) ──────────────────
     // These proxy connections are short-lived and very frequent (the PWA
@@ -199,12 +210,6 @@ std::string gateway_request(const char *method,
     request += "Host: " + std::string(GATEWAY_HOST) + ":" + port_str + "\r\n";
     request += "Connection: close\r\n";
     request += "Accept: application/json\r\n";
-    // The gateway lets a robot toggle/remove only its own skills, proven by
-    // this token; without it those PATCH/DELETE calls get 401.
-    static const std::string robot_token = agent_config::robot_token();
-    if (!robot_token.empty()) {
-        request += "Authorization: Bearer " + robot_token + "\r\n";
-    }
     if (has_body) {
         request += "Content-Type: application/json\r\n";
         request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
@@ -232,16 +237,31 @@ std::string gateway_request(const char *method,
     response.reserve(HTTP_BODY_BUF);
     char buf[512];
     int n;
+    int read_errno = 0;
 
     while ((n = recv(sock, buf, sizeof(buf) - 1, 0)) > 0) {
         buf[n] = 0;
         response.append(buf, n);
     }
+    if (n < 0) read_errno = errno;
 
     close(sock);
 
     if (response.empty()) {
-        ESP_LOGW(TAG, "Empty response from gateway");
+        // Tell a timeout apart from a peer close: "timeout" means the gateway
+        // is slow (raise the budget), "closed" means it dropped us (auth or
+        // protocol problem).  Lumping both into one message cost a debugging
+        // session chasing the robot token.
+        if (read_errno == EAGAIN || read_errno == EWOULDBLOCK) {
+            ESP_LOGW(TAG, "Gateway read timeout: %d s budget (%s) for %s %s",
+                     read_sec, is_deploy ? "deploy" : "default", method, path);
+        } else if (read_errno != 0) {
+            ESP_LOGW(TAG, "Gateway read failed (errno=%d) for %s %s",
+                     read_errno, method, path);
+        } else {
+            ESP_LOGW(TAG, "Gateway closed the connection without a response for %s %s",
+                     method, path);
+        }
         return {};
     }
 

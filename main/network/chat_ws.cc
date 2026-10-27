@@ -2084,6 +2084,18 @@ void report_action(const char *type,
     broadcast_action(nullptr, type, description, status, "");
 }
 
+/* How many PWA UI clients could see — and therefore answer — a permission
+ * prompt.  broadcast_to_pwa() logs the same number, so "connected=0" next to a
+ * pending permission is the fingerprint of the bug handled below. */
+static int pwa_client_count()
+{
+    int n = 0;
+    for (size_t i = 0; i < MAX_PWA_WS_CLIENTS; ++i) {
+        if (s_pwa_clients[i].fd >= 0) ++n;
+    }
+    return n;
+}
+
 bool request_permission(const char *type,
                         const char *description,
                         uint32_t timeout_ms)
@@ -2118,9 +2130,44 @@ bool request_permission(const char *type,
     ESP_LOGI(TAG, "Permission requested: %s (%s) — waiting %ums",
              type, description, timeout_ms);
 
-    // Wait for the user's response (limited by timeout)
-    TickType_t ticks = (timeout_ms == 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-    bool signalled = (xSemaphoreTake(s_perm_semaphore, ticks) == pdTRUE);
+    // ── Wait for the user's response ─────────────────────
+    // The request above is advertised ONCE, so a PWA that connects a moment
+    // later never learns about it and the action is denied by timeout with
+    // nobody ever asked.  That is exactly how a marketplace deploy lost its
+    // file_write: the broadcast logged "connected=0 matched=0", the phone's
+    // /v1/chat/ui socket came up 4 s later, and the write was denied 60 s
+    // after that ("fs.write: user denied write").  So keep re-advertising the
+    // still-pending request for as long as at least one client is connected;
+    // the PWA dedupes on action_id, so this shows one modal, not many.
+    const TickType_t t_start = xTaskGetTickCount();
+    const TickType_t t_limit = (timeout_ms == 0) ? portMAX_DELAY
+                                                 : pdMS_TO_TICKS(timeout_ms);
+    const TickType_t k_repeat = pdMS_TO_TICKS(5000);
+    const TickType_t k_slice  = pdMS_TO_TICKS(250);
+    TickType_t next_advertise = xTaskGetTickCount();
+    bool signalled = false;
+    bool warned_no_client = false;
+
+    while (true) {
+        if (timeout_ms != 0 && (xTaskGetTickCount() - t_start) >= t_limit) break;
+
+        if (xSemaphoreTake(s_perm_semaphore, k_slice) == pdTRUE) {
+            signalled = true;
+            break;
+        }
+
+        if ((int32_t)(xTaskGetTickCount() - next_advertise) >= 0) {
+            if (pwa_client_count() > 0) {
+                broadcast_action(nullptr, type, description, "pending", action_id);
+                warned_no_client = false;
+            } else if (!warned_no_client) {
+                ESP_LOGW(TAG, "Permission '%s' has no connected PWA to prompt — "
+                              "it times out unless the app connects", type);
+                warned_no_client = true;
+            }
+            next_advertise = xTaskGetTickCount() + k_repeat;
+        }
+    }
 
     // Read the result
     xSemaphoreTake(s_perm_mutex, portMAX_DELAY);

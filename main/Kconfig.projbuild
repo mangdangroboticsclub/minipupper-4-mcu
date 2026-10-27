@@ -125,6 +125,26 @@ config APP_CHAT_WS_PATH
         WebSocket path on the upstream cloud backend.
         The robot connects to ws://SERVER_IP:PORT/WS_PATH.
 
+config APP_MARKETPLACE_READ_TIMEOUT_S
+    int "Marketplace proxy read timeout (seconds)"
+    range 5 600
+    default 30
+    help
+        How long the robot waits for the marketplace gateway to answer a
+        proxied request.  The gateway answers in ~0.03 s when warm but has
+        been measured at 10-153 s after an idle period, so a short budget
+        tears down legitimate responses mid-flight.
+
+config APP_MARKETPLACE_DEPLOY_TIMEOUT_S
+    int "Marketplace deploy timeout (seconds)"
+    range 10 900
+    default 180
+    help
+        Extra-long budget for POST /v1/robots/{uuid}/deploy, the call that
+        does the real work.  When this expires the phone app reports the
+        skill download as failed even though the gateway eventually
+        succeeds.
+
 # ── IMU logging ────────────────────────────────────────────────
 
     config APP_IMU_LOG_ENABLE
