@@ -24,6 +24,7 @@ extern "C" {
 
 #include "display/cap_display.h"
 #include "fs/littlefs_manager.h"
+#include "audio/mpx_audio.h"
 #include "network/chat_ws.h"
 #include "robot/robot.h"
 #include "util/trace_ring.h"
@@ -1751,6 +1752,79 @@ int32_t host_robot_get_gait(wasm_exec_env_t exec_env, int32_t buf_ptr,
 {
 	const char *name = robot::gait_to_name(robot::current_gait_cmd());
 	return return_string(exec_env, buf_ptr, cap, name ? name : "none");
+}
+
+// ── the microphone (ABI v7) ─────────────────────────────────
+
+/* Mono at the voice rate, opened the way `voice talk` opens it (2 channels,
+ * pick 0): a mono consumer should get the channel ASR already transcribes
+ * cleanly, not one it would have to be taught. 4 channels would also work and
+ * would cost more DMA RAM for audio the skill has no use for. */
+static constexpr uint32_t MIC_DEFAULT_RATE = 16000;
+static constexpr uint8_t  MIC_CHANNELS     = 2;
+static constexpr uint8_t  MIC_PICK         = 0;
+
+int32_t host_mpx_mic_start(wasm_exec_env_t exec_env, int32_t sample_rate)
+{
+	(void)exec_env;
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	if (!mpx_audio_have_mic()) return MPX_ERR_STATE;
+
+	/* One hardware stream. A skill run holds voice back (voice_glue::hold), so
+	 * this answering "busy" means the skill itself opened it twice, or
+	 * someone started a voice turn by hand mid-run -- either way, not ours to
+	 * steal. */
+	if (mpx_audio_capture_active()) {
+		ESP_LOGW(TAG, "mic_start: the capture is already open");
+		return MPX_ERR_BUSY;
+	}
+
+	const uint32_t rate = sample_rate > 0
+		? static_cast<uint32_t>(sample_rate) : MIC_DEFAULT_RATE;
+	const esp_err_t err = mpx_audio_capture_start(rate, MIC_CHANNELS, MIC_PICK);
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "mic_start(%u Hz): %s", (unsigned)rate, esp_err_to_name(err));
+		/* ESP_ERR_NO_MEM is the DMA rings: a skill asking for a rate that
+		 * needs wider rings than internal RAM can hold right now. That is
+		 * "not now", not "bad argument", so it maps to BUSY. */
+		return err == ESP_ERR_NO_MEM ? MPX_ERR_BUSY : MPX_ERR_ARG;
+	}
+	ESP_LOGI(TAG, "mic_start: %u Hz mono, capture is the skill's", (unsigned)rate);
+	return MPX_OK;
+}
+
+int32_t host_mpx_mic_read(wasm_exec_env_t exec_env, int32_t pcm_ptr,
+					   int32_t frames)
+{
+	if (wasm::was_cancelled()) return MPX_ERR_CANCELLED;
+	if (frames <= 0) return MPX_ERR_ARG;
+	if (frames > static_cast<int32_t>(MPX_AUDIO_MAX_FRAMES)) {
+		/* Clamp rather than refuse: the caller gets its frames back and can
+		 * loop, and a skill that asks for half a second in one call is
+		 * greedy, not broken. */
+		frames = static_cast<int32_t>(MPX_AUDIO_MAX_FRAMES);
+	}
+
+	int16_t *pcm = static_cast<int16_t *>(wasm_ptr(
+		exec_env, pcm_ptr, static_cast<uint32_t>(frames) * sizeof(int16_t)));
+	if (!pcm) return MPX_ERR_ARG;
+
+	const esp_err_t err = mpx_audio_capture_read(
+		pcm, static_cast<size_t>(frames));
+	if (err != ESP_OK) {
+		return err == ESP_ERR_INVALID_STATE ? MPX_ERR_STATE : MPX_ERR_BUSY;
+	}
+	return frames;
+}
+
+int32_t host_mpx_mic_stop(wasm_exec_env_t exec_env)
+{
+	(void)exec_env;
+	/* Idempotent on purpose: the sandbox closes the capture at the end of
+	 * every run anyway, so a skill that forgets (or returns early) cannot
+	 * leave the microphone open for the next one. */
+	mpx_audio_capture_stop();
+	return MPX_OK;
 }
 
 }  // namespace sdk

@@ -56,6 +56,37 @@ void      hands_free_stop();
 /** Provision against the gateway now (normally automatic on first use). */
 esp_err_t provision();
 
+/* ── Holding voice back while a skill runs ─────────────────────────────────
+ *
+ * A wasm skill gets the robot to itself: no wake word, no voice turn, no
+ * music, and the microphone free if the skill asks for it (mpx_mic_start).
+ * hold() stops all of that and remembers what was running; release() puts
+ * back exactly that. Both are cheap and idempotent, and hold() is counted,
+ * because two things can hold voice at once -- a skill run (automatic, from
+ * network's skill task) and the app (POST /v1/voice {"hold":true}) -- and
+ * the last release is the one that restarts listening, not the first.
+ *
+ * What a hold does NOT do is free RAM: the esp-sr front end keeps its models
+ * and its AFE instance (both mostly PSRAM), so restarting is instant instead
+ * of a flash read. If internal RAM ever turns out to be what a skill needs,
+ * the place to add that is mpx_voice_wake's teardown, not here.
+ *
+ * hold() can block for a couple of seconds (the front end's fetch() timeout)
+ * while it waits for listening to actually stop, so a skill never starts on
+ * top of a live front end. Same reason the Pi takeover path posts an event
+ * instead: calling it from a task that must not block is wrong. */
+
+esp_err_t hold(const char *why);
+void      release(const char *why);
+
+/** Is voice being held back right now? */
+bool held();
+
+/** Priority of the front-end (wake feed/fetch) tasks, 1..24. Takes effect at
+ *  once on a running front end and on the next start otherwise; not saved. */
+esp_err_t set_task_priority(int prio);
+int       task_priority();
+
 /** Status for GET /v1/voice, as a JSON object string. */
 std::string status_json();
 

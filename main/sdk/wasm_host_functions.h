@@ -81,7 +81,20 @@ namespace sdk {
  * moves because a v6 module will NOT run on v5 firmware — the imports are
  * missing and instantiation fails — which is exactly what the version check
  * exists to say before the first host call traps. */
-constexpr int32_t MPX_ABI_VERSION = 6;
+/* v7 adds the microphone: mpx_mic_start / mpx_mic_read / mpx_mic_stop.
+ *
+ * A skill runs with voice held back (voice_glue::hold, taken by the skill task
+ * around the run), so the capture is free — no front end, no voice turn — and
+ * this is the skill's to open. What it gets is MONO at the sample rate it asks
+ * for (0 = 16 kHz, the voice rate), read straight from the codec with the
+ * microphone gain already applied, which is the same stream ASR transcribes:
+ * good enough to clap at, to listen for a loud noise, or to record a clip;
+ * not an echo-cancelled or beam-formed signal (that needs the AFE, and the
+ * AFE is exactly what the hold stopped).
+ *
+ * Additive like v6: every v6 symbol is unchanged, so a v6 module still runs.
+ * A v7 module will NOT run on v6 firmware (missing imports), hence the bump. */
+constexpr int32_t MPX_ABI_VERSION = 7;
 
 /* Every host function returns one of these, or a value >= 0 where it is
  * documented to return data. Before v2 there were four incompatible
@@ -780,6 +793,35 @@ int32_t host_robot_get_config(wasm_exec_env_t exec_env, int32_t out_ptr);
 int32_t host_robot_get_gait(wasm_exec_env_t exec_env, int32_t buf_ptr,
 							int32_t cap);
 
+// ── the microphone (ABI v7) ──────────────────────────────────
+
+/** extern int mpx_mic_start(int sample_rate); "(i)i".
+ *
+ *  Opens the microphone for this skill, mono, at @p sample_rate (0 = 16 kHz).
+ *  Safe to call twice (the second call is a no-op). Returns MPX_OK;
+ *  MPX_ERR_STATE when the board has no microphone; MPX_ERR_BUSY when the
+ *  capture is already open (a voice turn or the wake front end got there
+ *  first -- a skill run holds voice back, so this normally means the skill
+ *  itself opened it), or when the DMA rings cannot be widened (no internal
+ *  RAM); MPX_ERR_ARG when the codec refuses the rate. */
+int32_t host_mpx_mic_start(wasm_exec_env_t exec_env, int32_t sample_rate);
+
+/** extern int mpx_mic_read(short *pcm, int frames); "(ii)i".
+ *
+ *  Reads up to @p frames mono int16 samples into @p pcm, blocking until the
+ *  codec has them (a little under the audio duration at 16 kHz). @p frames is
+ *  clamped to MPX_AUDIO_MAX_FRAMES (1920, 120 ms at 16 kHz). Returns how many
+ *  frames were written, or a negative MPX_ERR_*: MPX_ERR_STATE if the
+ *  microphone is not open, MPX_ERR_ARG for a null/out-of-range buffer,
+ *  MPX_ERR_CANCELLED once the run's watchdog or mpx_stop_skill() has fired
+ *  (check, and return, so the skill unwinds promptly). */
+int32_t host_mpx_mic_read(wasm_exec_env_t exec_env, int32_t pcm_ptr,
+					  int32_t frames);
+
+/** extern int mpx_mic_stop(void); "()i". Releases the microphone. Idempotent;
+ *  the sandbox also closes it at the end of the run if the skill forgot. */
+int32_t host_mpx_mic_stop(wasm_exec_env_t exec_env);
+
 // NOTE: intentionally NOT const. WAMR's wasm_runtime_register_natives()
 // sorts this table in place with qsort() so it can binary-search symbol
 // names later. If the array is const it is placed in flash (.rodata) and
@@ -924,6 +966,12 @@ static NativeSymbol NATIVE_SYMBOLS[] = {
 	// Robot state: the composite getters
 	{ "robot_get_config",     (void *)host_robot_get_config,     "(i)i",    nullptr },
 	{ "robot_get_gait",       (void *)host_robot_get_gait,       "(ii)i",   nullptr },
+
+	// ── ABI v7 ──────────────────────────────────────────────────────────────
+	// The microphone: a skill's own ears, while voice is held back
+	{ "mpx_mic_start",        (void *)host_mpx_mic_start,        "(i)i",    nullptr },
+	{ "mpx_mic_read",         (void *)host_mpx_mic_read,         "(ii)i",   nullptr },
+	{ "mpx_mic_stop",         (void *)host_mpx_mic_stop,         "()i",     nullptr },
 };
 
 static constexpr uint32_t NUM_NATIVE_SYMBOLS =

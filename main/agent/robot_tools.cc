@@ -471,6 +471,28 @@ Reply mpx_run_skill(const cJSON *args)
         }
     } else {
         cJSON_AddStringToObject(o, "started", resolved.c_str());
+        /* Stay inside the run. The skill has the robot to itself (voice is
+         * held, so no wake word and no voice turn), and letting the tool
+         * return at once would send the model a result while the skill is
+         * still moving, inviting a second tool call into a robot that is
+         * busy -- and another LLM request behind it. Blocking here means the
+         * next model turn starts only after the skill is done.
+         *
+         * 90 s: the sandbox's own per-run watchdog is 60 s, so this is the
+         * watchdog's decision, not ours -- a skill that runs past it is
+         * already being killed. mpx_stop_skill from another turn still
+         * works, and gives the semaphore. */
+        const bool finished = network::skill_wait(90000);
+        cJSON_AddBoolToObject(o, "finished", finished);
+        if (!finished && network::skill_running()) {
+            cJSON_AddStringToObject(o, "still_running",
+                                    network::skill_running_name());
+            cJSON_AddStringToObject(
+                o, "note",
+                "The skill is still running. It has the robot and the "
+                "microphone, so do not start another one; call "
+                "mpx_stop_skill to stop it, or wait and ask again.");
+        }
     }
     return { print_and_free(o), false };
 }
@@ -658,8 +680,9 @@ const Tool kTools[] = {
       "{\"type\":\"object\",\"properties\":{}}",
       mpx_list_skills },
     { "mpx_run_skill", kGroupSkill,
-      "Run an installed robot skill by file name. Only one runs at a time. Get "
-      "names from mpx_list_skills first.",
+      "Run an installed robot skill by file name. Only one runs at a time, and "
+      "voice is paused while it runs. This call returns when the skill has "
+      "finished. Get names from mpx_list_skills first.",
       nullptr,
       "{\"type\":\"object\",\"properties\":{"
       "\"skill\":{\"type\":\"string\",\"description\":\"File name, e.g. moonwalk.wasm\"},"

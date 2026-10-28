@@ -351,6 +351,29 @@ esp_err_t voice_post_handler(httpd_req_t *req)
             voice_glue::hands_free_stop();
         }
     }
+
+    /* Hold voice back without a skill, e.g. while the app wants the microphone
+     * for its own recording, or the robot is being demoed. Counted together
+     * with the automatic hold a skill run takes: false releases one, and the
+     * last release is what restarts listening. */
+    const cJSON *hold = cJSON_GetObjectItem(body, "hold");
+    if (!problem && cJSON_IsBool(hold)) {
+        if (cJSON_IsTrue(hold)) {
+            voice_glue::hold("app");
+        } else {
+            voice_glue::release("app");
+        }
+    }
+
+    /* The wake front end's task priority: 1..24. Lower it to keep listening
+     * out of the way of something else the robot is doing; higher to make it
+     * win. Not saved -- a reboot goes back to the firmware's default. */
+    const cJSON *priority = cJSON_GetObjectItem(body, "task_priority");
+    if (!problem && cJSON_IsNumber(priority)) {
+        if (voice_glue::set_task_priority(priority->valueint) != ESP_OK) {
+            problem = "task_priority must be 1..24";
+        }
+    }
     cJSON_Delete(body);
 
     if (problem) {

@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 
 #include "agent/agent_config.h"
 #include "esp_log.h"
@@ -55,6 +56,19 @@ bool          s_started;
 bool          s_wake_ready;        /* mpx_voice_wake_init() succeeded */
 volatile bool s_voice_resume;      /* hands-free was on when the Pi took over */
 
+/* Voice held back for a skill (voice_glue::hold()). Depth, not a flag: the
+ * automatic hold a skill run takes and a manual one from POST /v1/voice
+ * {"hold":true} can be live together, and only the last release restarts
+ * listening. Touched from the skill task, the event task and httpd. */
+/* Depth, not a flag, and touched from three tasks (the skill task, the voice
+ * event task, httpd): an atomic because hold() and release() are the only
+ * writers, and the read-modify-write has to be one step -- two holders both
+ * reading depth 0 must not both end up taking a fresh hold. */
+std::atomic<int> s_hold_depth{0};
+bool         s_hold_restore_auto;  /* hands-free was listening when it started */
+bool         s_hold_restore_wake;  /* ... or the front end was up by hand       */
+int          s_task_priority = 5;  /* wake_feed/wake_fetch, see set_task_priority */
+
 bool hands_free_wanted()
 {
     return voice_glue::voice_wanted() && s_wake_ready;
@@ -62,6 +76,14 @@ bool hands_free_wanted()
 
 esp_err_t hands_free_start_locked()
 {
+    if (s_hold_depth > 0) {
+        /* A skill has the robot. Remember, and let the last release() start
+         * it -- starting now would fight the skill for the microphone and
+         * the CPU, which is the whole point of the hold. */
+        s_hold_restore_auto = true;
+        ESP_LOGI(TAG, "hands-free listening waits: voice is held for a skill");
+        return ESP_OK;
+    }
     if (!hands_free_wanted()) return ESP_ERR_INVALID_STATE;
     if (mpx_robot_pi_in_control()) {
         /* The Pi has the robot: voice stays off until it lets go. */
@@ -91,7 +113,10 @@ void events_task(void *)
         case EV_MASTER_OFF:
             if (s_voice_resume) {
                 s_voice_resume = false;
-                if (hands_free_wanted() && mpx_voice_wake_auto_start() != ESP_OK) {
+                /* Through hands_free_start_locked() rather than
+                 * mpx_voice_wake_auto_start() directly, so a skill that is
+                 * running when the Pi lets go keeps its hold. */
+                if (hands_free_start_locked() != ESP_OK) {
                     ESP_LOGW(TAG, "hands-free listening did not restart -- POST /v1/voice {\"hands_free\":true}");
                 }
             }
@@ -120,11 +145,17 @@ esp_err_t apply_mode()
         mpx_voice_wake_auto_stop();
         mpx_voice_disconnect();
         s_voice_resume = false;
+        /* Nothing to come back to: an "off" while a skill is running must not
+         * make the skill's release() turn listening back on. */
+        s_hold_restore_auto = false;
+        s_hold_restore_wake = false;
         return ESP_OK;
     }
     if (!available()) return ESP_ERR_NOT_SUPPORTED;
     /* Off -> on: the front end was never built if the robot booted with
-     * voice off, so this goes through the init-if-needed path. */
+     * voice off, so this goes through the init-if-needed path. While a skill
+     * holds voice this defers (hands_free_start()/locked) and the release
+     * starts it. */
     if (mpx_voice_wake_auto_active()) return ESP_OK;
     return hands_free_start();
 }
@@ -164,6 +195,10 @@ void start()
     /* Music works in every mode -- with voice off it is the app's
      * (POST /v1/voice {"music":...}). */
     cap_music_init();
+
+    /* The front end's task priority, before anything starts a task so the
+     * first start already uses the caller's choice. */
+    mpx_voice_wake_set_task_priority(s_task_priority);
 
     /* The tool bridge, so the server's model can move the robot. Nothing
      * network-related happens until a session opens. */
@@ -207,6 +242,13 @@ esp_err_t hands_free_start()
 {
     if (!s_started || !available()) return ESP_ERR_NOT_SUPPORTED;
     if (!voice_wanted()) return ESP_ERR_INVALID_STATE;
+    if (s_hold_depth > 0) {
+        /* Do not spend the model load now: release() will come back through
+         * here when the skill is done. */
+        s_hold_restore_auto = true;
+        ESP_LOGI(TAG, "hands-free listening waits: voice is held for a skill");
+        return ESP_OK;
+    }
     if (!s_wake_ready) {
         if (mpx_voice_wake_init() != ESP_OK) return ESP_FAIL;
         s_wake_ready = true;
@@ -218,6 +260,108 @@ void hands_free_stop()
 {
     s_voice_resume = false;
     mpx_voice_wake_auto_stop();
+}
+
+esp_err_t hold(const char *why)
+{
+    const char *reason = (why && why[0]) ? why : "skill";
+
+    if (s_hold_depth.load() > 0) {
+        s_hold_depth.fetch_add(1);
+        ESP_LOGI(TAG, "voice already held (%d): %s", s_hold_depth.load(), reason);
+        return ESP_OK;
+    }
+    s_hold_depth.store(1);
+    ESP_LOGI(TAG, "voice held for %s (mode %s)", reason,
+             agent_config::mode_name(agent_config::mode()));
+    if (!s_started) return ESP_OK;   /* nothing is up yet to hold back */
+
+    /* A live turn first: cut the reply and drop the gateway socket, so the
+     * skill is not sharing the CPU with whatever model is on the other end
+     * of it, and so the server is not left streaming into a device that has
+     * stopped listening. */
+    if (mpx_voice_stream_is_playing()) {
+        mpx_voice_stream_abort_playback();
+    }
+    mpx_voice_disconnect();
+
+    /* The speaker is shared: music waiting for it would take it from the
+     * skill (or from whatever the skill plays). */
+    if (cap_music_active()) {
+        cap_music_stop();
+    }
+
+    /* Then the microphone. Hands-free first -- it owns the front end and
+     * would otherwise restart it behind us -- then a front end started by
+     * hand. Both are restarted by release(). */
+    if (mpx_voice_wake_auto_active()) {
+        s_hold_restore_auto = true;
+        mpx_voice_wake_auto_stop();
+    } else if (mpx_voice_wake_active()) {
+        s_hold_restore_wake = true;
+        mpx_voice_wake_stop();
+    }
+    return ESP_OK;
+}
+
+void release(const char *why)
+{
+    const char *reason = (why && why[0]) ? why : "skill";
+
+    if (s_hold_depth.load() == 0) {
+        ESP_LOGW(TAG, "voice released for %s without a hold -- ignored", reason);
+        return;
+    }
+    if (s_hold_depth.fetch_sub(1) > 1) {
+        ESP_LOGI(TAG, "voice still held (%d): %s released", s_hold_depth.load(), reason);
+        return;
+    }
+
+    const bool restore_auto = s_hold_restore_auto;
+    const bool restore_wake = s_hold_restore_wake;
+    s_hold_restore_auto = false;
+    s_hold_restore_wake = false;
+
+    if (!s_started) return;
+    if (!voice_wanted()) {
+        ESP_LOGI(TAG, "voice released (%s): AI mode is off, nothing to restart", reason);
+        return;
+    }
+
+    /* hands_free_start() keeps the AI mode's and the Pi's vetoes, and does the
+     * model load if this hold began before the front end was ever built. */
+    if (restore_auto && !mpx_voice_wake_auto_active()) {
+        const esp_err_t err = hands_free_start();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "hands-free did not restart after %s (%s) -- POST /v1/voice {\"hands_free\":true}",
+                     reason, esp_err_to_name(err));
+        }
+    } else if (restore_wake && !mpx_voice_wake_active()) {
+        const esp_err_t err = mpx_voice_wake_start();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "wake word listening did not restart after %s (%s)",
+                     reason, esp_err_to_name(err));
+        }
+    }
+}
+
+bool held()
+{
+    return s_hold_depth > 0;
+}
+
+esp_err_t set_task_priority(int prio)
+{
+    if (prio < 1 || prio > 24) return ESP_ERR_INVALID_ARG;
+    s_task_priority = prio;
+    mpx_voice_wake_set_task_priority(prio);
+    ESP_LOGI(TAG, "voice task priority -> %d", prio);
+    return ESP_OK;
+}
+
+int task_priority()
+{
+    return s_task_priority;
 }
 
 esp_err_t provision()
@@ -238,6 +382,11 @@ std::string status_json()
     cJSON_AddStringToObject(o, "gateway", MPX_VOICE_DEFAULT_OTA_URL);
     cJSON_AddStringToObject(o, "link", mpx_voice_state_name());
     cJSON_AddStringToObject(o, "hands_free", mpx_voice_wake_state_name());
+    /* A skill (or the app) is holding voice back: this is why hands_free can
+     * read "off" while the owner expects it to be listening. */
+    cJSON_AddBoolToObject(o, "held", s_hold_depth.load() > 0);
+    cJSON_AddNumberToObject(o, "hold_depth", s_hold_depth.load());
+    cJSON_AddNumberToObject(o, "task_priority", mpx_voice_wake_task_priority());
     cJSON_AddBoolToObject(o, "listening", mpx_voice_wake_active());
     cJSON_AddBoolToObject(o, "talking", mpx_voice_talk_active());
     cJSON_AddBoolToObject(o, "playing_reply", mpx_voice_stream_is_playing());
@@ -281,6 +430,11 @@ void on_master_changed(bool) {}
 esp_err_t hands_free_start() { return ESP_ERR_NOT_SUPPORTED; }
 void hands_free_stop() {}
 esp_err_t provision() { return ESP_ERR_NOT_SUPPORTED; }
+esp_err_t hold(const char *) { return ESP_OK; }
+void release(const char *) {}
+bool held() { return false; }
+esp_err_t set_task_priority(int) { return ESP_ERR_NOT_SUPPORTED; }
+int task_priority() { return 0; }
 std::string status_json() { return "{\"available\":false,\"mode\":\"off\"}"; }
 
 }  // namespace voice_glue

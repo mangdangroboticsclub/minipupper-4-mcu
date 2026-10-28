@@ -205,6 +205,27 @@ CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
 CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_LV_BUILD_DEMOS=n
 
+# local-claw: the audio path and the voice stack are on again. They were
+# compiled out with `# CONFIG_APP_AUDIO_ENABLE is not set` because a wasm
+# skill and the wake front end fought over the microphone and the CPU, and the
+# skill lost. That is now the firmware's job: network's skill task takes
+# voice_glue::hold() around every run and release() after, which stops
+# hands-free listening and the esp-sr feed/fetch tasks, aborts a voice turn,
+# stops music and frees the I2S capture for the skill (mpx_mic_start), then
+# puts back exactly what was running. Voice and the chat ingress are refused
+# while a skill runs, so the wake word and the LLM stay out of its way -- and
+# the agent's mpx_run_skill blocks until the skill is done, so no model turn
+# is started behind it either.
+#
+# The RAM cost is what mpv2-claw pays for the same voice stack next to the
+# agent: the hold keeps the models and the AFE allocation and only stops the
+# tasks, so a skill does NOT get that RAM back. If internal RAM comes up short
+# at boot, the knobs are the budget further down this file, not turning voice
+# off again.
+CONFIG_APP_AUDIO_ENABLE=y
+CONFIG_APP_VOICE_ENABLE=y
+CONFIG_APP_VOICE_AUTO_LISTEN=y
+
 # local-claw: voice (main/voice). esp-sr's models: WakeNet 9 "Hi ESP", the
 # medium VADNet, WebRTC noise suppression (no model), no command recogniser;
 # packed into srmodels.bin and flashed to the `model` partition. Same set as

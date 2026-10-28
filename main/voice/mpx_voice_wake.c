@@ -109,6 +109,13 @@ static volatile bool s_run;
 static bool s_active;
 static SemaphoreHandle_t s_feed_done;
 static SemaphoreHandle_t s_fetch_done;
+/* The two DSP tasks, and the priority they run at. Kept so
+ * mpx_voice_wake_set_task_priority() can reach a front end that is already
+ * running -- a priority that only takes effect on the next start() would be
+ * "restart the robot to change it", which is not what the caller wants. */
+static TaskHandle_t s_feed_task;
+static TaskHandle_t s_fetch_task;
+static int          s_task_priority = 5;   /* what the tasks have always run at */
 
 /* Hands-free mode -- see mpx_voice_wake_auto_start() below. */
 #define WAKE_AUTO_TASK_STACK   6144   /* internal RAM: it only waits and orchestrates */
@@ -391,10 +398,12 @@ esp_err_t mpx_voice_wake_start(void)
     s_feed_failed = false;
 
     BaseType_t ok = xTaskCreateWithCaps(feed_task, "wake_feed", WAKE_FEED_TASK_STACK,
-                                        NULL, 5, NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                                        NULL, (UBaseType_t)s_task_priority, &s_feed_task,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
         ok = xTaskCreateWithCaps(feed_task, "wake_feed", WAKE_FEED_TASK_STACK,
-                                 NULL, 5, NULL, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                                 NULL, (UBaseType_t)s_task_priority, &s_feed_task,
+                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
     if (ok != pdPASS) {
         s_run = false;
@@ -404,16 +413,19 @@ esp_err_t mpx_voice_wake_start(void)
     }
 
     ok = xTaskCreateWithCaps(fetch_task, "wake_fetch", WAKE_FETCH_TASK_STACK,
-                             NULL, 5, NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                             NULL, (UBaseType_t)s_task_priority, &s_fetch_task,
+                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ok != pdPASS) {
         ok = xTaskCreateWithCaps(fetch_task, "wake_fetch", WAKE_FETCH_TASK_STACK,
-                                 NULL, 5, NULL, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                                 NULL, (UBaseType_t)s_task_priority, &s_fetch_task,
+                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
     if (ok != pdPASS) {
         /* feed_task is already running -- stop it the normal way rather
          * than leaving it orphaned. */
         s_run = false;
         xSemaphoreTake(s_feed_done, pdMS_TO_TICKS(WAKE_TASK_WAIT_MS));
+        s_feed_task = NULL;
         mpx_audio_capture_stop();
         ESP_LOGE(TAG, "could not create the fetch task");
         return ESP_ERR_NO_MEM;
@@ -438,6 +450,12 @@ void mpx_voice_wake_stop(void)
         ESP_LOGW(TAG, "fetch task did not confirm stop within %d ms", WAKE_TASK_WAIT_MS);
     }
 
+    /* Both tasks delete themselves, so the handles are dangling from here on:
+     * a set_task_priority() that reached one of them would be setting the
+     * priority of freed memory. */
+    s_feed_task = NULL;
+    s_fetch_task = NULL;
+
     mpx_audio_capture_stop();
     s_active = false;
     ESP_LOGI(TAG, "stopped");
@@ -446,6 +464,27 @@ void mpx_voice_wake_stop(void)
 bool mpx_voice_wake_active(void)
 {
     return s_active;
+}
+
+void mpx_voice_wake_set_task_priority(int prio)
+{
+    if (prio < 1 || prio > 24) {
+        ESP_LOGW(TAG, "ignoring priority %d: the front-end tasks take 1..24", prio);
+        return;
+    }
+    s_task_priority = prio;
+    if (s_feed_task) {
+        vTaskPrioritySet(s_feed_task, (UBaseType_t)prio);
+    }
+    if (s_fetch_task) {
+        vTaskPrioritySet(s_fetch_task, (UBaseType_t)prio);
+    }
+    ESP_LOGI(TAG, "front-end task priority -> %d%s", prio, s_active ? " (live)" : "");
+}
+
+int mpx_voice_wake_task_priority(void)
+{
+    return s_task_priority;
 }
 
 /* ── hands-free: wake word -> talk -> reply -> listen again ──────────────── */

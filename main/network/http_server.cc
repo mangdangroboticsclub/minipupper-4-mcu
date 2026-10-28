@@ -36,6 +36,7 @@
 #include "robot/driver_board.h"
 #include "util/sys_monitor.h"
 #include "util/trace_ring.h"
+#include "voice/voice_glue.h"
 #include "wasm/registry.h"
 #include "wasm/wasm_sandbox.h"
 
@@ -332,6 +333,10 @@ static volatile bool s_skill_running = false;
 // Name of the skill running now, for GET /v1/skills/status. A fixed buffer
 // rather than std::string because the run task and httpd both touch it.
 static char s_skill_name[64] = "";
+/* Given when a run ends, for skill_wait(). Binary rather than a task
+ * notification because the waiter (the agent's tool loop) is not the task that
+ * started the run, and there can only be one run at a time. */
+static SemaphoreHandle_t s_skill_done = nullptr;
 
 struct SkillRunArgs { std::string path; std::string name; std::string params; };
 
@@ -349,14 +354,29 @@ static void skill_run_task(void *arg)
      * parameters at all gets. */
     wasm::set_params(a->params.empty() ? nullptr : a->params.c_str());
 
+    /* The skill gets the robot to itself: no wake word, no voice turn, no
+     * music, and the microphone free for a skill that asks for it
+     * (mpx_mic_start). voice_glue::hold() remembers what was running and the
+     * release below puts exactly that back; it is counted, so a manual hold
+     * from POST /v1/voice {"hold":true} is not undone by this skill ending.
+     *
+     * This is where it runs, rather than on a worker: stopping the front end
+     * waits for its fetch() to notice (up to ~2 s), and nothing else in the
+     * start path may happen while the front end is still holding the mic. */
+    voice_glue::hold("skill");
+
     ESP_LOGI(TAG, "Running skill (async): %s", a->path.c_str());
     auto result = wasm::load_and_run(a->path.c_str(), "on_start", 60000);
+    voice_glue::release("skill");
     ESP_LOGI(TAG, "Skill '%s' completed with result=%d",
              a->name.c_str(), static_cast<int>(result));
     delete a;
     s_skill_name[0] = 0;
     s_skill_running = false;
-    vTaskDelete(nullptr);
+    if (s_skill_done) xSemaphoreGive(s_skill_done);
+    /* Created with xTaskCreateWithCaps: the stack may be in PSRAM, and only
+     * this call hands it back. */
+    vTaskDeleteWithCaps(nullptr);
 }
 
 /* Launch a skill on its own task. Shared by POST /v1/skills/run and by
@@ -372,12 +392,37 @@ static const char *start_skill_async(const std::string &path,
     s_skill_running = true;
     std::strncpy(s_skill_name, name.c_str(), sizeof(s_skill_name) - 1);
     s_skill_name[sizeof(s_skill_name) - 1] = 0;
+
+    /* skill_wait() is armed at start, not at first wait: a give left over from
+     * a run nobody waited for would make the next wait return at once. */
+    if (!s_skill_done) {
+        s_skill_done = xSemaphoreCreateBinary();
+    }
+    if (s_skill_done) {
+        while (xSemaphoreTake(s_skill_done, 0) == pdTRUE) {}
+    }
+
     auto *args = new SkillRunArgs{ path, name, params };
     // No core affinity: the scheduler keeps httpd (core 0) responsive while the
     // skill yields during its robot_delay_ms calls.  8 KB task stack is enough;
     // the WASM operand stack is allocated separately inside load_and_run.
-    BaseType_t created = xTaskCreate(skill_run_task, "skill_run", 8192,
-                                     args, 4, nullptr);
+    //
+    // PSRAM first, internal RAM second: internal RAM is what runs out here
+    // (~26 KB free, no 16 KB contiguous block once the screen, Wi-Fi and esp-sr
+    // are up), and this task is created at the worst moment -- a skill being
+    // started. The stack may live in PSRAM because this build copies code and
+    // .rodata into PSRAM (CONFIG_SPIRAM_XIP_FROM_PSRAM), so a flash operation
+    // never disables the cache; see the note on the loader thread in
+    // wasm/wasm_sandbox.cc.
+    TaskHandle_t task = nullptr;
+    BaseType_t created = xTaskCreateWithCaps(skill_run_task, "skill_run", 8192,
+                                             args, 4, &task,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (created != pdPASS) {
+        created = xTaskCreateWithCaps(skill_run_task, "skill_run", 8192,
+                                      args, 4, &task,
+                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
     if (created != pdPASS) {
         s_skill_running = false;
         s_skill_name[0] = 0;
@@ -448,6 +493,12 @@ const char *skill_running_name() { return s_skill_running ? s_skill_name : ""; }
 void skill_stop()
 {
     if (s_skill_running) wasm::request_stop();
+}
+
+bool skill_wait(uint32_t timeout_ms)
+{
+    if (!s_skill_running || !s_skill_done) return false;
+    return xSemaphoreTake(s_skill_done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
 }
 
 /* POST /v1/skills/run — execute a .wasm skill via WAMR (async) */

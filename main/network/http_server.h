@@ -30,6 +30,16 @@ bool        skill_running();
 const char *skill_running_name();   /*!< "" when none */
 void        skill_stop();           /*!< cooperative: wasm::request_stop() */
 
+/** Block until no skill is running, or until @p timeout_ms elapses.
+ *
+ *  Returns true when an observed run finished inside the timeout (false if
+ *  nothing was running when called, or it is still running). The agent's
+ *  mpx_run_skill uses it to stay inside the run: the LLM is idle while the
+ *  skill has the robot, instead of queueing up a second turn's worth of
+ *  requests behind it. Meant for a task that may block that long (the tool
+ *  loop and the voice tools task are); NOT for httpd. */
+bool        skill_wait(uint32_t timeout_ms);
+
 /**
  * @brief Root directory inside LittleFS where www assets are stored.
  */

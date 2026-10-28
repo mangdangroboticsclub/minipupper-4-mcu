@@ -10,12 +10,15 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_memory_utils.h"
+#include "esp_pthread.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "wasm_export.h"
 
 #include "fs/littlefs_manager.h"
+#include "audio/mpx_audio.h"
 #include "robot/robot.h"
 #include "sdk/wasm_host_functions.h"
 #include "util/trace_ring.h"
@@ -220,6 +223,16 @@ static void *wasm_load_run_thread(void *arg)
 {
 	auto *args = static_cast<LoadRunArgs *>(arg);
 
+	/* Once per boot: says where the loader stack actually landed. This is the
+	 * answer to "did the PSRAM stack fix work?" without a heap trace, and it is
+	 * the first thing to look at if a run ever fails with ENOMEM again. */
+	static bool stack_logged;
+	if (!stack_logged) {
+		stack_logged = true;
+		ESP_LOGI(TAG, "loader thread running on a %s stack",
+				 esp_ptr_external_ram(esp_cpu_get_sp()) ? "PSRAM" : "internal-RAM");
+	}
+
 	char error_buf[256];
 
 	// 2. Load the module
@@ -382,6 +395,15 @@ static void *wasm_load_run_thread(void *arg)
 	robot::release_skill_bus_lock();
 	robot::clear_overlay();   /* an overlay must not outlive its skill */
 	sdk::control_reset();
+
+	/* The microphone, if the skill opened it (mpx_mic_start) and did not close
+	 * it on the way out - a trap or a watchdog kill leaves nothing else to do
+	 * it, and the next skill would find the capture busy. Voice is not open
+	 * here: voice_glue::hold() stopped it for the run. */
+	if (mpx_audio_capture_active()) {
+		mpx_audio_capture_stop();
+		ESP_LOGW(TAG, "skill left the microphone open - closed it");
+	}
 	s_tick_period_ms = 0;
 	s_tick_stop      = false;
 	s_stopping       = false;
@@ -570,17 +592,73 @@ SandboxResult load_and_run_bytes(const uint8_t *wasm_bytes,
 	// skill asked for must not carry over.
 	s_watchdog_extra_ms = 0;
 
+	/* The loader thread's stack goes in PSRAM.
+	 *
+	 * Internal RAM is the scarce resource on this board: with the screen,
+	 * Wi-Fi and esp-sr up, the robot runs with ~26 KB of internal RAM free in
+	 * blocks too small to hold a 16 KB stack, and a run died at
+	 * "pthread: Failed to create task!" (ENOMEM) before the module was even
+	 * loaded. PSRAM has megabytes free. mpv2-claw's answer was to compile
+	 * voice out; this is the one that keeps both.
+	 *
+	 * Safe here only because this build copies instructions and .rodata into
+	 * PSRAM (CONFIG_SPIRAM_XIP_FROM_PSRAM, which selects FETCH_INSTRUCTIONS
+	 * and RODATA): that makes SPI_FLASH_CACHE_NO_DISABLE true in
+	 * spi_flash_os_func_app.c, so a flash operation never turns the cache off
+	 * and the "a PSRAM-stacked task must not touch flash" assert in
+	 * cache_utils.c is compiled out entirely. A skill may write to LittleFS
+	 * from this thread. If that option is ever turned off, this stack has to
+	 * go back to internal RAM (drop stack_alloc_caps) or the robot will
+	 * assert on the first file write from a skill.
+	 *
+	 * stack_alloc_caps is the only knob for it: ESP-IDF's pthread port has no
+	 * pthread_attr_setstack(), and pthread_attr_setstacksize() only overrides
+	 * the size.
+	 *
+	 * inherit_cfg propagates the caps, not just the name, to the threads WAMR
+	 * itself creates for a skill built with wasm threads -- those used to be
+	 * the same ENOMEM, one level deeper. */
+	esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
+	cfg.thread_name = "wasm_run";
+	cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+	cfg.inherit_cfg = true;
+	const bool psram_cfg = esp_pthread_set_cfg(&cfg) == ESP_OK;
+
 	pthread_attr_init(&attr);
-	// Native C thread stack (internal RAM) — separate from the WASM operand
-	// stack above.  16 KB is plenty for WAMR's interpreter recursion; keep it
-	// fixed so growing the WASM operand stack doesn't inflate internal-RAM use.
+	// Native C thread stack — separate from the WASM operand stack above.
+	// 16 KB is plenty for WAMR's interpreter recursion.
 	pthread_attr_setstacksize(&attr, 16 * 1024);
 
 	int ret = pthread_create(&thread, &attr, wasm_load_run_thread, &args);
+	if (ret != 0 && psram_cfg) {
+		/* PSRAM refused it: try internal RAM, which is where this stack lived
+		 * before. It may well fail for the same reason, but a run that fails
+		 * with a clear message beats one that fails without trying. */
+		ESP_LOGW(TAG, "loader thread stack in PSRAM failed (%d) - retrying in "
+					  "internal RAM", ret);
+		esp_pthread_cfg_t def = esp_pthread_get_default_config();
+		def.thread_name = "wasm_run";
+		esp_pthread_set_cfg(&def);
+		ret = pthread_create(&thread, &attr, wasm_load_run_thread, &args);
+	}
 	pthread_attr_destroy(&attr);
 
+	/* Put the caller's pthread defaults back: load_and_run_bytes() is also
+	 * called from the Lua task, which outlives this run, and a config left in
+	 * its TLS would hand PSRAM stacks and the "wasm_run" name to every
+	 * pthread it creates afterwards. */
+	if (psram_cfg) {
+		esp_pthread_cfg_t restore = esp_pthread_get_default_config();
+		esp_pthread_set_cfg(&restore);
+	}
+
 	if (ret != 0) {
-		ESP_LOGE(TAG, "Failed to create loader thread: %d", ret);
+		ESP_LOGE(TAG, "Failed to create loader thread: %d (no memory for a %u "
+				  "byte stack, internal RAM: %u free / %u largest)",
+				 ret, static_cast<unsigned>(16 * 1024),
+				 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+				 static_cast<unsigned>(
+					 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
 		return SandboxResult::ExecutionFailed;
 	}
 

@@ -31,6 +31,7 @@
 #include "fs/littlefs_manager.h"
 
 #include "agent/agent_runtime.h"
+#include "network/http_server.h"
 #include "robot/robot.h"
 #include "lua/lua_vm.h"
 
@@ -1942,6 +1943,14 @@ esp_err_t chat_ws_handler(httpd_req_t *req)
                 problem = "Nothing to send: the message has no text.";
             } else if (!session[0]) {
                 problem = "The message has no session_id.";
+            } else if (skill_running()) {
+                /* A wasm skill has the robot to itself (voice_glue::hold), so a
+                 * new agent turn would start a model request and its tool loop
+                 * underneath it. Refuse instead of queueing: the skill's end is
+                 * not known in advance, and a silent queue would look like the
+                 * robot ignoring the message. */
+                problem = "A skill is running on the robot. Wait for it to finish "
+                          "(or stop it, POST /v1/skills/stop), then send the message again.";
             } else {
                 if (client) client->step_seq = 0;
                 const esp_err_t err = agent::submit(session, text);

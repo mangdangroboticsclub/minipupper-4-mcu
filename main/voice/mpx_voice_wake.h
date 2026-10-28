@@ -69,6 +69,17 @@ void mpx_voice_wake_stop(void);
 
 bool mpx_voice_wake_active(void);
 
+/* Priority for the two front-end (DSP) tasks -- the ones that run esp-sr's
+ * AEC/VAD/WakeNet on the audio path, and the real CPU cost of listening.
+ * Applies at once to tasks that are up, and to the next mpx_voice_wake_start()
+ * otherwise; 1..24, anything else is ignored. The hands-free orchestrator
+ * ("wake_auto") keeps its own priority: it only waits, and starving it would
+ * make the loop late to hand the microphone over. */
+void mpx_voice_wake_set_task_priority(int prio);
+
+/* What that setter last accepted (the priority the tasks start with). */
+int mpx_voice_wake_task_priority(void);
+
 /* Hands-free conversation loop, described in the file header. Runs
  * mpx_voice_wake_init() itself if needed. Idempotent. Needs `voice
  * provision` to have been run once on this device; it reports (and keeps
