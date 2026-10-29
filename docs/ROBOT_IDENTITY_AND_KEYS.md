@@ -1315,6 +1315,15 @@ Unprovisioned behaviour: the local PWA, motion and Lua keep working, while cloud
 chat, the robot token and MPXE decryption are disabled with a distinct log line
 and a PWA status. A robot with no identity should still walk.
 
+**As built (M1):** the component is `components/mpx_identity/`, and the split
+that makes it testable is `mpx_id.c` + `mpx_derive.c` (no ESP headers, the HMAC
+passed in as a callback) under `mpx_identity.cc` (Kconfig, NVS, eFuse). Two
+deviations from this section: `mpx_identity_key_version()` was added early
+because the frame AAD needs it in §6.9 C3, and the all-zero-key refusal moved
+out of `wasm_decrypt.cc` into the identity so it covers every caller. The
+eFuse source is a stub until Stage 2 — see `### M1 as built` in
+`docs/FIRMWARE_IMPLEMENTATION_PLAN.md`.
+
 **sdkconfig (production profile, `sdkconfig.defaults.prod`)**
 
 ```

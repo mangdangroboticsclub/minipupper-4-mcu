@@ -1,0 +1,19 @@
+# Custom eFuse table (docs/ROBOT_IDENTITY_AND_KEYS.md §6.2).
+#
+# This file has to sit here: CONFIG_EFUSE_CUSTOM_TABLE_FILENAME defaults to
+# "main/esp_efuse_custom_table.csv" (relative to the project root), and the
+# generator writes its output next to the CSV -- main/esp_efuse_custom_table.c
+# and main/include/esp_efuse_custom_table.h.
+#
+# These live in BLOCK_USR_DATA (BLOCK3), the 256 bits Espressif leaves to the
+# application. The record is written once, in one batch with its WR_DIS bit,
+# because a Reed-Solomon-coded block cannot be partially rewritten.
+#
+# `idf.py efuse-custom-table` regenerates the C struct from this file and fails
+# if a field overlaps the built-in USER_DATA.MAC_CUSTOM range (bits 200-247).
+#
+# field_name,            efuse_block, bit_start, bit_count, comment
+USER_DATA.MPX_ROBOT_ID,  EFUSE_BLK3,  0,         128,       Robot ID, 16 ASCII bytes
+USER_DATA.MPX_ID_FORMAT, EFUSE_BLK3,  128,       8,         Record format, 0x01
+USER_DATA.MPX_ID_FLAGS,  EFUSE_BLK3,  136,       8,         bit0 = dev unit, bit1 = replacement board
+USER_DATA.MPX_KV_BASE,   EFUSE_BLK3,  144,       16,        Lowest key version this board may use (1 = new robot)

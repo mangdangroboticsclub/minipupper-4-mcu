@@ -1,6 +1,7 @@
 #include "network/chat_ws.h"
 #include "network/crypto.h"
 #include "network/wifi_sta.h"
+#include "mpx_identity.h"
 
 #include <atomic>
 #include <cstdio>
@@ -47,9 +48,8 @@ static constexpr bool IS_ECHO_MODE() {
 static constexpr const char *SERVER_IP   = CONFIG_APP_CHAT_SERVER_IP;
 static constexpr int    SERVER_PORT   = CONFIG_APP_CHAT_SERVER_PORT;
 static constexpr const char *WS_PATH     = CONFIG_APP_CHAT_WS_PATH;
-static constexpr const char *ROBOT_UUID  = CONFIG_APP_ROBOT_UUID;
 
-/* ── AES-256-GCM key (parsed from Kconfig hex string) ──────── */
+/* ── AES-256-GCM key, from components/mpx_identity ─────────── */
 static uint8_t s_aes_key[crypto::KEY_SIZE] = {};
 static bool    s_key_loaded = false;
 
@@ -585,19 +585,20 @@ static void lua_worker_task(void *arg)
     }
 }
 
-/* ── Helper: read AES key from Kconfig hex string ──────────── */
+/* ── Helper: get the robot key from the identity ──────────── */
 static bool load_aes_key()
 {
     if (s_key_loaded) return true;
 
-    if (!crypto::hex_to_bytes(CONFIG_APP_CHAT_AES_KEY_HEX,
-                               s_aes_key, crypto::KEY_SIZE)) {
-        ESP_LOGE(TAG, "Failed to parse AES key from Kconfig");
+    if (!mpx_identity_robot_key(s_aes_key)) {
+        ESP_LOGE(TAG, "No robot key -- chat stays off until the unit has an "
+                      "identity (key_fp is empty)");
         return false;
     }
 
     s_key_loaded = true;
-    ESP_LOGI(TAG, "AES-256-GCM key loaded (%d bytes)", crypto::KEY_SIZE);
+    ESP_LOGI(TAG, "AES-256-GCM robot key loaded (%d bytes, fingerprint %s)",
+             crypto::KEY_SIZE, mpx_identity_key_fp());
     return true;
 }
 
@@ -624,10 +625,15 @@ static uint8_t *build_upstream_frame(const char *json_text,
 
     auto *hdr = reinterpret_cast<BinaryFrameHeader *>(frame);
 
-    // ── Fill robot_uuid (pad or truncate to 16 bytes) ──────────
-    std::memset(hdr->robot_uuid, 0, 16);
-    std::strncpy(reinterpret_cast<char *>(hdr->robot_uuid),
-                 ROBOT_UUID, 16);
+    // ── Fill robot_uuid: exactly the 16 bytes the cloud authenticates ──
+    // Not a string copy: these bytes are the AES-GCM AAD, so the header and
+    // the AAD have to be the same array rather than two copies that agree.
+    if (!mpx_identity_frame_id(hdr->robot_uuid)) {
+        ESP_LOGE(TAG, "No robot ID -- refusing to build an unauthenticated frame");
+        std::free(frame);
+        out_frame_len = 0;
+        return nullptr;
+    }
 
     // ── Generate random IV ─────────────────────────────────────
     crypto::random_bytes(hdr->iv, crypto::IV_SIZE);

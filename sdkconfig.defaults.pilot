@@ -1,0 +1,13 @@
+# Pilot/bench image: the identity comes from eFuse and the UART listener is on.
+#
+# Opt in explicitly, because the default build must keep working on a board that
+# has never been to the bench:
+#
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.pilot" build
+#
+# Never ship this profile. `@MPXPROV` burns fuses, and a shipped robot has no
+# reason to accept "burn a new identity" and every reason not to.
+
+CONFIG_APP_IDENTITY_SOURCE_EFUSE=y
+CONFIG_APP_PROVISIONING_ENABLE=y
+CONFIG_APP_PROV_SEAL_KEY_ID=0

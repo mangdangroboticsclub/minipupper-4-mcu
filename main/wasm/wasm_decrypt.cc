@@ -1,5 +1,6 @@
 #include "wasm/wasm_decrypt.h"
 #include "network/crypto.h"
+#include "mpx_identity.h"
 
 #include <cstdio>
 #include <cstring>
@@ -41,34 +42,12 @@ static void secure_zero(void *ptr, size_t len)
     }
 }
 
-// ── Load robot AES key from Kconfig ─────────────────────────
-// Returns false if the key is all zeros or invalid hex.
-static bool load_robot_key(uint8_t key_out[crypto::KEY_SIZE])
-{
-    if (!crypto::hex_to_bytes(CONFIG_APP_CHAT_AES_KEY_HEX, key_out,
-                               crypto::KEY_SIZE)) {
-        ESP_LOGE(TAG, "Failed to parse robot AES key from Kconfig");
-        return false;
-    }
-
-    // Refuse the all-zeros default key in production builds.
-    // In debug builds we allow it so encrypted skills work
-    // during development without provisioning real keys.
-#ifdef NDEBUG
-    bool all_zero = true;
-    for (size_t i = 0; i < crypto::KEY_SIZE; i++) {
-        if (key_out[i] != 0) { all_zero = false; break; }
-    }
-    if (all_zero) {
-        ESP_LOGE(TAG, "Robot AES key is all zeros — robot not provisioned");
-        return false;
-    }
-#endif
-
-    return true;
-}
-
 namespace wasm {
+
+// The two key sizes are the same number for the same reason: 32 bytes is the
+// AES-256 key the identity holds and the one the MPXE header wraps.
+static_assert(crypto::KEY_SIZE == MPX_KEY_LEN,
+              "identity key size must match the frame key size");
 
 // ── Core decryption (steps 1-4) — caller already verified MPXE format ──
 static DecryptResult decrypt_mpxe_core(const uint8_t *data, size_t data_size,
@@ -106,16 +85,20 @@ static DecryptResult decrypt_mpxe_core(const uint8_t *data, size_t data_size,
     const uint8_t *wasm_tag = data + OFF_ENCRYPTED_WASM + wasm_ct_len;
 
     // ── Step 2: Load robot key ───────────────────────────────
+    // No Kconfig parse and no "is it all zeros" check here any more: both live
+    // in components/mpx_identity, which refuses to hand out a key for a unit
+    // that has no identity.
     uint8_t robot_key[crypto::KEY_SIZE];
-    if (!load_robot_key(robot_key)) {
+    if (!mpx_identity_robot_key(robot_key)) {
         return DecryptResult::KeyNotLoaded;
     }
 
     // ── Step 3: Unwrap the per-skill key ─────────────────────
-    // AAD = "wasm-wrap:v1:" + robot_uuid
+    // AAD = "wasm-wrap:v1:" + robot_id, from the identity: a blob wrapped for
+    // one robot cannot unwrap on another.
     char wrap_aad_buf[128];
     int wrap_aad_len = snprintf(wrap_aad_buf, sizeof(wrap_aad_buf),
-                                "wasm-wrap:v1:%s", CONFIG_APP_ROBOT_UUID);
+                                "wasm-wrap:v1:%s", mpx_identity_robot_id());
 
     uint8_t skill_key[crypto::KEY_SIZE];
     bool unwrap_ok = crypto::gcm_decrypt(

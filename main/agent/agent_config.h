@@ -66,7 +66,7 @@ esp_err_t save_own(const OwnLlm &o);
 std::string own_key_hint();
 
 /** "<robot uuid>.<first 32 hex of HMAC-SHA256(aes_key, "mpx-ai-v1:" + uuid)>",
- *  the gateway's robot token (CONFIG_APP_ROBOT_UUID, CONFIG_APP_CHAT_AES_KEY_HEX).
+ *  the gateway's robot token (see components/mpx_identity).
  *  Empty when the key is not 64 hex digits. */
 std::string robot_token();
 

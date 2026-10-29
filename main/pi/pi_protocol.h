@@ -181,7 +181,7 @@ typedef struct {
     uint8_t  link_state;     /* PI_LINK_*                                    */
     uint16_t state_rate_hz;  /* rate STATE is actually being sent at         */
     char     fw[16];         /* firmware name, NUL-padded                    */
-    char     uuid[24];       /* CONFIG_APP_ROBOT_UUID, NUL-padded            */
+    char     uuid[24];       /* mpx_identity_robot_id(), NUL-padded        */
 } pi_info_t;
 
 typedef struct {

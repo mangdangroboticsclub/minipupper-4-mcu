@@ -122,10 +122,27 @@ set(common_assets
     "${pwa_www_dir}/sw.js.gz"
 )
 
+# ── Custom eFuse table ───────────────────────────────────────
+# ESP-IDF generates main/esp_efuse_custom_table.c from
+# main/esp_efuse_custom_table.csv but does not compile it: the application has
+# to, and it is where the robot identity fields in BLOCK_USR_DATA live. The
+# generated header lands in main/include, which is already an include dir.
+if(CONFIG_EFUSE_CUSTOM_TABLE)
+    # GENERATED matters: on a clean checkout the file does not exist yet when
+    # CMake configures, and add_library() would fail with "Cannot find source
+    # file". The build dependency added after registration makes the efuse
+    # component's generator run before this component compiles.
+    set(mpx_efuse_table "${CMAKE_CURRENT_LIST_DIR}/esp_efuse_custom_table.c")
+    set_source_files_properties("${mpx_efuse_table}" PROPERTIES GENERATED TRUE)
+    list(APPEND sources "${mpx_efuse_table}")
+endif()
+
 # ── Register component ───────────────────────────────────────
 idf_component_register(
     SRCS        ${sources}
-    INCLUDE_DIRS "." "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "pi" "audio" "display" "voice" "agent"
+    # "include" holds generated headers (the custom eFuse table); listing
+    # INCLUDE_DIRS explicitly replaces the default, so it has to be named.
+    INCLUDE_DIRS "." "include" "fs" "wasm" "sdk" "network" "robot" "lua" "platform" "util" "pi" "audio" "display" "voice" "agent"
     EMBED_FILES
         ${common_assets}
         ${design_assets}
@@ -173,6 +190,12 @@ idf_component_register(
         esp_event
         mbedtls
         json
+        # The generated custom eFuse table includes esp_efuse.h.
+        efuse
+        # The robot's ID and AES key. Everything that needs either one asks
+        # this component, so the source (Kconfig today, eFuse on a provisioned
+        # unit) is decided in one place. components/mpx_identity/
+        mpx_identity
         # The on-device agent: ESP-Claw (third-party/esp-claw, pulled in by
         # main/idf_component.yml). app_claw is the shell, claw_core has
         # claw_paths, claw_cap the capability types, cap_im_local the "web"
@@ -183,6 +206,15 @@ idf_component_register(
         cap_im_local
         claw_event_router
 )
+
+# The only references to the custom table's field descriptors come from
+# components/mpx_identity, whose archive the linker opens before libmain.a;
+# without a forced reference the table's object is dropped and the identity
+# component fails to link. Naming one field pulls the whole object in.
+if(CONFIG_EFUSE_CUSTOM_TABLE)
+    add_dependencies(${COMPONENT_LIB} efuse-custom-table)
+    target_link_libraries(${COMPONENT_LIB} INTERFACE "-u ESP_EFUSE_USER_DATA_MPX_ROBOT_ID")
+endif()
 
 # Lua requires 32-bit mode on Xtensa/RISC-V architectures.
 # This must match the Lua component's own definition so that

@@ -191,26 +191,89 @@ config APP_IMU_LOG_LEVEL_VERBOSE
 
 endchoice
 
+# ── Robot identity source ─────────────────────────────────────────
+#
+# Where the 16-byte ID and the AES-256 key come from. One choice, because the
+# two must agree: a Kconfig ID with an eFuse key (or the reverse) is a robot the
+# gateway cannot authenticate, and the failure looks like a corrupt frame rather
+# than a configuration mistake.
+#
+# Everything that needs either value goes through components/mpx_identity/
+# (docs/ROBOT_IDENTITY_AND_KEYS.md §8.1); nothing else may read these symbols.
+
+choice APP_IDENTITY_SOURCE
+    prompt "Robot identity source"
+    default APP_IDENTITY_SOURCE_KCONFIG
+    help
+        Kconfig keeps the development flow exactly as it was: edit the two
+        strings below and flash. eFuse is what a shipped robot uses -- the ID
+        is read from BLOCK_USR_DATA and the key is derived from an HMAC_UP
+        block that code can use but never read.
+
+config APP_IDENTITY_SOURCE_KCONFIG
+    bool "Kconfig strings (development only)"
+
+config APP_IDENTITY_SOURCE_EFUSE
+    bool "eFuse HMAC_UP key + USR_DATA robot ID (production)"
+
+endchoice
+
 config APP_ROBOT_UUID
     string "Unique robot identifier (UUID)"
+    depends on APP_IDENTITY_SOURCE_KCONFIG
     default "MPX-DOG-01"
     help
         Unique identifier for this robot, used as the routing header
         in upstream binary frames. This is sent as plain-text AAD
         in the encrypted frame header.
 
-        In production, this should be a factory-provisioned UUID
-        and should match the key in NVS.
+        Production format is MPX- plus 12 Crockford base32 symbols with a
+        check symbol, e.g. MPX-AJZ7J8Y0YTDS -- exactly 16 bytes, the width of
+        the frame's robot_uuid field. A shorter ID is still accepted so an
+        existing dev board keeps booting; it is zero-padded on the wire.
 
 config APP_CHAT_AES_KEY_HEX
     string "AES-256-GCM key (hex, 64 hex chars)"
+    depends on APP_IDENTITY_SOURCE_KCONFIG
     default "0000000000000000000000000000000000000000000000000000000000000001"
     help
         256-bit AES key in hexadecimal format (64 hex characters).
         Used for encrypting the upstream binary frame payload.
 
-        WARNING: The default key is INSECURE and for development only.
-        In production, provision a unique key per device via NVS.
+        WARNING: The default key is INSECURE and for development only:
+        it is published in this repository. The firmware logs an error at
+        boot when it is in use. Production derives a per-robot key from an
+        HMAC_UP eFuse block instead.
+
+# ── Factory provisioning ──────────────────────────────────────────
+# Irreversible commands on the console UART (§6.6). Compiled out of anything
+# that is not a factory image: a shipped robot has no reason to accept
+# "burn a new identity", and every reason not to.
+
+config APP_PROVISIONING_ENABLE
+    bool "Accept @MPXPROV provisioning commands on UART0"
+    default n
+    depends on APP_IDENTITY_SOURCE_EFUSE
+    help
+        Starts a listener on UART0 (115200 8N1) that accepts four commands:
+        provision, reseal, status and lock. Requires the eFuse identity
+        source, because a build that reads its identity from Kconfig has
+        nothing to provision.
+
+        This is for factory and bench images only. The commands cannot be
+        undone: `provision` burns the robot ID into eFuse and `lock`
+        write-protects it forever.
+
+config APP_PROV_SEAL_KEY_ID
+    int "Seal public key slot"
+    depends on APP_IDENTITY_SOURCE_EFUSE
+    range 0 1
+    default 0
+    help
+        Which embedded KMS public key the sealed blob is encrypted to. Slot 1
+        is reserved for a rotation: new firmware can seal to it while old
+        firmware keeps sealing to slot 0, and the cloud holds both private
+        keys during the overlap.
 
 # ── WASM skill encryption ─────────────────────────────────────────
 
@@ -230,24 +293,6 @@ config APP_MPX_WASM_ENCRYPTION
 
         Disable this to save ~2 KB of flash if WASM encryption
         is not needed.
-
-config APP_MPX_EFUSE_BLK
-    int "eFuse block for robot AES key (0 = use Kconfig)"
-    range 0 5
-    default 0
-    help
-        eFuse key block index where the robot's AES-256 root key
-        is stored.  Set to 0 (default) to read the key from the
-        APP_CHAT_AES_KEY_HEX Kconfig string.
-
-        In production, set this to 1-5 to read from a hardware
-        eFuse block that was provisioned at manufacturing time.
-        The key block must be configured as read-protected so it
-        cannot be read by application code via esp_efuse_read_*()
-        — mbedTLS will use it directly via the hardware crypto
-        engine's key register.
-
-        NOTE: eFuse key block support is not yet implemented.
         Setting this to a non-zero value currently does nothing;
         the key is always read from Kconfig.
 

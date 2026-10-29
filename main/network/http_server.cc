@@ -30,6 +30,7 @@
 
 #include "fs/littlefs_manager.h"
 #include "lua/lua_vm.h"
+#include "mpx_identity.h"
 #include "pi/pi_link.h"
 #include "sdkconfig.h"
 #include "robot/robot.h"
@@ -2561,12 +2562,31 @@ static esp_err_t api_gateway_config(httpd_req_t *req)
 {
     std::string host = CONFIG_APP_CHAT_SERVER_IP;
     int port = CONFIG_APP_CHAT_SERVER_PORT;
-    std::string uuid = CONFIG_APP_ROBOT_UUID;
+    std::string uuid = mpx_identity_robot_id();
+
+    /* `identity_state` and `key_fp` are here so the PWA can say "this robot has
+     * no identity" instead of showing a connected-looking UI over a chat that
+     * will never open, and so a support call can read off which key a unit is
+     * actually using (the fingerprint is a one-way HMAC, safe to expose). */
+    const char *state = "unprovisioned";
+    switch (mpx_identity_state()) {
+    case MPX_ID_KCONFIG: state = "kconfig";    break;
+    case MPX_ID_EFUSE:   state = "efuse";      break;
+    case MPX_ID_INCONSISTENT: state = "inconsistent"; break;
+    case MPX_ID_UNPROVISIONED:
+    default:             state = "unprovisioned"; break;
+    }
 
     char resp[512];
     int n = std::snprintf(resp, sizeof(resp),
-        R"({"host":"%s","port":%d,"robot_uuid":"%s"})",
-        host.c_str(), port, uuid.c_str());
+        R"({"host":"%s","port":%d,"robot_uuid":"%s","identity_state":"%s","key_fp":"%s"})",
+        host.c_str(), port, uuid.c_str(), state, mpx_identity_key_fp());
+
+    if (n < 0 || static_cast<size_t>(n) >= sizeof(resp)) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "gateway config too long");
+        return ESP_FAIL;
+    }
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, n);
@@ -2671,7 +2691,7 @@ static esp_err_t api_marketplace_proxy(httpd_req_t *req)
         //       /v1/marketplace/robot/checkout     → /v1/robots/{uuid}/checkout
         //       /v1/marketplace/robot/orders       → /v1/robots/{uuid}/orders
         std::string suffix = uri + std::strlen(prefix_robot);
-        target_path = "/v1/robots/" + std::string(CONFIG_APP_ROBOT_UUID) + "/" + suffix;
+        target_path = "/v1/robots/" + std::string(mpx_identity_robot_id()) + "/" + suffix;
     } else if (std::strncmp(uri, prefix_skills, std::strlen(prefix_skills)) == 0) {
         // /v1/marketplace/skills[/...] → /v1/skills[/...]
         // Strip "/v1/marketplace/" (16 chars), prepend "/v1/"

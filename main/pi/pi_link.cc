@@ -47,6 +47,7 @@
 #include "pi/pi_protocol.h"
 #include "pi/pi_video.h"
 #include "pi/rl_link.h"
+#include "mpx_identity.h"
 #include "robot/board_config.h"
 #include "robot/robot.h"
 #include "wasm/wasm_sandbox.h"
@@ -61,9 +62,6 @@
 #endif
 #ifndef CONFIG_APP_PI_LINK_STATE_HZ
 #define CONFIG_APP_PI_LINK_STATE_HZ 50
-#endif
-#ifndef CONFIG_APP_ROBOT_UUID
-#define CONFIG_APP_ROBOT_UUID "MPX-DOG-01"
 #endif
 
 namespace pi_link {
@@ -186,7 +184,7 @@ void send_info()
     info.link_state    = static_cast<uint8_t>(s_state);
     info.state_rate_hz = state_rate_hz();
     std::snprintf(info.fw,   sizeof(info.fw),   "%s", "mpx-dog");
-    std::snprintf(info.uuid, sizeof(info.uuid), "%s", CONFIG_APP_ROBOT_UUID);
+    std::snprintf(info.uuid, sizeof(info.uuid), "%s", mpx_identity_robot_id());
     send_frame(PI_MSG_INFO, &info, sizeof(info));
 }
 

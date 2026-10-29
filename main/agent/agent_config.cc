@@ -5,6 +5,7 @@
 
 #include "esp_log.h"
 #include "mbedtls/md.h"
+#include "mpx_identity.h"
 #include "nvs.h"
 #include "sdkconfig.h"
 
@@ -71,21 +72,6 @@ Mode load_mode()
 		nvs_close(h);
 	}
 	return m;
-}
-
-bool hex_to_key(const char *hex, uint8_t out[32])
-{
-	if (!hex || strlen(hex) != 64) {
-		return false;
-	}
-	for (int i = 0; i < 32; ++i) {
-		unsigned v;
-		if (sscanf(hex + 2 * i, "%2x", &v) != 1) {
-			return false;
-		}
-		out[i] = static_cast<uint8_t>(v);
-	}
-	return true;
 }
 
 }  // namespace
@@ -217,22 +203,33 @@ std::string robot_token()
 {
 	uint8_t key[32];
 	uint8_t mac[32];
-	if (!hex_to_key(CONFIG_APP_CHAT_AES_KEY_HEX, key)) {
-		ESP_LOGW(TAG, "APP_CHAT_AES_KEY_HEX is not 64 hex digits: no gateway token");
+
+	/* The token is the robot's proof of identity to the gateway: ID plus an
+	 * HMAC over it under the robot key. Both come from mpx_identity, so a unit
+	 * without an identity simply has no token -- which is the signal to keep
+	 * cloud features off instead of sending one the gateway cannot verify. */
+	if (!mpx_identity_robot_key(key)) {
+		ESP_LOGW(TAG, "no robot identity: no gateway token");
 		return std::string();
 	}
-	const std::string msg = std::string("mpx-ai-v1:") + CONFIG_APP_ROBOT_UUID;
+	const std::string robot_id = mpx_identity_robot_id();
+	const std::string msg = std::string("mpx-ai-v1:") + robot_id;
 	const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-	if (!md || mbedtls_md_hmac(md, key, sizeof(key),
-	                           reinterpret_cast<const unsigned char *>(msg.data()), msg.size(),
-	                           mac) != 0) {
+	const bool hmac_ok =
+		md != nullptr &&
+		mbedtls_md_hmac(md, key, sizeof(key),
+		                reinterpret_cast<const unsigned char *>(msg.data()),
+		                msg.size(), mac) == 0;
+	std::memset(key, 0, sizeof(key));
+	if (!hmac_ok) {
 		return std::string();
 	}
 	char hex[33];
 	for (int i = 0; i < 16; ++i) {
 		snprintf(hex + 2 * i, sizeof(hex) - 2 * i, "%02x", mac[i]);
 	}
-	return std::string(CONFIG_APP_ROBOT_UUID) + "." + hex;
+	std::memset(mac, 0, sizeof(mac));
+	return robot_id + "." + hex;
 }
 
 }  // namespace agent_config

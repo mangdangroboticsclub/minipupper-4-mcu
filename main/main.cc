@@ -15,6 +15,8 @@
 #include "network/www_assets.h"
 #include "pi/pi_link.h"
 #include "agent/agent_runtime.h"
+#include "mpx_identity.h"
+#include "mpx_provision.h"
 #include "robot/mpx_robot.h"
 #include "robot/robot.h"
 #include "sdk/wasm_host_functions.h"
@@ -70,6 +72,22 @@ static void init_nvs()
 extern "C" void app_main(void)
 {
 	init_nvs();
+
+	// ── Identity: the 16-byte ID and the AES key ──────────────
+	// Straight after NVS, because everything below (chat, agent, WASM, HTTP,
+	// the Pi link) either needs one of the two or needs to know there is none.
+	// Failure is not fatal: a robot with no identity still walks, it just cannot
+	// talk to the cloud.
+	if (mpx_identity_init() != ESP_OK) {
+		ESP_LOGW(TAG, "No robot identity -- cloud chat, robot token and MPXE are off");
+	}
+	// Provisioning listener: a no-op unless this is a factory build, and it
+	// runs before the network so a board that has never been provisioned can
+	// still be given an identity (it has no other way in).
+	const esp_err_t prov = mpx_provision_init();
+	if (prov != ESP_OK && prov != ESP_ERR_NOT_SUPPORTED) {
+		ESP_LOGW(TAG, "Provisioning listener did not start: %s", esp_err_to_name(prov));
+	}
 	log_internal_heap("boot");
 
 	// ── System monitor: CPU / RAM / task load to the log and the PWA ──
@@ -127,6 +145,9 @@ extern "C" void app_main(void)
 	}
 
 	// ── Network: initialise Wi-Fi STA (auto-connects if saved) ─
+	// D9: from here on the hardware RNG is a real entropy source, so a
+	// provisioning run no longer needs the bootloader's.
+	mpx_provision_set_rf_ready();
 	if (!network::init_wifi_sta()) {
 		ESP_LOGW(TAG, "Wi-Fi STA init failed — continuing in AP-only mode");
 	}
