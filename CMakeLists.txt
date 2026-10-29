@@ -25,17 +25,36 @@ project(MPX-Dog)
 #                   npm could ever create the files. So bootstrap the bundle
 #                   here, at configure time, when it is absent.
 #
-#   build time      mpx_build_pwa runs npm on every build, and __idf_main
-#                   depends on it -- that is what orders it before the *.gz.S
-#                   embed objects and relinks libmain with the fresh assets.
+#   build time      mpx_build_pwa runs npm only when the phone app sources
+#                   changed since the last run (tools/pwa_build.cmake decides),
+#                   and __idf_main depends on it -- that is what orders it
+#                   before the *.gz.S embed objects and relinks libmain with
+#                   the fresh assets. Skipping npm matters twice: it saves the
+#                   Vite build, and it leaves the www/ mtimes alone, so ninja
+#                   keeps the existing embed objects instead of re-assembling
+#                   ~5 MB of assets and relinking the app. `idf.py flash` builds
+#                   the app first, so without that check every flash paid for
+#                   both, for no change at all.
+#                   `idf.py` users get the same check *before* ninja starts
+#                   (idf_ext.py, project-level idf.py extension) -- ninja
+#                   decides what is dirty once at startup, so a web build run
+#                   from inside the graph can only be relinked by the next
+#                   build, which would flash the previous web app.
 #
 # -DMPX_BUILD_PWA=OFF builds against the www/ that is already on disk (no
-# node/npm needed, e.g. CI that only checks the C side).
+# node/npm needed, e.g. CI that only checks the C side). For a one-off skip
+# without reconfiguring use MPX_SKIP_PWA=1, and MPX_FORCE_PWA=1 rebuilds the
+# phone app even when nothing changed.
 option(MPX_BUILD_PWA
     "Build the phone app (pwa-claw) with npm as part of the firmware build" ON)
 
 set(MPX_PWA_DIR "${CMAKE_SOURCE_DIR}/pwa-claw")
 set(MPX_PWA_INDEX "${MPX_PWA_DIR}/www/index.html")
+# Stamp holding the newest pwa-claw source mtime that www/ was built from, plus
+# the script that compares them -- shared by the configure-time bootstrap below
+# and the mpx_build_pwa target.
+set(MPX_PWA_STAMP "${CMAKE_BINARY_DIR}/mpx_pwa.stamp")
+set(MPX_PWA_SCRIPT "${CMAKE_SOURCE_DIR}/tools/pwa_build.cmake")
 
 # npm is npm.cmd on Windows, next to node.exe.
 find_program(MPX_NPM_EXECUTABLE NAMES npm npm.cmd npm.exe)
@@ -57,22 +76,17 @@ endif()
 
 if(MPX_BUILD_PWA AND NOT EXISTS "${MPX_PWA_INDEX}")
     message(STATUS "pwa-claw: www/ is missing, building it now (it is needed at configure time)")
-    if(NOT EXISTS "${MPX_PWA_DIR}/node_modules")
-        message(STATUS "pwa-claw: node_modules/ is missing, running 'npm ci'")
-        execute_process(
-            COMMAND "${MPX_NPM_EXECUTABLE}" ci
-            WORKING_DIRECTORY "${MPX_PWA_DIR}"
-            RESULT_VARIABLE mpx_npm_result)
-        if(NOT mpx_npm_result EQUAL 0)
-            message(FATAL_ERROR "pwa-claw: 'npm ci' failed (${mpx_npm_result})")
-        endif()
-    endif()
+    # Same script the mpx_build_pwa target runs, so `npm ci` / `npm run build`
+    # and the stamp live in one place. It runs npm here because www/ is absent.
     execute_process(
-        COMMAND "${MPX_NPM_EXECUTABLE}" run build
-        WORKING_DIRECTORY "${MPX_PWA_DIR}"
-        RESULT_VARIABLE mpx_npm_result)
-    if(NOT mpx_npm_result EQUAL 0)
-        message(FATAL_ERROR "pwa-claw: 'npm run build' failed (${mpx_npm_result})")
+        COMMAND "${CMAKE_COMMAND}"
+                "-DMPX_PWA_DIR=${MPX_PWA_DIR}"
+                "-DMPX_NPM_EXECUTABLE=${MPX_NPM_EXECUTABLE}"
+                "-DMPX_PWA_STAMP=${MPX_PWA_STAMP}"
+                -P "${MPX_PWA_SCRIPT}"
+        RESULT_VARIABLE mpx_pwa_result)
+    if(NOT mpx_pwa_result EQUAL 0)
+        message(FATAL_ERROR "pwa-claw: building www/ failed (${mpx_pwa_result})")
     endif()
 endif()
 
@@ -84,10 +98,16 @@ if(NOT EXISTS "${MPX_PWA_INDEX}")
 endif()
 
 if(MPX_BUILD_PWA)
+    # No-op unless a pwa-claw source, config or the lockfile is newer than the
+    # stamp, so `idf.py build` and `idf.py flash` only pay for Vite when the
+    # phone app actually changed.
     add_custom_target(mpx_build_pwa ALL
-        COMMAND "${MPX_NPM_EXECUTABLE}" run build
-        WORKING_DIRECTORY "${MPX_PWA_DIR}"
-        COMMENT "Building phone app (pwa-claw): npm run build"
+        COMMAND "${CMAKE_COMMAND}"
+                "-DMPX_PWA_DIR=${MPX_PWA_DIR}"
+                "-DMPX_NPM_EXECUTABLE=${MPX_NPM_EXECUTABLE}"
+                "-DMPX_PWA_STAMP=${MPX_PWA_STAMP}"
+                -P "${MPX_PWA_SCRIPT}"
+        COMMENT "pwa-claw: npm run build only if the phone app changed"
         USES_TERMINAL
         VERBATIM
     )
