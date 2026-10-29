@@ -9,6 +9,8 @@ idf_component_register(
         "mpx_id.c"
         "mpx_derive.c"
         "mpx_seal.c"
+        "mpx_seal_key.c"
+        "mpx_enroll.c"
         "mpx_seal_device.c"
         "mpx_efuse_record.c"
         "mpx_efuse.c"
@@ -37,6 +39,8 @@ idf_component_register(
         app_update
         # bootloader_random_enable/-disable: D9, entropy while the radio is down.
         bootloader_support
+        # esp_http_client: first-connect enrolment.
+        esp_http_client
         # The provisioning listener reads the console UART.
         esp_driver_uart
         driver

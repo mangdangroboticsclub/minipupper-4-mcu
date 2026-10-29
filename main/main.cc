@@ -15,6 +15,7 @@
 #include "network/www_assets.h"
 #include "pi/pi_link.h"
 #include "agent/agent_runtime.h"
+#include "mpx_enroll.h"
 #include "mpx_identity.h"
 #include "mpx_provision.h"
 #include "robot/mpx_robot.h"
@@ -145,6 +146,11 @@ extern "C" void app_main(void)
 	}
 
 	// ── Network: initialise Wi-Fi STA (auto-connects if saved) ─
+	// Announce the key if this unit has one and the cloud has not seen it yet.
+	// It runs as a retrying task, so a robot that boots before its AP is up
+	// still enrols once the link comes back.
+	mpx_enroll_init();
+
 	// D9: from here on the hardware RNG is a real entropy source, so a
 	// provisioning run no longer needs the bootloader's.
 	mpx_provision_set_rf_ready();

@@ -275,6 +275,32 @@ config APP_PROV_SEAL_KEY_ID
         firmware keeps sealing to slot 0, and the cloud holds both private
         keys during the overlap.
 
+# ── First-connect enrolment ───────────────────────────────────────
+# The robot announces its own key instead of the factory carrying it: at first
+# boot it derives K_v from its fuse, seals it to the embedded KMS key, and posts
+# the envelope to the gateway. Intercepting the envelope is useless, so the
+# factory only burns fuses and prints a label.
+
+config APP_ENROLL_ENABLE
+    bool "Announce the identity to the cloud on first connect"
+    depends on APP_IDENTITY_SOURCE_EFUSE
+    default y
+    help
+        When the unit has a fully burned identity and has not been enrolled
+        yet, it seals its key and POSTs it to the gateway, retrying every
+        30 s until the cloud accepts it. The blob is safe in transit: only the
+        KMS private key opens it.
+
+        Disable for a customer who provisions on an isolated network; the unit
+        then keeps working with whatever the bench station already sealed.
+
+config APP_ENROLL_PATH
+    string "Enrolment endpoint path"
+    default "/v1/provisioning/enroll"
+    help
+        Path on the gateway (APP_CHAT_SERVER_IP:APP_CHAT_SERVER_PORT) that
+        accepts the sealed envelope.
+
 # ── WASM skill encryption ─────────────────────────────────────────
 
 config APP_MPX_WASM_ENCRYPTION

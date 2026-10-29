@@ -21,10 +21,10 @@ static const char *TAG = "mpx_prov";
 #include "esp_app_desc.h"
 #include "esp_random.h"
 
-#include "mpx_derive.h"
+#include "mpx_enroll.h"
 #include "mpx_identity.h"
 #include "mpx_seal.h"
-#include "mpx_seal_device.h"
+#include "mpx_seal_key.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -63,7 +63,6 @@ void mpx_provision_set_rf_ready(void)
  * here so a lost upload can be retried without re-deriving anything. */
 static const char *const kNvsNamespace = "mpx_id";
 static const char *const kNvsKv = "kv";
-static const char *const kNvsActivated = "activated";
 static const char *const kNvsBlob = "seal";
 
 static void reply(const char *json)
@@ -112,24 +111,6 @@ static bool save_u32(const char *key, uint32_t value)
     return ok;
 }
 
-bool mpx_provision_activated(void)
-{
-    nvs_handle_t handle;
-    uint8_t value = 0;
-
-    if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) != ESP_OK) {
-        return false;
-    }
-    (void)nvs_get_u8(handle, kNvsActivated, &value);
-    nvs_close(handle);
-    return value != 0;
-}
-
-esp_err_t mpx_provision_set_activated(bool activated)
-{
-    return save_u32(kNvsActivated, activated ? 1u : 0u) ? ESP_OK : ESP_FAIL;
-}
-
 const char *mpx_provision_state(void)
 {
     mpx_efuse_record_t rec;
@@ -155,69 +136,8 @@ static void handle_status(void)
              mpx_prov_state_name(have_key, have_record),
              have_record ? rec.robot_id : "", have_record ? rec.kv_base : 0u,
              have_key ? (int)block : -1, CONFIG_APP_PROV_SEAL_KEY_ID,
-             mpx_provision_activated() ? "true" : "false");
+             mpx_enroll_activated() ? "true" : "false");
     reply(out);
-}
-
-/* Derives K_kv and seals it. `secret` is used instead of the HMAC peripheral
- * when the key was burned in this boot, because the peripheral only sees a key
- * after a reset. */
-static esp_err_t derive_and_seal(const char *robot_id, uint32_t kv,
-                                 const uint8_t *secret, size_t secret_len,
-                                 uint8_t out_blob[MPX_SEAL_BLOB_LEN])
-{
-    mpx_seal_plain_t plain;
-    uint8_t key[MPX_KEY_LEN];
-    char key_fp[MPX_KEY_FP_LEN + 1];
-    const esp_app_desc_t *desc = esp_app_get_description();
-    esp_err_t err;
-
-    memset(&plain, 0, sizeof plain);
-    memset(key, 0, sizeof key);
-
-    if (secret != NULL) {
-        if (mpx_derive_key(mpx_hmac_soft, secret, secret_len, robot_id, kv, key) != 0) {
-            ESP_LOGE(TAG, "derive from the supplied secret failed");
-            return ESP_FAIL;
-        }
-    } else if (mpx_derive_key(mpx_efuse_hmac_sha256, NULL, 0, robot_id, kv, key) != 0) {
-        ESP_LOGE(TAG, "derive through the HMAC peripheral failed (key block not usable?)");
-        return ESP_FAIL;
-    }
-
-    if (mpx_derive_key_fp(mpx_hmac_soft, key, key_fp) != 0) {
-        ESP_LOGE(TAG, "key fingerprint failed");
-        memset(key, 0, sizeof key);
-        return ESP_FAIL;
-    }
-
-    plain.key_version = kv;
-    snprintf(plain.robot_id, sizeof plain.robot_id, "%s", robot_id);
-    esp_fill_random(plain.nonce, sizeof plain.nonce);
-    memcpy(plain.key, key, sizeof plain.key);
-    memset(key, 0, sizeof key);
-    if (mpx_efuse_mac(plain.mac) != ESP_OK) {
-        memset(plain.mac, 0, sizeof plain.mac);
-    }
-    plain.sec_flags = mpx_efuse_sec_flags();
-    plain.secure_version = mpx_efuse_secure_version();
-    if (desc != NULL) {
-        snprintf(plain.app_version, sizeof plain.app_version, "%s", desc->version);
-    }
-    /* ds_pub_sha256 stays zero until Secure Boot is enabled: there is no DS key
-     * to hash yet, and a fabricated hash would be worse than an absent one --
-     * the cloud reads zeros as "not enforced" and refuses that for prod (D12). */
-
-    err = mpx_seal_plaintext(&plain, CONFIG_APP_PROV_SEAL_KEY_ID, out_blob);
-    memset(&plain, 0, sizeof plain);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "seal failed: %s", esp_err_to_name(err));
-        return err;
-    }
-
-    ESP_LOGI(TAG, "sealed %s kv=%u key_fp=%s (secure_version=%u)",
-             robot_id, (unsigned)kv, key_fp, (unsigned)mpx_efuse_secure_version());
-    return ESP_OK;
 }
 
 static esp_err_t store_blob(const uint8_t blob[MPX_SEAL_BLOB_LEN])
@@ -356,9 +276,10 @@ static void handle_provision(const char *body, bool reseal_only)
 
     /* RSA-OAEP draws from esp_fill_random too, so the source has to stay
      * enabled until the blob exists. */
-    const esp_err_t sealed = derive_and_seal(robot_id, kv,
-                                             action == MPX_PROV_SEAL ? NULL : secret,
-                                             MPX_KEY_LEN, blob);
+    const char *key_source = NULL;
+    const esp_err_t sealed = mpx_seal_key(robot_id, kv,
+                                          action == MPX_PROV_SEAL ? NULL : secret,
+                                          MPX_KEY_LEN, blob, &key_source);
     if (need_bootloader_rng) {
         bootloader_random_disable();
     }

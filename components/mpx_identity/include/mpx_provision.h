@@ -49,9 +49,11 @@ const char *mpx_provision_state(void);
 /* NVS flag set once a sealed blob has been produced and uploaded. It records
  * "the cloud knows this unit", not "the fuses are burned" -- a reseal or a lost
  * blob must be recoverable, so this never gates sealing. */
-bool mpx_provision_activated(void);
+/* Replaced by mpx_enroll_activated() in mpx_enroll.h: the activation flag is
+ * owned by the enrolment path, which also exists in builds without the
+ * listener. */
 
-esp_err_t mpx_provision_set_activated(bool activated);
+
 
 #ifdef __cplusplus
 }
