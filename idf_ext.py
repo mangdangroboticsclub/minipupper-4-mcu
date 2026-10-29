@@ -66,6 +66,45 @@ def _pwa_disabled(global_args, build_dir):
 def action_extensions(base_actions, project_path):
     project_dir = project_path
 
+    def host_test_callback(action, ctx, global_args, **kwargs):
+        """`idf.py host-test` -- build and run tools/host_tests.
+
+        The identity tests (robot ID format, key derivation) do not need a
+        board or even ESP-IDF, so they run as an ordinary CMake project with
+        its own build directory. CI runs the same commands directly; this is
+        the discoverable local shortcut.
+        """
+        source_dir = os.path.join(project_dir, 'tools', 'host_tests')
+        if not os.path.isfile(os.path.join(source_dir, 'CMakeLists.txt')):
+            raise FatalError('host tests: {} not found'.format(source_dir))
+
+        build_dir = os.path.join(
+            getattr(global_args, 'build_dir', None) or os.path.join(project_dir, 'build'),
+            'host_tests',
+        )
+        cmake = shutil.which('cmake') or 'cmake'
+
+        for command in (
+            [cmake, '-S', source_dir, '-B', build_dir],
+            [cmake, '--build', build_dir],
+            [cmake, '-E', 'chdir', build_dir, shutil.which('ctest') or 'ctest',
+             '--output-on-failure'],
+        ):
+            print('host-test:', ' '.join(command), flush=True)
+            try:
+                result = subprocess.run(command, cwd=project_dir)
+            except OSError as error:
+                raise FatalError('host tests: could not run cmake: {}'.format(error))
+            if result.returncode != 0:
+                raise FatalError('host tests: failed ({}).'.format(' '.join(command)))
+
+    # In a dict, the key is the command name; an extra 'names' key would be
+    # passed straight to click and rejected.
+    host_test_action = {
+        'help': 'Build and run the host unit tests in tools/host_tests.',
+        'callback': host_test_callback,
+    }
+
     def pwa_sync_callback(ctx, global_args, tasks):
         # Nothing to do for 'idf.py -n ...', menuconfig, monitor, clean, ...
         if getattr(global_args, 'dry_run', False):
@@ -108,4 +147,7 @@ def action_extensions(base_actions, project_path):
         if result.returncode != 0:
             raise FatalError('pwa-claw: web app build failed, aborting.')
 
-    return {'global_action_callbacks': [pwa_sync_callback]}
+    return {
+        'actions': {'host-test': host_test_action},
+        'global_action_callbacks': [pwa_sync_callback],
+    }

@@ -1,0 +1,125 @@
+# Two things must stay true as the identity work lands:
+#
+#   1. the firmware still builds with the ESP-IDF version the dev container
+#      pins (DEV_CONTAINER.md), for the target the robots actually run, and
+#   2. the robot ID / key derivation in C still matches the reference
+#      implementation in tools/mpx_id.py byte for byte.
+#
+# The host tests need neither a board nor ESP-IDF, so they run first and fail
+# fast. The firmware build runs last because it is the slow one.
+name: CI
+
+on:
+  push:
+    branches: [firmware-dev, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    name: host tests (ID format, key derivation)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run
+        run: |
+          cmake -S tools/host_tests -B build/host_tests
+          cmake --build build/host_tests
+          ctest --test-dir build/host_tests --output-on-failure
+
+      # The vectors file is generated. If it is stale, every downstream test is
+      # asserting against an old algorithm, so say so explicitly rather than
+      # leaving it to whichever test notices first.
+      - name: Vectors are up to date
+        run: python3 tools/mpx_id.py vectors --check
+
+      - name: Reference implementation self-check
+        run: python3 tools/mpx_id.py selftest
+
+  pwa:
+    name: phone app bundle
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pwa-claw/package-lock.json
+
+      # pwa-claw/www is gitignored: it is a build artifact that main/CMakeLists
+      # embeds as binary data. The firmware build cannot configure without it
+      # (see the FATAL_ERROR in CMakeLists.txt), so it is built here once and
+      # handed to the firmware job.
+      - name: Build www/
+        working-directory: pwa-claw
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pwa-www
+          path: pwa-claw/www
+          retention-days: 3
+
+  firmware:
+    name: firmware build (esp32s3, idf v5.5.4)
+    runs-on: ubuntu-22.04
+    needs: [host-tests, pwa]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: pwa-www
+          path: pwa-claw/www
+
+      # The target must be passed explicitly: sdkconfig is not in version
+      # control (it is per-machine and carries the identity source), so nothing
+      # else tells the build what chip this is.
+      - name: idf.py build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          command: idf.py -DIDF_TARGET=esp32s3 -DMPX_BUILD_PWA=OFF build
+
+      # The pilot profile compiles the provisioning listener, which the default
+      # profile compiles out. Without this step that half of
+      # components/mpx_identity/mpx_provision.c is never compiled by anything,
+      # and it rots silently.
+      - name: idf.py build (pilot profile, provisioning listener in)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          command: >-
+            idf.py -B build/pilot -DSDKCONFIG=build/pilot/sdkconfig
+            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.pilot"
+            -DIDF_TARGET=esp32s3 -DMPX_BUILD_PWA=OFF build
+
+      # An image that no longer fits the factory slot fails at link time, which
+      # is late and confusing. Keep the size visible so the OTA A/B decision
+      # (§13 #16) has a number attached to it.
+      - name: Record image size
+        if: always()
+        run: |
+          if [ -f build/MPX-Dog.bin ]; then
+            ls -l build/MPX-Dog.bin | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Image size report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: size-report
+          path: |
+            build/*.bin
+            build/*.map
+          retention-days: 3
+          if-no-files-found: warn

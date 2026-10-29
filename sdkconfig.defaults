@@ -283,3 +283,9 @@ CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
 # The system event task runs every Wi-Fi/IP handler; 2304 is sized for
 # IDF's own handlers only.
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# ── eFuse custom table ───────────────────────────────────────────
+# Adds the robot identity fields to BLOCK_USR_DATA (main/esp_efuse_custom_table.csv).
+# Always on: with no eFuse identity source the fields read as zeros and cost
+# nothing, and a factory image must not differ from a dev image in its fuse map.
+CONFIG_EFUSE_CUSTOM_TABLE=y

@@ -32,8 +32,14 @@ dependencies.lock
 *.elf
 *.map
 flasher_args.json # Generated in build directory
-sdkconfig.old
+
+# sdkconfig is per-machine output of `idf.py menuconfig`, not a source file.
+# It used to be committed, so the identity source (and every other setting) was
+# inherited from whoever built last, and CI had no idea which chip to build for.
+# sdkconfig.defaults* carry the committed configuration instead.
 sdkconfig
+sdkconfig.old
+sdkconfig.before_*
 
 # ESP-IDF dependencies
 # For older versions or manual component management
@@ -84,8 +90,27 @@ Desktop.ini
 *.sln.docstates 
 
 # misc
-*.pem 
+*.pem
+# ... except the one certificate that has to ship inside the firmware: the
+# key-encryption public key the robot seals its derived key to
+# (ROBOT_IDENTITY_AND_KEYS.md §6.4). It is public by definition and useless
+# without the KMS private key, so it belongs in the tree.
+!components/mpx_identity/certs/*.pem
+
+# pi agent task artifacts/
+# Bench station output. The registration JSON holds K_v in the clear, so it must
+# never be committed -- the cloud import is a one-shot and the file is deleted
+# afterwards. `bench/` also collects flash logs and espefuse dumps.
+/bench/
+# Station private keys (the KMS seal key's dev stand-in).
+tools/secrets/
+.pi/
 
 # PWA Dependency folders
 node_modules/
 www/
+
+# The eFuse custom table is generated from main/esp_efuse_custom_table.csv by the
+# efuse component during the build. The CSV is the source; these two are output.
+main/esp_efuse_custom_table.c
+main/include/esp_efuse_custom_table.h
