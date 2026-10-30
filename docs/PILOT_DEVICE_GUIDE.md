@@ -16,19 +16,76 @@ but it still boots — do not ignore that line.
 
 ## 1. One-time setup
 
-Work inside the dev container; ESP-IDF exists only there.
+Firmware commands need ESP-IDF v5.5.4 with the ESP32-S3 toolchain. Everything
+else is plain Python. Where each kind of command runs:
 
-```fish
-# from the host
-docker exec -it wizardly_bhaskara bash
-cd /workspaces/md-mpx-dog
-source /opt/esp/idf/export.sh
+| Command | Needs | Runs on |
+|---|---|---|
+| `idf.py …` | ESP-IDF v5.5.4 + toolchain | wherever ESP-IDF is installed — a container or a native install |
+| `python3 tools/mpx_provision.py …` | Python 3.10+, `pyserial`, `cryptography` | the machine the board's USB cable is plugged into |
+| `psql …` | database credentials | the gateway host |
+
+Pick whichever of the two setups below matches your machine. They are
+interchangeable; nothing in this guide depends on one of them.
+
+### Option A — dev container
+
+If you use the project's devcontainer, ESP-IDF is already installed inside it and
+the repo is mounted at the container's workspace path. The container name,
+mounts and USB passthrough are described in [../DEV_CONTAINER.md](../DEV_CONTAINER.md).
+
+```bash
+# from the host: find the running container, then get a shell inside it
+CID=$(docker ps --filter ancestor=vsc-md-mpx-dog --format '{{.Names}}' | head -1)
+docker exec -it "$CID" bash
+
+cd <repo-root>                      # e.g. /workspaces/md-mpx-dog
+source /opt/esp/idf/export.sh       # wherever ESP-IDF lives in that image; per shell
+idf.py --version                    # expect ESP-IDF v5.5.4
+```
+
+Or run one command at a time from the host, without entering:
+
+```bash
+CID=$(docker ps --filter ancestor=vsc-md-mpx-dog --format '{{.Names}}' | head -1)
+docker exec "$CID" bash -lc 'cd <repo-root> && source /opt/esp/idf/export.sh >/dev/null 2>&1 && idf.py build'
+```
+
+**USB inside a container** only works if the device was passed through
+(`--device=/dev/ttyUSB0`, `--privileged`, or the devcontainer equivalent). If
+`ls /dev/ttyUSB*` is empty in there, run the flashing, monitoring and station
+commands on the host instead: `esptool`/`idf.py` are the only things that need
+the container, and the station is plain Python.
+
+### Option B — native install
+
+```bash
+git clone -b v5.5.4 --recursive https://github.com/espressif/esp-idf.git ~/esp/esp-idf
+cd ~/esp/esp-idf && ./install.sh esp32s3
+. ~/esp/esp-idf/export.sh          # per shell; add to your shell profile if you like
+```
+
+Then in the repo root. Same commands as above, no `docker exec`:
+
+```bash
+idf.py set-target esp32s3
+idf.py host-test
+```
+
+### Both options
+
+python3, cmake and ninja come with the IDF installer. On Linux, serial access
+usually needs group membership — without it every port operation fails with
+`Permission denied`:
+
+```bash
+sudo usermod -aG dialout "$USER"   # then log out and back in
 ```
 
 `sdkconfig` is **not in git**. The committed configuration is
 `sdkconfig.defaults`, so a fresh clone has to pick the target once:
 
-```fish
+```bash
 idf.py set-target esp32s3        # or pass -DIDF_TARGET=esp32s3 to every command
 idf.py host-test                 # 6/6 green; proves your checkout is sane
 ```
@@ -93,7 +150,7 @@ You should almost never hand-edit menuconfig. The profiles are files:
 | enrolment task | not compiled | on |
 | use it for | dev boards with no fuses, CI, unit work | pilot units, bench provisioning |
 
-```fish
+```bash
 # development image (the default)
 idf.py build flash monitor
 
@@ -109,11 +166,13 @@ identical either way.
 
 ## 4. Flash a board
 
-```fish
+```bash
 # find the port
-ls /dev/ttyUSB*                 # CP210x/CH340 → ttyUSB*, native USB → ttyACM*
+ls /dev/ttyUSB* /dev/ttyACM*    # Linux: CP210x/CH340 → ttyUSB*, native USB → ttyACM*
+ls /dev/tty.usbserial-*         # macOS
+# Windows: COM3 and up, in Device Manager
 
-idf.py -p /dev/ttyUSB1 flash    # dev image
+idf.py -p /dev/ttyUSB1 flash    # substitute your port; dev image
 idf.py -p /dev/ttyUSB1 monitor  # 115200 8N1, Ctrl-] to quit
 ```
 
@@ -134,7 +193,7 @@ networks (eduroam etc.) additionally need the `identity` field.
 
 **API:**
 
-```fish
+```bash
 curl -X POST http://192.168.2.1/v1/wifi/connect \
      -d '{"ssid":"lab-iot","password":"..."}'
 curl http://192.168.2.1/v1/wifi/status
@@ -147,8 +206,8 @@ them.
 
 Only once per board, and only for a board whose fuses are blank.
 
-```fish
-# 0. station dependencies (host, not the container)
+```bash
+# 0. station dependencies — plain Python, anywhere the board is plugged in
 python3 -c "import serial, cryptography" || pip install pyserial cryptography
 
 # 1. flash the pilot image (listener on) and stop the monitor — it holds the port
@@ -205,7 +264,7 @@ robot that boots before its AP is up still enrols once the link returns.
 
 ## 8. Verify from the cloud side
 
-```fish
+```bash
 # on the gateway host
 psql "$DATABASE_URL" -c \
   "SELECT robot_uuid, left(aes_key_hex,8) || '…' AS key, created_at, last_seen_at
@@ -243,7 +302,7 @@ belongs to a different burn — see the conflict row in §9.
 it. A 409 means the database already has that exact ID with a different key. If
 the board was re-provisioned (`--replace`), delete the stale row first:
 
-```fish
+```bash
 psql "$DATABASE_URL" -c "DELETE FROM robots WHERE robot_uuid = 'MPX-…';"
 ```
 
