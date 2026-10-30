@@ -48,7 +48,14 @@ int mpx_derive_key(mpx_hmac_sha256_fn hmac,
     uint8_t msg[MPX_DERIVE_MSG_LEN];
     int rc;
 
-    if (hmac == NULL || secret == NULL || out == NULL) {
+    /* `secret` may legitimately be NULL: the eFuse adapter (mpx_efuse_hmac_sha256)
+     * takes the secret from its HMAC_UP key slot and ignores the argument, which
+     * is the only way it can work -- that block is RD_DIS, so there are no bytes
+     * to pass. Requiring a secret here made every provisioned unit fail to load
+     * its identity at boot (no K_v -> no chat pipeline -> the installer's
+     * /v1/lua/enqueue answers 503 forever). A NULL `secret` with a non-zero
+     * length is still a caller bug: no adapter can honour it. */
+    if (hmac == NULL || out == NULL || (secret == NULL && secret_len != 0)) {
         return -1;
     }
     if (mpx_derive_msg(msg, robot_id, key_version) != 0) {

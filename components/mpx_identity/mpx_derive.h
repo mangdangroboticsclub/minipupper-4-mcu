@@ -45,7 +45,12 @@ int mpx_derive_msg(uint8_t out[MPX_DERIVE_MSG_LEN], const char *robot_id,
                    uint32_t key_version);
 
 /* K_kv = HMAC-SHA256(S, msg). `secret` is the 32-byte HMAC_UP block on a
- * provisioned unit; on a dev bench it is a test vector. */
+ * provisioned unit; on a dev bench it is a test vector.
+ *
+ * `secret` may be NULL (with secret_len 0) for an adapter that holds the secret
+ * itself -- mpx_efuse_hmac_sha256 is exactly that: the block is RD_DIS, so the
+ * key never enters RAM and the adapter derives through the HMAC peripheral.
+ * NULL with a non-zero length is rejected. */
 int mpx_derive_key(mpx_hmac_sha256_fn hmac,
                    const uint8_t *secret, size_t secret_len,
                    const char *robot_id, uint32_t key_version,

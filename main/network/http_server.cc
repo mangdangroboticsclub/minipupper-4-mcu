@@ -2213,9 +2213,11 @@ static esp_err_t api_lua_enqueue(httpd_req_t *req)
 
     // Enqueue the file path — worker reads and executes via lua_run_file
     if (!network::queue_lua_script(path)) {
+        ESP_LOGE(TAG, "lua enqueue %s failed: no worker took it (queue down or full)",
+                 path);
         httpd_resp_set_status(req, "503 Service Unavailable");
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, R"({"ok":false,"error":"Lua queue full"})", -1);
+        httpd_resp_send(req, R"({"ok":false,"error":"Lua worker unavailable"})", -1);
         return ESP_OK;
     }
 

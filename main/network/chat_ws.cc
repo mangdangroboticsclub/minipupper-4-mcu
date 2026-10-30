@@ -2230,7 +2230,13 @@ bool set_allow_writes(bool allow)
 /* ── Public helper: queue a Lua script for async execution ─── */
 bool queue_lua_script(const char *script)
 {
-    if (!s_lua_queue) return false;
+    if (!s_lua_queue) {
+        /* The queue is created by init_chat_pipeline(), which gives up before
+         * it when there is no robot key. Without this line a caller sees a bare
+         * false and the log says nothing at all about why. */
+        ESP_LOGE(TAG, "Lua queue unavailable: chat pipeline is down (no robot key?)");
+        return false;
+    }
 
     LuaCommand cmd = {};
     size_t copy_len = std::strlen(script);

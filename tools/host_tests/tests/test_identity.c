@@ -242,4 +242,43 @@ TEST_CASE(derive_key_changes_with_the_key_version)
     mpx_test_fail(__FILE__, __LINE__,
                   "vectors no longer contain a same-id kv pair");
 }
+
+/* The eFuse identity path passes no secret at all: S lives in an RD_DIS block
+ * and mpx_efuse_hmac_sha256 derives through the HMAC peripheral instead. A
+ * guard that rejected a NULL secret made every provisioned unit boot with no
+ * K_v -- which reads as "no robot identity": no chat pipeline, no Lua queue,
+ * and the PWA installer gets a 503 on every script it enqueues. */
+static const uint8_t *s_owned_secret;
+static size_t s_owned_secret_len;
+
+static int owning_hmac_sha256(const uint8_t *key, size_t key_len,
+                              const uint8_t *msg, size_t msg_len,
+                              uint8_t out[MPX_KEY_LEN])
+{
+    (void)key;
+    (void)key_len;
+    return openssl_hmac_sha256(s_owned_secret, s_owned_secret_len, msg, msg_len,
+                               out);
+}
+
+TEST_CASE(derive_key_accepts_an_adapter_that_owns_the_secret)
+{
+    const mpx_vector_t *v = mpx_vectors[0];
+    uint8_t key[MPX_KEY_LEN];
+
+    s_owned_secret = v->secret;
+    s_owned_secret_len = v->secret_len;
+
+    memset(key, 0, sizeof key);
+    CHECK_EQ_INT(mpx_derive_key(owning_hmac_sha256, NULL, 0, v->robot_id, v->kv,
+                                key),
+                 0);
+    CHECK_EQ_MEM(key, v->key, v->key_len);
+
+    /* NULL with a length is still a caller bug: no adapter can honour it. */
+    memset(key, 0, sizeof key);
+    CHECK_EQ_INT(mpx_derive_key(owning_hmac_sha256, NULL, 32, v->robot_id, v->kv,
+                                key),
+                 -1);
+}
 #endif /* MPX_HAVE_OPENSSL */

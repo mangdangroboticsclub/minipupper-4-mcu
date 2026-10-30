@@ -133,7 +133,9 @@ int mpx_hmac_soft(const uint8_t *key, size_t key_len, const uint8_t *msg,
     const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     int rc;
 
-    if (info == NULL) {
+    /* mbedtls dereferences the key: an adapter that "has the secret itself" is
+     * the eFuse one, and it must not be routed here. Fail loudly instead. */
+    if (info == NULL || key == NULL || msg == NULL || out == NULL) {
         return -1;
     }
     rc = mbedtls_md_hmac(info, key, key_len, msg, msg_len, out);
