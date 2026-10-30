@@ -72,7 +72,96 @@ idf.py set-target esp32s3
 idf.py host-test
 ```
 
-### Both options
+### Option C — Windows (PowerShell)
+
+Two ways in, and the shortcuts the installer makes are the easy one:
+
+**C1. ESP-IDF Tools Installer** (no compiler toolchain wrangling). Download it
+from <https://dl.espressif.com/dl/esp-idf/>, pick v5.5.4 and the `esp32s3`
+target. It creates *ESP-IDF 5.5 PowerShell* and *ESP-IDF 5.5 CMD* shortcuts in
+the Start menu; opening one sources the environment for you. Skip to "Then, in
+the repo root" below.
+
+**C2. Git clone + scripts** (what you do on Linux, in PowerShell):
+
+```powershell
+git clone -b v5.5.4 --recursive https://github.com/espressif/esp-idf.git $HOME\esp\esp-idf
+cd $HOME\esp\esp-idf
+.\install.bat esp32s3
+. .\export.ps1                 # per shell; run again in every new window
+idf.py --version               # expect ESP-IDF v5.5.4
+```
+
+If PowerShell refuses the script, allow it for that window only (this does not
+change machine policy):
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+. .\export.ps1
+```
+
+Then, in the repo root:
+
+```powershell
+idf.py set-target esp32s3
+idf.py host-test
+```
+
+**Windows specifics that bite:**
+
+- **Port names are `COM` ports**, not `/dev/tty*`. List them:
+
+  ```powershell
+  [System.IO.Ports.SerialPort]::GetPortNames()
+  ```
+
+  If that comes back empty (PowerShell 7 without the serial assembly, or an
+  old machine), this always works:
+
+  ```powershell
+  Get-CimInstance Win32_PnPEntity | Where-Object Name -match 'COM\d+' | Select-Object Name
+  ```
+
+  Then pass the port explicitly: `idf.py -p COM5 flash`. If the board does not
+  appear, install the USB bridge driver — Silicon Labs **CP210x** for most
+  boards, **WCH CH343/CH340** for the newer ones. Device Manager shows the
+  board under *Ports (COM & LPT)* and flags the driver problem there.
+- **No line-continuation backslash.** Long commands use a backtick at end of
+  line, and the argument stays quoted:
+
+  ```powershell
+  idf.py -B build\pilot `
+         -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.pilot" `
+         build flash
+  ```
+
+  The `;` inside the quotes is safe in PowerShell — it is part of the value, not
+  a command separator.
+- **Station commands are plain Python** and do not need the IDF environment.
+  Any 3.10+ interpreter works:
+
+  ```powershell
+  py -3 -m pip install pyserial cryptography
+  py -3 tools\mpx_provision.py status --port COM5
+  py -3 tools\mpx_provision.py provision --port COM5 --out bench\label.json
+  ```
+
+  Close `idf.py monitor` before either station command: one process per COM port.
+- **Deep build paths break the build.** Windows still enforces a 260-character
+  limit unless long paths are enabled, and ESP-IDF build trees are deep. Keep
+  the checkout near the drive root (`C:\work\md-mpx-dog`), or enable it once
+  from an **administrator** shell:
+
+  ```powershell
+  Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+                   -Name LongPathsEnabled -Value 1 -Type DWord
+  ```
+
+- **WSL2 also works** for building, but USB serial needs `usbipd-win` to forward
+  the port into the distro. If you only need to flash, run PowerShell natively
+  and skip the forwarding.
+
+### Any of the three
 
 python3, cmake and ninja come with the IDF installer. On Linux, serial access
 usually needs group membership — without it every port operation fails with
@@ -205,6 +294,10 @@ them.
 ## 6. Provision a new board
 
 Only once per board, and only for a board whose fuses are blank.
+
+`--port` is `/dev/ttyUSB1` on Linux, `/dev/tty.usbserial-*` on macOS and `COM5`
+on Windows — substitute yours throughout. On Windows the station runs as
+`py -3 tools\mpx_provision.py ...` (see §1, Option C).
 
 ```bash
 # 0. station dependencies — plain Python, anywhere the board is plugged in
