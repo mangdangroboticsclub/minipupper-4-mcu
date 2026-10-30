@@ -252,11 +252,24 @@ def cmd_provision(args) -> int:
     robot_id = args.id or mpx_id.new_robot_id()
     if not mpx_id.is_valid_robot_id(robot_id):
         raise StationError(f"{robot_id!r} is not a valid robot ID (run mpx_id.py check)")
-    print(f"provisioning {robot_id} kv={args.kv}")
 
     with open_port(args.port, args.baud) as conn:
         before = send(conn, {"cmd": "status"})
-        if before.get("id", "").startswith("MPX-") and before["id"] != robot_id:
+        existing = before.get("id", "")
+
+        # A half-burned unit already holds its ID, and burning a second, different
+        # one over it would strand the unit: the record is the identity, so the
+        # device refuses rather than silently replacing it. Carrying the burned
+        # ID forward makes "run it again" the right move after a lost power
+        # cable, which is the normal way this command fails.
+        if not args.id and existing and existing != "unprovisioned":
+            if mpx_id.is_valid_robot_id(existing):
+                print(f"reusing the ID already burned on this unit: {existing}")
+                robot_id = existing
+
+        print(f"provisioning {robot_id} kv={args.kv}")
+
+        if existing.startswith("MPX-") and existing != robot_id:
             if not args.replace:
                 raise StationError(
                     f"unit already provisioned as {before['id']}; "

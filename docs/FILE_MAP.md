@@ -32,13 +32,15 @@ main/network/chat_ws.cc                               ├─ lua/, wasm/, sdk/  
 | [main/](../main) | The firmware itself — one component with all of its source under subdirectories (see [main/](#main) below). |
 | [pwa-claw/](../pwa-claw) | The phone app (Svelte 5 + Vite + Tailwind + three.js), built to `www/` and embedded into the firmware. The only app tracked in git. |
 | [third-party/esp-claw/](../third-party/esp-claw) | Vendored copy of the ESP-Claw agent framework's `components/` tree. **Never edited** — where it needed bending, it was done from `main/agent/claw_overrides.c` and `main/Kconfig.projbuild`. |
-| [components/](../components) | Holds one non-component: `gen_bmgr_codes/gen_board_metadata.yaml`, the hand-written board inventory ESP-Claw's `cap_boards` turns into the agent's `board_hardware_info` skill. No `CMakeLists.txt` on purpose. |
+| [components/](../components) | One component, `mpx_identity`: the robot ID and AES key (format, eFuse record, key derivation, sealing, `@MPXPROV` provisioning, first-connect enrolment). Everything else lives under `main/`. |
 | [agent_fs/](../agent_fs) | Source tree for the agent's read-only `system` partition. `system/.recovery/` seeds `memory/` (`identity.md`, `soul.md`, `user.md`), `router_rules/` and `scheduler/`; copied into DATA at boot when a file is missing. |
-| [docs/](../docs) | Documentation: this file and the new-board bring-up guide. |
+| [docs/](../docs) | Documentation: this file, the pilot-device guide ([PILOT_DEVICE_GUIDE.md](./PILOT_DEVICE_GUIDE.md)), how identity works ([IDENTITY_AND_KEYS.md](./IDENTITY_AND_KEYS.md)), the enrolment flow, the milestone plan, and the new-board bring-up guide. |
+| [components/mpx_identity/](../components/mpx_identity) | The identity component: ID format and checksum (`mpx_id.c`), key derivation (`mpx_derive.c`), eFuse record and key blocks (`mpx_efuse*.c`), RSA sealing (`mpx_seal*.c`), the UART provisioning listener (`mpx_provision.c`), first-connect enrolment (`mpx_enroll.c`), and the `mpx_identity` façade every other module calls. |
 | [tools/](../tools) | Host-side helpers, not part of the firmware build (see [tools/](#tools) below). |
 | [partitions.csv](../partitions.csv) | Flash partition table: `nvs`, `phy_init`, `factory` (app), `model`, `system` (read-only agent LittleFS), `storage` (writable LittleFS). |
 | [sdkconfig](../sdkconfig) | Generated, machine-specific ESP-IDF configuration. `sdkconfig.defaults` restores it. |
-| [sdkconfig.defaults](../sdkconfig.defaults) | The load-bearing settings that must survive a config regeneration: PSRAM/XIP, Wi-Fi RAM budget, socket counts, ESP-Claw options. |
+| [sdkconfig.defaults](../sdkconfig.defaults) | The load-bearing settings that must survive a config regeneration: PSRAM/XIP, Wi-Fi RAM budget, socket counts, ESP-Claw options, the eFuse custom table. |
+| [sdkconfig.defaults.pilot](../sdkconfig.defaults.pilot) | Adds to the above for a pilot/bench image: eFuse identity source and the `@MPXPROV` listener. Never ship. |
 | [sdkconfig.old](../sdkconfig.old) | Backup auto-written by `menuconfig`. Not used by the build. |
 | [dependencies.lock](../dependencies.lock) | Generated lockfile for the ESP-IDF component manager. |
 | [managed_components/](../managed_components) | Third-party components downloaded by the component manager. Generated, gitignored; do not edit. |
@@ -221,6 +223,14 @@ that unlock its tools.
 | Path | What it does |
 |---|---|
 | [check_comments.py](../tools/check_comments.py) | House style checker for source comments. |
+| [mpx_id.py](../tools/mpx_id.py) | Robot ID reference implementation: `new`, `check`, `derive`, `vectors`, `selftest`. The device code and the test vectors are checked against it. |
+| [mpx_seal.py](../tools/mpx_seal.py) | Reference for the eFuse record and the sealed-envelope layouts; generates `tools/vectors/seal.json`. |
+| [mpx_provision.py](../tools/mpx_provision.py) | Bench station: talks `@MPXPROV` JSON over UART0 — `scan`, `status`, `provision`, `reseal`, `lock`, `unseal`, `verify`. |
+| [mpx_dev_identity.py](../tools/mpx_dev_identity.py) | Prints a matching dev ID + key pair for `APP_ROBOT_UUID` / `APP_CHAT_AES_KEY_HEX`. |
+| [host_tests/](../tools/host_tests) | Host unit tests (no board, no ESP-IDF): `idf.py host-test`. Covers ID format, derivation, eFuse record, seal layout, provisioning JSON and state table. |
+| [ci_check_sdkconfig.sh](../tools/ci_check_sdkconfig.sh) | Compares a regenerated `sdkconfig` against the developer's copy; used to prove `sdkconfig.defaults` is complete. |
+| [vectors/](../tools/vectors) | Frozen `identity.json` and `seal.json` vectors, compiled into the host tests. |
+| [secrets/](../tools/secrets) | Gitignored. The dev seal private key lives here. |
 | [pi/pi_announce.py](../tools/pi/pi_announce.py) | Runs on the Raspberry Pi: sends `HOST_INFO` so the robot shows the Pi's address without heartbeating. |
 | [pi/pi-announce.service](../tools/pi/pi-announce.service) | systemd unit for the above. |
 | [pi/README.md](../tools/pi/README.md) | Pi-side wiring, bridge parameters and checks. |
@@ -232,6 +242,6 @@ that unlock its tools.
 - `managed_components/` — ESP-IDF component manager output.
 - `build/` — build output and the staged `system_fs/`.
 - `dependencies.lock` — component manager lockfile.
-- `sdkconfig`, `sdkconfig.old` — generated; put durable settings in `sdkconfig.defaults`.
+- `sdkconfig`, `sdkconfig.old` — generated **and no longer tracked**; put durable settings in `sdkconfig.defaults`. A fresh clone must pass `-DIDF_TARGET=esp32s3`.
 - `third-party/esp-claw/` — vendored agent framework.
 - `pwa-claw/www/`, `pwa-claw/node_modules/` — PWA build output and dependencies.

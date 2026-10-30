@@ -2,8 +2,10 @@
 
 How a robot gets its ID, where its secret lives, how the AES key is derived, and
 where that key goes. Reference for the mechanics; the reasoning behind the
-choices is in [ROBOT_IDENTITY_AND_KEYS.md](./ROBOT_IDENTITY_AND_KEYS.md), and the
-first-connect flow is in [ENROLLMENT.md](./ENROLLMENT.md).
+choices is in [ROBOT_IDENTITY_AND_KEYS.md](./ROBOT_IDENTITY_AND_KEYS.md), the
+first-connect flow is in [ENROLLMENT.md](./ENROLLMENT.md), and the bench
+procedure for someone holding a board is
+[PILOT_DEVICE_GUIDE.md](./PILOT_DEVICE_GUIDE.md).
 
 The contract in one paragraph: a robot is identified by a 16-byte string
 `MPX-XXXXXXXXXXXX`, and its AES-256 key is derived on the device from a 32-byte
@@ -242,7 +244,7 @@ idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.pilot" -B bui
 python3 tools/mpx_provision.py provision --port /dev/ttyUSB1 --out label.json
 
 # optional: make it permanent
-python3 tools/mpx_provision.py lock --port /dev/ttyUSB1 --confirm
+python3 tools/mpx_provision.py lock --port /dev/ttyUSB1   # then type LOCK
 ```
 
 The station talks `@MPXPROV {"cmd":…}` JSON lines to UART0 at 115200. The
@@ -272,6 +274,7 @@ boot (`components/mpx_identity/mpx_identity.cc`, `load_kconfig_identity()`).
 | firmware still builds with the source switched | CI job `firmware` |
 | enrolment end to end, real PostgreSQL | `core_gateway/tests/test_enroll_e2e.py` (17 checks) |
 | a live board | `mpx_provision.py status` → `sealed`, matching `key_fp` |
+| the whole procedure, for a person holding a board | [PILOT_DEVICE_GUIDE.md](./PILOT_DEVICE_GUIDE.md) |
 
 ## 11. What this does not do yet
 
