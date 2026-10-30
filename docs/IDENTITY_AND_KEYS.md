@@ -222,6 +222,18 @@ key, so a database dump alone does not yield working keys.
 
 ## 9. Provisioning a board
 
+`idf.py flash` **never provisions anything.** It writes images — bootloader,
+partition table, app, models, filesystem — and stops there. A fused identity is
+not an image: it is burned at runtime by the station, over UART, by the
+`@MPXPROV` listener that only the pilot profile compiles in. So the two tools do
+different jobs and you need both:
+
+| | does | runs |
+|---|---|---|
+| `idf.py flash` | writes the firmware that *knows how* to be provisioned | host, over USB |
+| `tools/mpx_provision.py` | generates ID + `S`, burns fuses, seals the key | host, over UART0 |
+| `mpx_enroll.c` | introduces the robot to the cloud | device, on first WiFi connect — automatic |
+
 ```
 # build the pilot profile (listener on, eFuse source)
 idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.pilot" -B build/pilot flash
@@ -237,6 +249,18 @@ The station talks `@MPXPROV {"cmd":…}` JSON lines to UART0 at 115200. The
 decision table (`mpx_prov_sm.c`) is a pure function: nothing burned → burn both;
 key only → burn record; record only → burn key; both and same ID → seal; both and
 different ID → refuse. `lock` is opt-in, because a burned `S` cannot be replaced.
+
+**Reset after provisioning.** The burn happens in a firmware that read its
+identity at boot and found none, and the HMAC peripheral does not expose a
+newly burned key until a reset. Power-cycle (or `Ctrl-T Ctrl-R` in `monitor`)
+or the unit looks provisioned to the station and unprovisioned to itself, and
+never enrols.
+
+The pilot profile is also the only image that currently reads the eFuse identity.
+Flashing the default profile onto a provisioned board would run it as whichever
+development ID `APP_ROBOT_UUID` names — two boards sharing `MPX-DOG-01` look fine
+one at a time — so the Kconfig path detects a burned record and logs an error at
+boot (`components/mpx_identity/mpx_identity.cc`, `load_kconfig_identity()`).
 
 ## 10. Verifying
 

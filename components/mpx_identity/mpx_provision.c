@@ -302,6 +302,13 @@ static void handle_provision(const char *body, bool reseal_only)
              esp_app_get_description() ? esp_app_get_description()->version : "",
              blob_hex);
     reply(out);
+
+    /* This task runs alongside a firmware that read its identity at boot and
+     * found none, and the HMAC peripheral does not see the new key until a
+     * reset. Say so here too: the station's advice is on the other end of a
+     * cable, and whoever is watching the log deserves the same hint. */
+    ESP_LOGI(TAG, "provisioned %s kv=%u -- reset to load the new identity",
+             robot_id, (unsigned)kv);
 }
 
 static void handle_lock(const char *body)

@@ -232,6 +232,18 @@ esp_err_t load_kconfig_identity()
         ESP_LOGW(TAG, "identity: legacy development ID \"%s\" -- it travels "
                       "zero-padded in the frame header", id);
     }
+
+    /* A provisioned board flashed with this image would quietly become whichever
+     * development ID Kconfig names, and two boards sharing "MPX-DOG-01" look
+     * fine one at a time. Say it loudly rather than silently overriding fuses
+     * that cannot be rewritten. */
+    mpx_efuse_record_t burned;
+    if (mpx_efuse_read_record(&burned) == ESP_OK) {
+        ESP_LOGE(TAG, "identity: this board IS provisioned (\"%s\") but the image "
+                      "uses the Kconfig identity -- build with "
+                      "sdkconfig.defaults.pilot", burned.robot_id);
+    }
+
     std::snprintf(s_robot_id, sizeof(s_robot_id), "%s", id);
 
     if (!parse_hex_key(CONFIG_APP_CHAT_AES_KEY_HEX, s_key)) {

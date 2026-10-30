@@ -313,6 +313,14 @@ def cmd_provision(args) -> int:
     else:
         print("unsealed K_v, fingerprint " + record["key_fp"])
         print("  pass --out REGISTRATION.json to write it for the cloud")
+
+    # The eFuse is burned, but the firmware that was running when it happened
+    # read its identity at boot and found nothing: the HMAC peripheral only sees
+    # a newly burned key after a reset. Without this the unit looks provisioned
+    # to the station and unprovisioned to itself until someone power-cycles it
+    # and wonders why enrolment never happened.
+    print("now reset the board (power-cycle or `idf.py -p PORT monitor` then Ctrl-T "
+          "Ctrl-R) so it reads its new identity and enrols")
     return 0
 
 
